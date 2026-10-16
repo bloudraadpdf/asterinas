@@ -16,6 +16,7 @@ use alloc::{
     borrow::ToOwned,
     io::{self, Cursor, Read},
 };
+use core::time::Duration;
 
 use cpio_decoder::{CpioDecoder, CpioEntry, FileMetadata, FileType};
 use device_id::{DeviceId, MajorId, MinorId};
@@ -38,6 +39,7 @@ use crate::{
         vfs::inode::{Inode, MknodType},
     },
     prelude::*,
+    process::credentials::{Gid, Uid},
 };
 
 /// Unpacks the boot initramfs into the bootstrap root filesystem.
@@ -74,12 +76,32 @@ fn unpack_to_rootfs<R: Read>(
     mut decoder: CpioDecoder<R>,
     path_resolver: &PathResolver,
 ) -> Result<()> {
+    let mut hardlinks = BTreeMap::new();
+    let mut directories = Vec::new();
     while let Some(entry_result) = decoder.next() {
         let mut entry = entry_result?;
-        if let Err(e) = try_append_entry_to_rootfs(&mut entry, path_resolver) {
-            warn!("failed to add entry {} to rootfs: {:?}", entry.name(), e);
+        let metadata = entry.metadata().clone();
+        let path = try_append_entry_to_rootfs(&mut entry, path_resolver, &mut hardlinks)?;
+        if metadata.file_type() == FileType::Dir {
+            directories.push((path, metadata));
+        } else {
+            restore_metadata(&path, &metadata)?;
         }
     }
+    // Creating children changes parent timestamps, so restore directories last.
+    for (path, metadata) in directories.into_iter().rev() {
+        restore_metadata(&path, &metadata)?;
+    }
+    Ok(())
+}
+
+fn restore_metadata(path: &Path, metadata: &FileMetadata) -> Result<()> {
+    path.set_owner(Uid::new(metadata.uid()))?;
+    path.set_group(Gid::new(metadata.gid()))?;
+    path.set_mode(InodeMode::from_bits_truncate(metadata.permission_mode()))?;
+    let time = Duration::from_secs(metadata.mtime().into());
+    path.set_atime(time);
+    path.set_mtime(time);
     Ok(())
 }
 
@@ -123,14 +145,18 @@ pub(crate) fn find_init(path_resolver: &PathResolver) -> Result<(Path, &'static 
 fn try_append_entry_to_rootfs<R: Read>(
     entry: &mut CpioEntry<R>,
     path_resolver: &PathResolver,
-) -> Result<()> {
+    hardlinks: &mut BTreeMap<(u32, u32, u32), Path>,
+) -> Result<Path> {
     // Make sure the name is a relative path, and is not end with "/".
     let entry_name = entry.name().trim_start_matches('/').trim_end_matches('/');
     if entry_name.is_empty() {
         return_errno_with_message!(Errno::EINVAL, "invalid entry name");
     }
     if is_dot(entry_name) {
-        return Ok(());
+        if entry.metadata().file_type() != FileType::Dir {
+            return_errno_with_message!(Errno::EINVAL, "root entry is not a directory");
+        }
+        return Ok(path_resolver.root().clone());
     }
 
     // Here we assume that the directory referred by "prefix" must has been created.
@@ -143,20 +169,31 @@ fn try_append_entry_to_rootfs<R: Read>(
         (path_resolver.root().clone(), entry_name)
     };
 
-    let metadata = entry.metadata();
+    let metadata = entry.metadata().clone();
     let mode = InodeMode::from_bits_truncate(metadata.permission_mode());
-    match metadata.file_type() {
+    let path = match metadata.file_type() {
         FileType::File => {
-            let path = parent.new_child(name, InodeType::File, mode)?;
+            let key = (metadata.dev_maj(), metadata.dev_min(), metadata.ino());
+            let path = if metadata.nlink() > 1 {
+                if let Some(path) = hardlinks.get(&key) {
+                    parent.link(path, name)?;
+                    path.clone()
+                } else {
+                    let path = parent.new_child(name, InodeType::File, mode)?;
+                    hardlinks.insert(key, path.clone());
+                    path
+                }
+            } else {
+                parent.new_child(name, InodeType::File, mode)?
+            };
             let writer = InodeWriter {
                 inner: path.inode().as_ref(),
                 offset: 0,
             };
             entry.read_all(writer)?;
+            path
         }
-        FileType::Dir => {
-            let _ = parent.new_child(name, InodeType::Dir, mode)?;
-        }
+        FileType::Dir => parent.new_child(name, InodeType::Dir, mode)?,
         FileType::Link => {
             // Obtain the owned name here. Otherwise, the later mutable borrow of `entry`
             // will conflict with the immutable borrow of `name` here.
@@ -166,25 +203,23 @@ fn try_append_entry_to_rootfs<R: Read>(
             entry.read_all(&mut link_data)?;
             let link_content = core::str::from_utf8(&link_data)?;
 
-            parent.new_symlink_child(&child_name, link_content, mode)?;
+            parent.new_symlink_child(&child_name, link_content, mode)?
         }
         FileType::Char => {
-            let device_id = try_device_id_from_metadata(metadata)?;
-            parent.mknod(name, mode, MknodType::CharDevice(device_id))?;
+            let device_id = try_device_id_from_metadata(&metadata)?;
+            parent.mknod(name, mode, MknodType::CharDevice(device_id))?
         }
         FileType::Block => {
-            let device_id = try_device_id_from_metadata(metadata)?;
-            parent.mknod(name, mode, MknodType::BlockDevice(device_id))?;
+            let device_id = try_device_id_from_metadata(&metadata)?;
+            parent.mknod(name, mode, MknodType::BlockDevice(device_id))?
         }
-        FileType::FiFo => {
-            parent.mknod(name, mode, MknodType::NamedPipe)?;
-        }
+        FileType::FiFo => parent.mknod(name, mode, MknodType::NamedPipe)?,
         FileType::Socket => {
             return_errno_with_message!(Errno::EINVAL, "socket files are not supported in initramfs")
         }
-    }
+    };
 
-    Ok(())
+    Ok(path)
 }
 
 /// A streaming gzip decompressor over an in-memory compressed buffer.
