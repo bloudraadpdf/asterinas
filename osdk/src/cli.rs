@@ -374,6 +374,12 @@ pub struct CargoArgs {
     #[arg(long, help = "Do not activate the `default` features", global = true)]
     pub no_default_features: bool,
     #[arg(
+        long,
+        help = "Build the generated kernel crate with this lockfile",
+        global = true
+    )]
+    pub lockfile: Option<PathBuf>,
+    #[arg(
         long = "config",
         help = "Override a configuration value",
         value_name = "KEY=VALUE",

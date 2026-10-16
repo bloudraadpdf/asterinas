@@ -17,3 +17,8 @@ checks; the patched kernel passes all three.
 The CPIO contract also applies to the existing Unikraft `lib/ukcpio` port.
 This patch uses Asterinas VFS operations and adds no unsafe kernel code.
 Upstream submission is pending.
+
+The OSDK lockfile patch adds `--lockfile PATH` for the generated kernel crate.
+OSDK copies that file into the generated crate and invokes Cargo with `--locked`.
+Tokoloshe owns this lockfile separately from the OSDK builder lockfile. A stale
+kernel lockfile fails before compilation. The OSDK unit tests and Clippy pass.

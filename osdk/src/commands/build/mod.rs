@@ -25,7 +25,7 @@ use crate::{
     cli::BuildArgs,
     config::{
         Config,
-        scheme::{ActionChoice, BootMethod, BootProtocol},
+        scheme::{ActionChoice, BootMethod, BootProtocol, Build},
     },
     error::Errno,
     error_msg,
@@ -141,10 +141,7 @@ pub fn do_cached_build(
     rustflags.push(&build.rustflags);
     let aster_elf = build_kernel_elf(
         config.target_arch,
-        &build.profile,
-        &build.features[..],
-        build.no_default_features,
-        &build.override_configs[..],
+        build,
         &cargo_target_directory,
         &rustflags,
     );
@@ -207,10 +204,7 @@ pub fn do_cached_build(
 
 fn build_kernel_elf(
     arch: Arch,
-    profile: &str,
-    features: &[String],
-    no_default_features: bool,
-    override_configs: &[String],
+    build: &Build,
     cargo_target_directory: impl AsRef<Path>,
     rustflags: &[&str],
 ) -> AsterBin {
@@ -267,8 +261,12 @@ fn build_kernel_elf(
 
     command.env("RUSTFLAGS", rustflags.join(" "));
     command.arg("build");
-    command.arg("--features").arg(features.join(" "));
-    if no_default_features {
+    if let Some(lockfile) = &build.lockfile {
+        std::fs::copy(lockfile, "Cargo.lock").expect("cannot install kernel lockfile");
+        command.arg("--locked");
+    }
+    command.arg("--features").arg(build.features.join(" "));
+    if build.no_default_features {
         command.arg("--no-default-features");
     }
     command.arg("--target").arg(&target_os_string);
@@ -276,8 +274,8 @@ fn build_kernel_elf(
         .arg("--target-dir")
         .arg(cargo_target_directory.as_ref());
     command.args(COMMON_CARGO_ARGS);
-    command.arg("--profile=".to_string() + profile);
-    for override_config in override_configs {
+    command.arg("--profile=".to_string() + &build.profile);
+    for override_config in &build.override_configs {
         command.arg("--config").arg(override_config);
     }
 
@@ -285,7 +283,7 @@ fn build_kernel_elf(
     let mut env_cflags = std::env::var(CFLAGS).unwrap_or_default();
     env_cflags += " -fPIC";
 
-    if features.contains(&"coverage".to_string()) {
+    if build.features.contains(&"coverage".to_string()) {
         // This is a workaround for minicov <https://github.com/Amanieu/minicov/issues/29>,
         // makes coverage work on x86_64-unknown-none.
         env_cflags += " -D__linux__";
@@ -305,7 +303,7 @@ fn build_kernel_elf(
     let aster_bin_path = cargo_target_directory
         .as_ref()
         .join(&target_os_string)
-        .join(profile_name_adapter(profile))
+        .join(profile_name_adapter(&build.profile))
         .join(get_current_crates().remove(0).name);
 
     AsterBin::new(
