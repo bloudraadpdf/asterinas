@@ -16,6 +16,7 @@ use crate::{
     },
     prelude::*,
     process::signal::Pollee,
+    util::net::SockType,
 };
 
 pub(super) struct UnboundDatagram {
@@ -75,6 +76,6 @@ impl datagram_common::Unbound for UnboundDatagram {
 }
 
 fn bind_port(endpoint: &IpEndpoint, can_reuse: bool) -> Result<BoundUdpPort> {
-    let (iface, config) = resolve_bind_iface_and_config(endpoint, can_reuse)?;
+    let (iface, config) = resolve_bind_iface_and_config(endpoint, can_reuse, SockType::SOCK_DGRAM)?;
     Ok(iface.bind_udp(config)?)
 }

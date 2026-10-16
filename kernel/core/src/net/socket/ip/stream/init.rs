@@ -28,6 +28,7 @@ use crate::{
         },
     },
     prelude::*,
+    util::net::SockType,
 };
 
 pub(super) struct InitStream {
@@ -306,6 +307,7 @@ impl InitStream {
 }
 
 fn bind_port(endpoint: &IpEndpoint, can_reuse: bool) -> Result<BoundTcpPort> {
-    let (iface, config) = resolve_bind_iface_and_config(endpoint, can_reuse)?;
+    let (iface, config) =
+        resolve_bind_iface_and_config(endpoint, can_reuse, SockType::SOCK_STREAM)?;
     Ok(iface.bind_tcp(config)?)
 }

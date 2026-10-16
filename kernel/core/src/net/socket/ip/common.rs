@@ -7,21 +7,52 @@ use aster_bigtcp::{
 };
 
 use crate::{
-    net::{iface::Iface, route, socket::util::check_port_privilege},
+    net::{
+        iface::{Iface, iter_all_ifaces},
+        route,
+        socket::util::check_port_privilege,
+    },
     prelude::*,
+    util::net::SockType,
 };
 
 pub(super) fn resolve_bind_iface_and_config(
     endpoint: &IpEndpoint,
     can_reuse: bool,
+    socket_type: SockType,
 ) -> Result<(Arc<Iface>, BindPortConfig)> {
     check_port_privilege(endpoint.port)?;
 
-    let iface = route::lookup_local_iface(endpoint.addr)?;
+    let unspecified = match endpoint.addr {
+        IpAddress::Ipv4(address) => address.is_unspecified(),
+        IpAddress::Ipv6(address) => address.is_unspecified(),
+    };
+    let iface = if unspecified && socket_type == SockType::SOCK_STREAM {
+        wildcard_iface(endpoint.addr)?
+    } else {
+        route::lookup_local_iface(endpoint.addr)?
+    };
 
     let bind_port_config = BindPortConfig::new(*endpoint, can_reuse);
 
     Ok((iface, bind_port_config))
+}
+
+fn wildcard_iface(address: IpAddress) -> Result<Arc<Iface>> {
+    let mut candidates = iter_all_ifaces().filter(|iface| match address {
+        IpAddress::Ipv4(_) => iface.ipv4_cidr().is_some(),
+        IpAddress::Ipv6(_) => iface.ipv6_cidr().is_some(),
+    });
+    let iface = candidates.next().cloned().ok_or_else(|| {
+        Error::with_message(Errno::EADDRNOTAVAIL, "no interface has this address family")
+    })?;
+    if candidates.next().is_some() {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "wildcard bind across interfaces is not supported"
+        );
+    }
+    Ok(iface)
 }
 
 impl From<BindError> for Error {

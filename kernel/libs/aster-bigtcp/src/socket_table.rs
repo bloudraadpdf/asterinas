@@ -4,7 +4,7 @@
 //! for efficiently inserting, looking up, and removing sockets.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::net::Ipv4Addr;
+use core::net::{Ipv4Addr, Ipv6Addr};
 
 use jhash::{jhash_1vals, jhash_3vals, jhash_u32_array};
 use ostd::const_assert;
@@ -12,6 +12,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
 use crate::{
     ext::Ext,
+    iface::addresses_overlap,
     socket::{TcpConnectionBg, TcpListenerBg, UdpSocketBg},
     wire::PortNum,
 };
@@ -32,8 +33,6 @@ pub(crate) struct ListenerKey {
 
 impl ListenerKey {
     pub(crate) const fn new(addr: IpAddress, port: PortNum) -> Self {
-        // FIXME: If the socket is listening on an unspecified address (0.0.0.0),
-        // Linux will get the hash value by port only.
         let hash = hash_addr_port(addr, port);
         Self { addr, port, hash }
     }
@@ -156,14 +155,8 @@ const fn hash_addr_port(addr: IpAddress, port: PortNum) -> SocketHash {
 /// Unlike the Linux inet hashtable, which is shared across a single network namespace,
 /// this table is currently limited to a single interface.
 ///
-// TODO: Modify the table to be shared across a single network namespace
-// to support INADDR_ANY (0.0.0.0).
+// TODO: Share bindings across interfaces for namespace-wide wildcard listeners.
 pub(crate) struct SocketTable<E: Ext> {
-    // TODO: Linux has two hashtables for listeners:
-    // the first is hashed by local address and port,
-    // the second is hashed by local port only.
-    // The second table is the only place where sockets listening on INADDR_ANY (0.0.0.0) can exist.
-    // Since we do not yet support INADDR_ANY, we only have the first table here.
     listener_buckets: Box<[ListenerHashBucket<E>]>,
     connection_buckets: Box<[ConnectionHashBucket<E>]>,
     // Linux does not include UDP sockets in the inet hashtable.
@@ -222,7 +215,7 @@ impl<E: Ext> SocketTable<E> {
         if bucket
             .listeners
             .iter()
-            .any(|tcp_listener| tcp_listener.listener_key() == listener.listener_key())
+            .any(|tcp_listener| tcp_listener.listener_key() == key)
         {
             return Err(listener);
         }
@@ -276,6 +269,29 @@ impl<E: Ext> SocketTable<E> {
             .listeners
             .iter()
             .find(|listener| listener.listener_key() == key)
+    }
+
+    pub(crate) fn has_listener_conflict(&self, key: &ListenerKey) -> bool {
+        self.listener_buckets
+            .iter()
+            .flat_map(|bucket| bucket.listeners.iter())
+            .any(|listener| {
+                let bound = listener.listener_key();
+                bound.port == key.port && addresses_overlap(bound.addr, key.addr)
+            })
+    }
+
+    pub(crate) fn lookup_incoming_listener(
+        &self,
+        key: &ListenerKey,
+    ) -> Option<&Arc<TcpListenerBg<E>>> {
+        self.lookup_listener(key).or_else(|| {
+            let wildcard = match key.addr {
+                IpAddress::Ipv4(_) => IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED),
+                IpAddress::Ipv6(_) => IpAddress::Ipv6(Ipv6Addr::UNSPECIFIED),
+            };
+            self.lookup_listener(&ListenerKey::new(wildcard, key.port))
+        })
     }
 
     pub(crate) fn lookup_connection(
