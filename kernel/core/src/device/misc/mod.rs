@@ -14,6 +14,8 @@ pub(crate) mod http_listen;
 mod hwrng;
 #[cfg(all(target_arch = "x86_64", feature = "cvm_guest"))]
 pub(crate) mod tdxguest;
+#[cfg(feature = "vm_restore")]
+pub(crate) mod vmrestore;
 
 static MISC_MAJOR: Once<MajorIdOwner> = Once::new();
 
@@ -21,6 +23,8 @@ pub(super) fn init_in_first_kthread() {
     MISC_MAJOR.call_once(|| acquire_major(MajorId::new(10)).unwrap());
 
     hwrng::init_in_first_kthread();
+    #[cfg(feature = "vm_restore")]
+    vmrestore::init().expect("VM restore driver initialisation failed");
     #[cfg(feature = "http_listen")]
     http_listen::init();
 

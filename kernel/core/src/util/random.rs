@@ -5,20 +5,41 @@ use spin::Once;
 
 use crate::prelude::*;
 
-static RNG: Once<SpinLock<StdRng>> = Once::new();
+#[cfg(feature = "vm_restore")]
+pub(crate) mod generation;
+
+static RNG: Once<SpinLock<RandomState>> = Once::new();
+
+struct RandomState {
+    rng: StdRng,
+    #[cfg(feature = "vm_restore")]
+    generation: Option<generation::GenerationId>,
+}
 
 /// Fill `dest` with random bytes.
 ///
 /// It's cryptographically secure, as documented in [`rand::rngs::StdRng`].
 pub(crate) fn getrandom(dst: &mut [u8]) {
-    RNG.get().unwrap().lock().fill_bytes(dst);
+    let mut state = RNG.get().unwrap().disable_irq().lock();
+    #[cfg(feature = "vm_restore")]
+    if generation::is_active() {
+        generation::fill(&mut state, dst).expect("snapshot entropy refresh failed");
+        return;
+    }
+    state.rng.fill_bytes(dst);
 }
 
 pub(crate) fn init() {
     // The seed used to initialize the RNG is required to be secure and unpredictable.
     let seed = get_random_seed();
 
-    RNG.call_once(|| SpinLock::new(StdRng::from_seed(seed)));
+    RNG.call_once(|| {
+        SpinLock::new(RandomState {
+            rng: StdRng::from_seed(seed),
+            #[cfg(feature = "vm_restore")]
+            generation: None,
+        })
+    });
 }
 
 fn get_random_seed() -> <StdRng as SeedableRng>::Seed {
