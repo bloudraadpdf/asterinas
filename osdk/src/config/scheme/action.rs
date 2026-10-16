@@ -32,6 +32,8 @@ pub struct BuildScheme {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Build {
+    #[serde(default)]
+    pub lockfile: Option<std::path::PathBuf>,
     pub profile: String,
     #[serde(default)]
     pub features: Vec<String>,
@@ -51,6 +53,7 @@ pub struct Build {
 impl Default for Build {
     fn default() -> Self {
         Self {
+            lockfile: None,
             profile: "dev".to_string(),
             features: Vec::new(),
             no_default_features: false,
@@ -66,6 +69,9 @@ impl Default for Build {
 impl Build {
     pub fn apply_common_args(&mut self, common_args: &CommonArgs) {
         let build_args = &common_args.build_args;
+        if let Some(lockfile) = &build_args.lockfile {
+            self.lockfile = Some(lockfile.clone());
+        }
         if let Some(profile) = build_args.profile() {
             self.profile.clone_from(&profile);
         }
@@ -122,6 +128,7 @@ impl BuildScheme {
 
     pub fn finalize(self) -> Build {
         Build {
+            lockfile: None,
             profile: self.profile.unwrap_or_else(|| "dev".to_string()),
             features: self.features,
             no_default_features: self.no_default_features,
