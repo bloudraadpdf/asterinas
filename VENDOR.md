@@ -55,3 +55,11 @@ OSTD's `rcu_barrier` waits for queued and running callbacks, including callbacks
 queued by another callback. The monitor counts a callback until its body returns,
 so completion of a later grace period cannot hide an earlier running callback.
 The nested-callback OSTD test passes under Firecracker.
+
+The optional AMD64 `vm_restore` feature ports the VMClock and VMGenID device
+ABIs from Unikraft. The devices check the clock ABI, use sequence reads, and
+supply descriptor events, refresh and quiescence operations. Random output checks
+the shared generation before use; restore refresh requires fresh hardware entropy
+and completion of the vsock connection reset. Clock interrupts reseed before
+notification. The driver boots under Firecracker. Snapshot qualification remains
+pending; this feature does not establish Tokoloshe runtime compatibility.

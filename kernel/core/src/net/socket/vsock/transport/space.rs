@@ -318,6 +318,9 @@ impl VsockSpace {
 
         // The reload of the guest CID is protectd by the `sockets` lock.
         self.device.reload_guest_id();
+        drop(sockets);
+        #[cfg(feature = "vm_restore")]
+        crate::device::misc::vmrestore::transport_restored();
     }
 
     pub(super) fn process_timer_events(&self, events: Vec<TimerEvent>) {
