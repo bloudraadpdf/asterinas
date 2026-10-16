@@ -58,3 +58,12 @@ the shared generation before use; restore refresh requires fresh hardware entrop
 and completion of the vsock connection reset. Clock interrupts reseed before
 notification. The driver boots under Firecracker. Snapshot qualification remains
 pending; this feature does not establish Tokoloshe runtime compatibility.
+
+`clock_settime(CLOCK_REALTIME)` requires `CAP_SYS_TIME` in the initial user
+namespace. It rejects malformed times, values outside Linux's clock range and
+values before the monotonic clock. Clock changes update the syscall, coarse,
+`/proc/stat` boot-time and vDSO values; monotonic clocks retain their timebase.
+The consumer ABI probe fails with `ENOSYS` before this patch and passes under
+Firecracker with it. Checks include forward and backward changes, fractional
+seconds, vDSO reads, monotonic clocks, rejected inputs and unprivileged denial.
+See the [Linux time-setting contract](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/heads/master/kernel/time/timekeeping.c).

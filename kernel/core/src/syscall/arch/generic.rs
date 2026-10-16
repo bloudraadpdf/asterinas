@@ -22,6 +22,7 @@ macro_rules! import_generic_syscall_entries {
             chown::{sys_fchown, sys_fchownat},
             chroot::sys_chroot,
             clock_gettime::sys_clock_gettime,
+            clock_settime::sys_clock_settime,
             clone::{sys_clone, sys_clone3},
             close::{sys_close, sys_close_range},
             connect::sys_connect,
@@ -300,6 +301,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_TIMER_GETTIME = 108          => sys_timer_gettime(args[..2]);
             SYS_TIMER_SETTIME = 110          => sys_timer_settime(args[..4]);
             SYS_TIMER_DELETE = 111           => sys_timer_delete(args[..1]);
+            SYS_CLOCK_SETTIME = 112 => sys_clock_settime(args[..2]);
             SYS_CLOCK_GETTIME = 113          => sys_clock_gettime(args[..2]);
             SYS_CLOCK_NANOSLEEP = 115        => sys_clock_nanosleep(args[..4]);
             SYS_PTRACE = 117                 => sys_ptrace(args[..4]);
