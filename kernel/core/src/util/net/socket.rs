@@ -2,6 +2,7 @@
 
 use super::read_socket_addr_from_user;
 use crate::{
+    fs::file::file_table::FdFlags,
     net::socket::util::{ControlMessage, RecvFlags, SocketAddr},
     prelude::*,
     util::{
@@ -138,6 +139,7 @@ impl CUserMsgHdr {
     pub(crate) fn write_control_messages_to_user(
         &self,
         control_messages: &[ControlMessage],
+        fd_flags: FdFlags,
         user_space: &CurrentUserSpace,
     ) -> Result<(u32, RecvFlags)> {
         if self.msg_control == 0 {
@@ -152,7 +154,8 @@ impl CUserMsgHdr {
         }
 
         let mut writer = user_space.writer(self.msg_control, self.msg_controllen)?;
-        let (write_len, output_flags) = ControlMessage::write_all_to(control_messages, &mut writer);
+        let (write_len, output_flags) =
+            ControlMessage::write_all_to(control_messages, &mut writer, fd_flags);
         Ok((write_len as u32, output_flags))
     }
 

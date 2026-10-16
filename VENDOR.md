@@ -27,3 +27,10 @@ rejects missing files and directories without a panic. Installation reads
 the input before writing the generated lockfile, so equal paths and hard links
 cannot truncate the input. Regression tests cover invalid paths, stale locks
 and aliased input and output files.
+
+The descriptor patch honours `MSG_CMSG_CLOEXEC` when `recvmsg` installs
+`SCM_RIGHTS` descriptors. Flags are set during file-table insertion and returned
+in `msg_flags`. Tokoloshe's HTTP launcher requires this property for its
+notification and release descriptors. The upstream Unix-stream regression
+checks both flag values. The consumer descriptor-handoff and release-pipe probe
+fails without the patch and passes on AMD64 Firecracker with it.
