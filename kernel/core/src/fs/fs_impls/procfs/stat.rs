@@ -21,7 +21,7 @@ use crate::{
     process::collect_process_creation_count,
     sched::nr_queued_and_running,
     thread::collect_context_switch_count,
-    time::{START_TIME, SystemTime, cpu_time_stats::CpuTimeStatsManager},
+    time::{SystemTime, cpu_time_stats::CpuTimeStatsManager},
 };
 
 /// Represents the inode at `/proc/stat`.
@@ -96,15 +96,7 @@ impl StatFileOps {
         writeln!(printer, "ctxt {}", context_switches)?;
 
         // Boot time (seconds since UNIX epoch)
-        if let Some(start_time) = START_TIME.get() {
-            let boot_time = start_time
-                .duration_since(&SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            writeln!(printer, "btime {}", boot_time)?;
-        } else {
-            writeln!(printer, "btime {}", 0)?;
-        }
+        writeln!(printer, "btime {}", SystemTime::boot_duration().as_secs())?;
 
         // Process count (number of created processes since boot)
         writeln!(printer, "processes {}", collect_process_creation_count())?;

@@ -12,14 +12,12 @@ use crate::prelude::*;
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SystemTime(PrimitiveDateTime);
 
-pub(crate) static START_TIME: Once<SystemTime> = Once::new();
-pub(super) static START_TIME_AS_DURATION: Once<Duration> = Once::new();
+static WALL_OFFSET: Once<SpinLock<Duration>> = Once::new();
 
 pub(super) fn init() {
     let start_time = convert_system_time(read_start_time()).unwrap();
-    START_TIME_AS_DURATION
-        .call_once(|| start_time.duration_since(&SystemTime::UNIX_EPOCH).unwrap());
-    START_TIME.call_once(|| start_time);
+    WALL_OFFSET
+        .call_once(|| SpinLock::new(start_time.duration_since(&SystemTime::UNIX_EPOCH).unwrap()));
 }
 
 impl SystemTime {
@@ -40,12 +38,35 @@ impl SystemTime {
 
     /// Returns the current system time
     pub(crate) fn now() -> Self {
-        // The get real time result should always be valid
-        START_TIME
-            .get()
+        let offset = WALL_OFFSET.get().unwrap().disable_irq().lock();
+        Self::UNIX_EPOCH
+            .checked_add(*offset + read_monotonic_time())
             .unwrap()
-            .checked_add(read_monotonic_time())
-            .unwrap()
+    }
+
+    pub(crate) fn boot_duration() -> Duration {
+        *WALL_OFFSET.get().unwrap().disable_irq().lock()
+    }
+
+    pub(crate) fn realtime_at(monotonic: Duration) -> Duration {
+        Self::boot_duration() + monotonic
+    }
+
+    pub(crate) fn set_realtime(realtime: Duration) -> Result<()> {
+        if realtime.as_secs() >= (i64::MAX / super::NSEC_PER_SEC) as u64 {
+            return_errno_with_message!(Errno::EINVAL, "system time exceeds the Linux clock range");
+        }
+        {
+            let mut offset = WALL_OFFSET.get().unwrap().disable_irq().lock();
+            *offset = realtime.checked_sub(read_monotonic_time()).ok_or_else(|| {
+                Error::with_message(Errno::EINVAL, "real time precedes monotonic time")
+            })?;
+        }
+        // Lock order: coarse clock or vDSO data -> wall offset, never the reverse.
+        super::clocks::update_coarse_clock();
+        #[cfg(not(target_arch = "loongarch64"))]
+        crate::vdso::refresh_wall_clock();
+        Ok(())
     }
 
     /// Add a duration to self. If the result does not exceed inner bounds return Some(t), else return None.
