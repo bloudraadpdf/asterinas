@@ -22,6 +22,8 @@ default = ["cvm_guest"]
 coverage = ["aster-core/coverage"]
 cvm_guest = ["aster-core/cvm_guest"]
 pvh_boot = ["aster-core/pvh_boot"]
+http_listen = ["aster-core/http_listen"]
+privileged_vsock = ["aster-core/privileged_vsock"]
 riscv_sv39_mode = ["aster-core/riscv_sv39_mode"]
 
 [lints]
