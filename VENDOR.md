@@ -50,3 +50,8 @@ root table. Firecracker also stores live clock and generation pages there.
 OSTD's read-only `SharedFirmwareMemory` API accepts only fully reserved pages
 in the x86 firmware window. It rejects overlaps with live memory and exposes no
 write API. Its mapping checks pass as an OSTD kernel test under Firecracker.
+
+OSTD's `rcu_barrier` waits for queued and running callbacks, including callbacks
+queued by another callback. The monitor counts a callback until its body returns,
+so completion of a later grace period cannot hide an earlier running callback.
+The nested-callback OSTD test passes under Firecracker.

@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use crate::{
     cpu::{AtomicCpuSet, CpuId, CpuSet, PinCurrentCpu},
     prelude::*,
-    sync::SpinLock,
+    sync::{SpinLock, WaitQueue},
     task::atomic_mode::AsAtomicModeGuard,
 };
 
@@ -15,6 +15,7 @@ use crate::{
 pub(super) struct RcuMonitor {
     is_monitoring: AtomicBool,
     state: SpinLock<State>,
+    callbacks_done: WaitQueue,
 }
 
 impl RcuMonitor {
@@ -26,6 +27,7 @@ impl RcuMonitor {
         Self {
             is_monitoring: AtomicBool::new(false),
             state: SpinLock::new(State::new()),
+            callbacks_done: WaitQueue::new(),
         }
     }
 
@@ -70,13 +72,24 @@ impl RcuMonitor {
         }
     }
 
-    pub(super) fn after_grace_period<F>(&self, f: F)
+    pub(super) fn after_grace_period<F>(&'static self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
         let mut state = self.state.disable_irq().lock();
 
-        state.next_callbacks.push_back(Box::new(f));
+        state.pending_callbacks = state.pending_callbacks.checked_add(1).unwrap();
+        state.next_callbacks.push_back(Box::new(move || {
+            f();
+            let completed = {
+                let mut state = self.state.disable_irq().lock();
+                state.pending_callbacks -= 1;
+                state.pending_callbacks == 0
+            };
+            if completed {
+                self.callbacks_done.wake_all();
+            }
+        }));
 
         if !state.current_gp.is_complete() {
             return;
@@ -86,11 +99,17 @@ impl RcuMonitor {
         state.current_gp.restart(callbacks);
         self.is_monitoring.store(true, Relaxed);
     }
+
+    pub(super) fn barrier(&self) {
+        self.callbacks_done
+            .wait_until(|| (self.state.disable_irq().lock().pending_callbacks == 0).then_some(()));
+    }
 }
 
 struct State {
     current_gp: GracePeriod,
     next_callbacks: Callbacks,
+    pending_callbacks: usize,
 }
 
 impl State {
@@ -98,6 +117,7 @@ impl State {
         Self {
             current_gp: GracePeriod::new(),
             next_callbacks: VecDeque::new(),
+            pending_callbacks: 0,
         }
     }
 }
@@ -139,5 +159,39 @@ impl GracePeriod {
         self.is_complete = false;
         self.cpu_mask.store(&CpuSet::new_empty(), Relaxed);
         self.callbacks = callbacks;
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use super::*;
+    use crate::prelude::ktest;
+
+    #[ktest]
+    fn barrier_counts_running_and_nested_callbacks() {
+        let monitor = Box::leak(Box::new(RcuMonitor::new()));
+        let monitor: &'static RcuMonitor = monitor;
+        monitor.after_grace_period(move || {
+            assert_eq!(monitor.state.disable_irq().lock().pending_callbacks, 1);
+            monitor.after_grace_period(|| {});
+            assert_eq!(monitor.state.disable_irq().lock().pending_callbacks, 2);
+        });
+        let first = monitor
+            .state
+            .disable_irq()
+            .lock()
+            .current_gp
+            .take_callbacks();
+        assert_eq!(monitor.state.disable_irq().lock().pending_callbacks, 1);
+        for callback in first {
+            callback();
+        }
+        assert_eq!(monitor.state.disable_irq().lock().pending_callbacks, 1);
+        let nested = core::mem::take(&mut monitor.state.disable_irq().lock().next_callbacks);
+        for callback in nested {
+            callback();
+        }
+        assert_eq!(monitor.state.disable_irq().lock().pending_callbacks, 0);
+        monitor.barrier();
     }
 }
