@@ -539,6 +539,14 @@ pub(crate) unsafe fn finish_grace_period() {
     }
 }
 
+/// Waits until all queued and running RCU callbacks have completed.
+///
+/// This includes callbacks queued by another callback. Call from a sleepable
+/// context, outside RCU read-side critical sections and RCU callbacks.
+pub fn rcu_barrier() {
+    RCU_MONITOR.get().unwrap().barrier();
+}
+
 static RCU_MONITOR: Once<RcuMonitor> = Once::new();
 
 pub(super) fn init() {
