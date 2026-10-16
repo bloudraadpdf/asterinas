@@ -10,6 +10,8 @@
 pub(crate) mod io_mem;
 
 pub use self::io_mem::IoMem;
+#[cfg(all(target_arch = "x86_64", feature = "pvh_boot"))]
+pub mod shared_firmware;
 #[cfg_attr(target_arch = "loongarch64", expect(unused_imports))]
 pub(crate) use self::io_mem::{IoMemAllocatorBuilder, Sensitive};
 

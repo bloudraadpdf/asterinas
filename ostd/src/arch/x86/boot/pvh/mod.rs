@@ -234,12 +234,6 @@ impl ToEarlyBootInfo for HvmStartInfoV0 {
     ) -> MemoryRegionArray {
         let mut regions = MemoryRegionArray::new();
 
-        let acpi_root_table_address = if self.rsdp_paddr == 0 {
-            super::find_acpi_root_table_address()
-        } else {
-            None
-        };
-
         // The memory-map fields are only valid in version 1 and later.
         if self.version >= 1 {
             // SAFETY: `version >= 1` guarantees the V1 fields are present in the
@@ -249,12 +243,8 @@ impl ToEarlyBootInfo for HvmStartInfoV0 {
                 for entry in memmap {
                     let base = entry.addr.try_into().unwrap();
                     let len = entry.size.try_into().unwrap();
-                    let typ = super::effective_region_type(
-                        parse_memory_region_type(entry.typ),
-                        base,
-                        len,
-                        acpi_root_table_address,
-                    );
+                    // A PVH reserved region can contain live firmware devices alongside ACPI.
+                    let typ = parse_memory_region_type(entry.typ);
 
                     regions.push(MemoryRegion::new(base, len, typ)).unwrap();
                 }

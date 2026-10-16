@@ -44,3 +44,9 @@ Separate application processes retain the kernel's normal credential checks.
 The AMD64 consumer probe checks notification delivery, wrong-port and invalid
 requests, unprivileged vsock denial, privilege escalation and access to the
 privileged process's descriptors. Kernel Clippy passes with both features.
+
+PVH keeps reserved memory reserved even when the same region contains an ACPI
+root table. Firecracker also stores live clock and generation pages there.
+OSTD's read-only `SharedFirmwareMemory` API accepts only fully reserved pages
+in the x86 firmware window. It rejects overlaps with live memory and exposes no
+write API. Its mapping checks pass as an OSTD kernel test under Firecracker.
