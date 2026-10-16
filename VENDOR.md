@@ -22,3 +22,10 @@ The OSDK lockfile patch adds `--lockfile PATH` for the generated kernel crate.
 OSDK copies that file into the generated crate and invokes Cargo with `--locked`.
 Tokoloshe owns this lockfile separately from the OSDK builder lockfile. A stale
 kernel lockfile fails before compilation. The OSDK unit tests and Clippy pass.
+
+The descriptor patch honours `MSG_CMSG_CLOEXEC` when `recvmsg` installs
+`SCM_RIGHTS` descriptors. Flags are set during file-table insertion and returned
+in `msg_flags`. Tokoloshe's HTTP launcher requires this property for its
+notification and release descriptors. The upstream Unix-stream regression
+checks both flag values. The consumer descriptor-handoff and release-pipe probe
+fails without the patch and passes on AMD64 Firecracker with it.
