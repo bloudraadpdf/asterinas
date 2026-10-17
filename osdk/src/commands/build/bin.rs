@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -16,7 +16,7 @@ use crate::{
         bin::{AsterBin, AsterBinType, AsterBzImageMeta},
         file::BundleFile,
     },
-    util::{get_current_crates, hard_link_or_copy, new_command_checked_exists},
+    util::{get_current_crates, new_command_checked_exists},
 };
 
 pub fn make_install_bzimage(
@@ -96,12 +96,14 @@ pub fn make_stripped_boot_elf(
         install_dir.as_ref().join(elf_name + ".elf")
     };
 
+    let staged = tempfile::NamedTempFile::new_in(install_dir.as_ref())
+        .expect("cannot create a boot ELF staging file");
     if strip {
         // We use rust-strip to reduce the kernel image size.
         let status = new_command_checked_exists("rust-strip")
             .arg(elf.path())
             .arg("-o")
-            .arg(result_elf_path.as_os_str())
+            .arg(staged.path())
             .status();
 
         match status {
@@ -120,8 +122,12 @@ pub fn make_stripped_boot_elf(
         }
     } else {
         // Copy the ELF file.
-        hard_link_or_copy(elf.path(), &result_elf_path).unwrap();
+        fs::copy(elf.path(), staged.path()).expect("cannot copy the boot ELF");
     }
+
+    staged
+        .persist(&result_elf_path)
+        .expect("cannot install the boot ELF");
 
     AsterBin::new(
         &result_elf_path,
@@ -282,4 +288,43 @@ fn encode_kernel_to_file(aster_elf: &AsterBin, encoding: PayloadEncoding) -> Pat
         .unwrap();
 
     encoded_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bundle::bin::AsterElfMeta;
+
+    #[test]
+    fn qemu_packaging_does_not_modify_the_compiler_output() {
+        for existing_hard_link in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("kernel");
+            let output = directory.path().join("kernel.elf");
+            let mut bytes = [0u8; 64];
+            bytes[18] = 62;
+            std::fs::write(&source, bytes).unwrap();
+            if existing_hard_link {
+                std::fs::hard_link(&source, &output).unwrap();
+            }
+            let kernel = AsterBin::new(
+                &source,
+                Arch::X86_64,
+                AsterBinType::Elf(AsterElfMeta {
+                    has_linux_header: false,
+                    has_pvh_header: false,
+                    has_multiboot_header: true,
+                    has_multiboot2_header: true,
+                }),
+                "test".into(),
+                false,
+            );
+            let installed = make_stripped_boot_elf(directory.path(), &kernel, false);
+            let adapted = make_elf_for_qemu(installed);
+            assert_eq!(std::fs::read(&source).unwrap(), bytes);
+            let mut expected = bytes;
+            expected[18] = 3;
+            assert_eq!(std::fs::read(adapted.path()).unwrap(), expected);
+        }
+    }
 }
