@@ -9,10 +9,12 @@ pub(crate) mod thread_info;
 pub mod utils;
 pub mod vfs;
 
+#[cfg(feature = "configfs")]
+pub(crate) use fs_impls::configfs;
 pub use fs_impls::devtmpfs;
 pub(crate) use fs_impls::{cgroupfs, devpts, procfs, pseudofs, ramfs, sysfs, tmpfs};
 #[cfg(feature = "filesystems_extra")]
-pub(crate) use fs_impls::{configfs, exfat, ext2};
+pub(crate) use fs_impls::{exfat, ext2};
 
 use crate::{
     fs::{
