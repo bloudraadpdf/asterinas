@@ -30,16 +30,9 @@ fn parse_bootloader_name() -> &'static str {
     "Unknown"
 }
 
-fn parse_initramfs() -> Option<&'static [u8]> {
+fn parse_initramfs() -> Option<core::ops::Range<usize>> {
     let (start, end) = parse_initramfs_range()?;
-
-    let base_va = paddr_to_vaddr(start);
-    let length = end - start;
-    // SAFETY:
-    // 1. The initramfs is safe to read because of the contract with the loader.
-    // 2. We reserve the initramfs region in `parse_memory_regions`, so it will live as an immutable
-    //    reference for `'static`.
-    Some(unsafe { core::slice::from_raw_parts(base_va as *const u8, length) })
+    Some(start..end)
 }
 
 fn parse_acpi_arg() -> BootloaderAcpiArg {

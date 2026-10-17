@@ -25,14 +25,29 @@ For a small guest RAM allocation, also enable `pvh_boot_only` and disable
 all default features:
 
 ```bash
-cargo osdk build --target-arch x86_64 --boot-method vmm-direct \
-    --features pvh_boot_only --no-default-features
+OSTD_TASK_STACK_SIZE_IN_PAGES=32 cargo osdk build \
+    --target-arch x86_64 --boot-method vmm-direct --profile release-microvm \
+    --features pvh_boot_only,log_max_level_info --no-default-features
 ```
 
 This feature loads the kernel at 16 MiB and removes the Linux and Multiboot
 entry points and headers. OSDK rejects Linux and GRUB image packaging for this
 kernel. Builds without `pvh_boot_only` keep the Linux entry points at `0x8001000` and `0x8001200`.
 The guest must still have enough RAM for its kernel, archive and application.
+
+In `pvh_boot_only` builds, OSTD owns the boot archive until the kernel has
+unpacked it. Dropping that owner clears and registers its full physical pages
+with the frame allocator. Shared edge pages and pages that overlap retained
+boot strings stay reserved. Other boot configurations retain their archive
+reservation. `BootInfo::take_initramfs()` transfers the archive once; byte
+borrows cannot outlive its owner.
+
+The `release-microvm` profile uses size optimisation and full LTO. The
+example reserves 128 KiB per task stack and retains its guard pages. Size
+optimisation can retain a large temporary in gzip initialisation; 32 KiB
+stacks are insufficient for this profile. `log_max_level_info` removes
+kernel debug messages at compile time and keeps informational messages,
+warnings and errors.
 
 The output kernel image is:
 
