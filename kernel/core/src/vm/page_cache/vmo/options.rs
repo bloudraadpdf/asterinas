@@ -69,6 +69,7 @@ impl VmoOptions {
     }
 
     /// Creates options for a page-cache VMO with a backend.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn new_page_cache(size: usize, backend: Weak<dyn PageCacheBackend>) -> Self {
         Self::new(size).flags(VmoFlags::RESIZABLE).backend(backend)
     }
@@ -84,6 +85,7 @@ impl VmoOptions {
     }
 
     /// Sets the backend for the VMO.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn backend(mut self, backend: Weak<dyn PageCacheBackend>) -> Self {
         self.backend = Some(backend);
         self

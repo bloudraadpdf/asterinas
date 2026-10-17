@@ -3,11 +3,15 @@
 use alloc::borrow::ToOwned;
 
 use aster_block::{BLOCK_SIZE, BlockDevice, SECTOR_SIZE, bio::BioStatus};
+#[cfg(feature = "storage_nvme")]
 use aster_nvme::NvmeBlockDevice;
+#[cfg(feature = "virtio_devices")]
 use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
 use device_id::DeviceId;
 use ostd::mm::VmIo;
 
+#[cfg(any(feature = "virtio_devices", feature = "storage_nvme"))]
+use crate::thread::kernel_thread::ThreadOptions;
 use crate::{
     context::current_userspace,
     device::{Device, DeviceType},
@@ -20,39 +24,38 @@ use crate::{
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
-    thread::kernel_thread::ThreadOptions,
     util::ioctl::RawIoctl,
 };
 
 pub(super) fn init_in_first_kthread() {
+    #[cfg(any(feature = "virtio_devices", feature = "storage_nvme"))]
     for device in aster_block::collect_all() {
         if device.is_partition() {
             continue;
         }
 
-        // Spawn threads for virtio block devices
+        #[cfg(feature = "virtio_devices")]
         if device.downcast_ref::<VirtIoBlockDevice>().is_some() {
-            let device_clone = device.clone();
-            let task_fn = move || {
-                info!("spawn the virtio-block thread");
-                let virtio_block_device = device_clone.downcast_ref::<VirtIoBlockDevice>().unwrap();
+            let device = device.clone();
+            ThreadOptions::new(move || {
+                let device = device.downcast_ref::<VirtIoBlockDevice>().unwrap();
                 loop {
-                    virtio_block_device.handle_requests();
+                    device.handle_requests();
                 }
-            };
-            ThreadOptions::new(task_fn).spawn();
+            })
+            .spawn();
+            continue;
         }
-        // Spawn threads for NVMe block devices
-        else if device.downcast_ref::<NvmeBlockDevice>().is_some() {
-            let device_clone = device.clone();
-            let task_fn = move || {
-                info!("spawn the nvme-block thread");
-                let nvme_block_device = device_clone.downcast_ref::<NvmeBlockDevice>().unwrap();
+        #[cfg(feature = "storage_nvme")]
+        if device.downcast_ref::<NvmeBlockDevice>().is_some() {
+            let device = device.clone();
+            ThreadOptions::new(move || {
+                let device = device.downcast_ref::<NvmeBlockDevice>().unwrap();
                 loop {
-                    nvme_block_device.handle_requests();
+                    device.handle_requests();
                 }
-            };
-            ThreadOptions::new(task_fn).spawn();
+            })
+            .spawn();
         }
     }
 

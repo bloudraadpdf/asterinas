@@ -3,7 +3,9 @@
 use device_id::{DeviceId, MajorId, MinorId};
 use ostd::sync::LocalIrqDisabled;
 
-use self::{line_discipline::LineDiscipline, termio::CFontOp};
+use self::line_discipline::LineDiscipline;
+#[cfg(feature = "console_video")]
+use self::termio::CFontOp;
 use crate::{
     device::{Device, DeviceType},
     dispatch_ioctl,
@@ -24,11 +26,13 @@ mod device;
 mod driver;
 mod file;
 mod flags;
+#[cfg(feature = "virtio_devices")]
 mod hvc;
 pub(super) mod ioctl_defs;
 mod line_discipline;
 mod serial;
 pub(super) mod termio;
+#[cfg(feature = "console_video")]
 mod vt;
 
 pub(crate) use device::CONSOLE_DEVICE_ID;
@@ -36,9 +40,11 @@ pub(super) use driver::TtyDriver;
 pub(super) use flags::TtyFlags;
 
 pub(super) fn init_in_first_process() -> Result<()> {
+    #[cfg(feature = "virtio_devices")]
     hvc::init_in_first_process()?;
     serial::init_in_first_process()?;
     device::init_in_first_process()?;
+    #[cfg(feature = "console_video")]
     vt::init_in_first_process()?;
 
     Ok(())

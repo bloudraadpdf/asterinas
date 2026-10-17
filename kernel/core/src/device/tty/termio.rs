@@ -456,6 +456,7 @@ pub(crate) struct CWinSize {
 /// A font operation; `struct console_font_op` in Linux.
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v6.15/source/include/uapi/linux/kd.h#L159>.
+#[cfg(feature = "console_video")]
 #[padding_struct]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod)]
@@ -468,6 +469,7 @@ pub(crate) struct CFontOp {
     pub(super) data: usize,
 }
 
+#[cfg(feature = "console_video")]
 impl CFontOp {
     // https://elixir.bootlin.com/linux/v6.15/source/include/uapi/linux/kd.h#L177
     pub(super) const OP_SET: u32 = 0;

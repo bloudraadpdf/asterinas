@@ -138,6 +138,7 @@ impl Inode for PtySlaveInode {
         self.metadata.write().last_modify_at = time;
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.metadata.read().last_meta_change_at
     }

@@ -38,6 +38,7 @@ impl IoctlCmd {
         Self(cmd)
     }
 
+    #[cfg(any(feature = "console_video", ktest))]
     pub(super) const fn as_u32(self) -> u32 {
         self.0
     }
@@ -47,6 +48,7 @@ impl IoctlCmd {
         self.0 as u8
     }
 
+    #[cfg(any(feature = "console_video", ktest))]
     pub(super) const fn set_nr(&mut self, nr: u8) {
         // Bits 0..=7
         self.0 = (self.0 & !0xFF) | (nr as u32);

@@ -20,6 +20,7 @@ impl VirtioVsockConfig {
             transport
                 .device_config_mem()
                 .map(|memory| SafePtr::new(memory, 0)),
+            #[cfg(feature = "pci")]
             transport.device_config_bar(),
         )
     }

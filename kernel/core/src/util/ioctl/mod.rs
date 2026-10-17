@@ -537,11 +537,13 @@ macro_rules! dispatch_ioctl {
 ///
 /// The enum variant of the ioctl can be obtained by calling [`IoctlEnum::discriminant`],
 /// whose value is equal to `nr & ENUM_MASK`.
+#[cfg(any(feature = "console_video", ktest))]
 pub(crate) struct IoctlEnum<const MAGIC: u8, const BASE_NR: u8, const ENUM_MASK: u8, D> {
     base_ioctl: Ioctl<MAGIC, BASE_NR, /* IS_MODERN = */ true, D>,
     discriminant: u8,
 }
 
+#[cfg(any(feature = "console_video", ktest))]
 impl<const MAGIC: u8, const BASE_NR: u8, const ENUM_MASK: u8, D: DataSpec>
     IoctlEnum<MAGIC, BASE_NR, ENUM_MASK, D>
 {
@@ -575,6 +577,7 @@ impl<const MAGIC: u8, const BASE_NR: u8, const ENUM_MASK: u8, D: DataSpec>
     }
 }
 
+#[cfg(any(feature = "console_video", ktest))]
 impl<const MAGIC: u8, const BASE_NR: u8, const ENUM_MASK: u8, D>
     IoctlEnum<MAGIC, BASE_NR, ENUM_MASK, D>
 {

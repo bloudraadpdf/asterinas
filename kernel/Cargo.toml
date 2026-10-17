@@ -10,16 +10,21 @@ ostd.workspace = true
 # High-level component crates.
 #
 # Keep this list in sync with the `extern crate` declarations in `src/lib.rs`.
-aster-drm.workspace = true
-aster-simpledrm.workspace = true
+aster-drm = { workspace = true, optional = true }
+aster-simpledrm = { workspace = true, optional = true }
 aster-uart.workspace = true
 
 [target.x86_64-unknown-none.dependencies]
-aster-i8042.workspace = true
+aster-i8042 = { workspace = true, optional = true }
 
 [features]
 log_max_level_info = ["aster-core/log_max_level_info"]
-default = ["cvm_guest"]
+default = ["cvm_guest", "console_video", "storage_nvme", "filesystems_extra", "virtio_devices", "virtio_pci"]
+console_video = ["aster-core/console_video", "dep:aster-drm", "dep:aster-simpledrm", "dep:aster-i8042"]
+storage_nvme = ["aster-core/storage_nvme"]
+filesystems_extra = ["aster-core/filesystems_extra"]
+virtio_devices = ["aster-core/virtio_devices"]
+virtio_pci = ["aster-core/virtio_pci"]
 coverage = ["aster-core/coverage"]
 cvm_guest = ["aster-core/cvm_guest"]
 pvh_boot = ["aster-core/pvh_boot"]

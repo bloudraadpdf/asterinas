@@ -22,6 +22,7 @@ use core::{
 };
 
 use align_ext::AlignExt;
+#[cfg(any(feature = "filesystems_extra", ktest))]
 use io_util::batch::IoBatch;
 use ostd::{
     mm::{HasPaddr, io::util::HasVmReaderWriter},
@@ -29,10 +30,12 @@ use ostd::{
 };
 use xarray::{Cursor, LockedXArray, XArray};
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
+use crate::vm::page_cache::PageRun;
 use crate::{
     prelude::*,
     vm::{
-        page_cache::{CachePage, CachePageExt, PageCacheBackend, PageRun, cache_page::PageState},
+        page_cache::{CachePage, CachePageExt, PageCacheBackend, cache_page::PageState},
         vmar::Rmap,
     },
 };
@@ -842,6 +845,7 @@ pub(crate) struct BackedVmo<'a> {
 }
 
 enum PageSelection {
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     Flush,
     Evict,
 }
@@ -850,14 +854,18 @@ impl PageSelection {
     fn should_collect(&self, page: &CachePage) -> bool {
         let state = page.state();
         match self {
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             PageSelection::Flush if state.is_dirty() => true,
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             PageSelection::Flush if state.is_uninit() => false,
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             PageSelection::Flush if let Some(locked_page) = page.try_lock_guard() => {
                 locked_page.is_writing_back()
             }
             // We need to wait for all the pages that are being written back to finish before
             // returning from `flush()`. But we don't know whether this page is being writing back
             // because `try_lock_guard()` fails. So let's be conservative and collect this page.
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             PageSelection::Flush => true,
             PageSelection::Evict => state.is_up_to_date(),
         }
@@ -866,6 +874,7 @@ impl PageSelection {
 
 impl<'a> BackedVmo<'a> {
     /// Writes back dirty pages in the specified byte range to the backend storage.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(super) fn flush_dirty_pages(&self, range: &Range<usize>) -> Result<()> {
         if range.start >= self.size() {
             return Ok(());

@@ -319,6 +319,7 @@ impl Inode for OverlayInode {
         self.real_object().real_inode().mtime()
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.real_object().real_inode().ctime()
     }

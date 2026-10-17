@@ -82,8 +82,13 @@ impl VirtioNetConfig {
         let safe_ptr = transport
             .device_config_mem()
             .map(|mem| SafePtr::new(mem, 0));
+        #[cfg(feature = "pci")]
         let bar_space = transport.device_config_bar();
-        ConfigManager::new(safe_ptr, bar_space)
+        ConfigManager::new(
+            safe_ptr,
+            #[cfg(feature = "pci")]
+            bar_space,
+        )
     }
 }
 

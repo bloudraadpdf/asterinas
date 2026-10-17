@@ -26,7 +26,7 @@ pub(super) fn init() {
 /// this function returns an error.
 ///
 /// [`ConfigFs`]: fs::ConfigFs
-#[cfg_attr(not(any(ktest, target_arch = "x86_64")), expect(dead_code))]
+#[cfg(any(ktest, all(target_arch = "x86_64", feature = "cvm_guest")))]
 pub(crate) fn register_subsystem(subsystem: Arc<dyn SysBranchNode>) -> Result<()> {
     ConfigRootNode::singleton().add_child(subsystem)?;
 

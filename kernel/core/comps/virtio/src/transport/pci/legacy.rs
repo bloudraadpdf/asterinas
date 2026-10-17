@@ -16,7 +16,6 @@ use ostd::{
 
 use crate::{
     DeviceStatus, VirtioDeviceType,
-    queue::UsedElem,
     transport::{
         AvailRing, ConfigManager, Descriptor, UsedRing, VirtioTransport, VirtioTransportError,
         pci::msix::VirtioMsixManager,
@@ -70,8 +69,6 @@ pub(crate) struct VirtioPciLegacyTransport {
 }
 
 impl VirtioPciLegacyTransport {
-    pub(crate) const QUEUE_ALIGN_SIZE: usize = 4096;
-
     #[expect(clippy::result_large_err)]
     pub(super) fn new(
         mut common_device: PciCommonDevice,
@@ -127,26 +124,6 @@ impl VirtioPciLegacyTransport {
             msix_manager,
         })
     }
-
-    /// Calculate the aligned virtqueue size.
-    ///
-    /// According to the VirtIO spec v0.9.5:
-    ///
-    /// Each virtqueue occupies two or more physically-contiguous pages (defined, for
-    /// the purposes of this specification, as 4096 bytes), and consists of three parts:
-    /// +------------------+------------------------------------------------+-----------+
-    /// | Descriptor Table | Available Ring (padding to next 4096 boundary) | Used Ring |
-    /// +------------------+------------------------------------------------+-----------+
-    ///
-    /// More details can be found at <http://ozlabs.org/~rusty/virtio-spec/virtio-0.9.5.pdf>.
-    pub(crate) fn calc_virtqueue_size_aligned(queue_size: usize) -> usize {
-        let align_mask = Self::QUEUE_ALIGN_SIZE - 1;
-
-        ((size_of::<Descriptor>() * queue_size + size_of::<u16>() * (3 + queue_size) + align_mask)
-            & !align_mask)
-            + ((size_of::<u16>() * 3 + size_of::<UsedElem>() * queue_size + align_mask)
-                & !align_mask)
-    }
 }
 
 impl VirtioTransport for VirtioPciLegacyTransport {
@@ -166,7 +143,7 @@ impl VirtioTransport for VirtioPciLegacyTransport {
         // the queue size! The transitional driver MUST retrieve the `Queue Size`
         // field from the device and MUST allocate the total number of bytes
         // (including descriptor, avail_ring and used_ring) for the virtqueue
-        // according to the specific formula, see `calc_virtqueue_size_aligned`.
+        // according to the specific formula, see `crate::queue::VirtQueue::legacy_size`.
         let queue_addr = descriptor_ptr.daddr();
         let page_frame_number = (queue_addr / PAGE_SIZE) as u32;
 

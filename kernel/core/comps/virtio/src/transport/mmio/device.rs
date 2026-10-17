@@ -176,9 +176,14 @@ impl VirtioTransport for VirtioMmioTransport {
         let offset = offset_of!(VirtioMmioLayout, queue_notify);
         let safe_ptr = Some(SafePtr::new(self.common_device.io_mem().clone(), offset));
 
-        ConfigManager::new(safe_ptr, None)
+        ConfigManager::new(
+            safe_ptr,
+            #[cfg(feature = "pci")]
+            None,
+        )
     }
 
+    #[cfg(any(feature = "devices", feature = "pci"))]
     fn num_queues(&self) -> u16 {
         // We use the field `queue_num_max` to get queue size.
         // If the queue is not exists, the field should be zero
@@ -205,6 +210,7 @@ impl VirtioTransport for VirtioMmioTransport {
         Some(self.common_device.io_mem().slice(0x100..0x200))
     }
 
+    #[cfg(feature = "pci")]
     fn device_config_bar(&self) -> Option<(aster_pci::cfg_space::BarAccess, usize)> {
         None
     }
