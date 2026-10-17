@@ -41,10 +41,7 @@ fn cli_build_rejects_invalid_lockfiles_without_panicking() {
             .current_dir(&kernel)
             .output()
             .unwrap();
-        assert!(!output.status.success());
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("lockfile"), "{error}");
-        assert!(!error.contains("panicked"), "{error}");
+        assert_lockfile_error(&output, "lockfile");
     }
 }
 
@@ -65,10 +62,7 @@ fn cli_build_rejects_a_stale_kernel_lockfile_without_changing_it() {
         .current_dir(&kernel)
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("--locked"), "{error}");
-    assert!(!error.contains("panicked"), "{error}");
+    assert_lockfile_error(&output, "--locked");
     assert_eq!(fs::read(kernel.join("pinned.lock")).unwrap(), contents);
 }
 
@@ -108,4 +102,11 @@ fn cli_new_crate_with_hyphen() {
     assert_success(&output);
     assert!(fs::metadata("my-first-os").is_ok());
     let _ = fs::remove_dir_all("my-first-os");
+}
+
+fn assert_lockfile_error(output: &std::process::Output, message: &str) {
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains(message), "{error}");
+    assert!(!error.contains("panicked"), "{error}");
 }
