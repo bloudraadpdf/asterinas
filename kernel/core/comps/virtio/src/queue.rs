@@ -384,10 +384,20 @@ impl VirtQueue {
     /// Even if this method returns true, [`Self::pop_used`] can still return `None`. See the note
     /// about malfunctioning devices in [`Self::pop_used`] for details.
     pub(crate) fn can_pop(&self) -> bool {
+        self.reported_used_count() != 0
+    }
+
+    /// Returns the number of completions reported by the device.
+    ///
+    /// The reported tokens and lengths are not validated until they are popped.
+    pub(crate) fn reported_used_count(&self) -> u16 {
         // Read barrier.
         fence(Ordering::SeqCst);
 
-        self.last_used_idx != field_ptr!(&self.used, UsedRing, idx).read_once().unwrap()
+        field_ptr!(&self.used, UsedRing, idx)
+            .read_once()
+            .unwrap()
+            .wrapping_sub(self.last_used_idx)
     }
 
     /// Returns the number of free descriptors.

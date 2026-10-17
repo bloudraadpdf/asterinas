@@ -153,12 +153,13 @@ pub struct RxQueue {
 impl RxQueue {
     pub(super) const QUEUE_INDEX: u16 = 0;
     const QUEUE_SIZE: u16 = 64;
+    const INITIAL_BUFFER_COUNT: u16 = 16;
 
     pub(super) fn new(transport: &mut dyn VirtioTransport) -> Result<Self, VirtioDeviceError> {
         let mut queue = VirtQueue::new(Self::QUEUE_INDEX, Self::QUEUE_SIZE, transport)?;
 
         let mut buffers = SlotVec::new();
-        for index in 0..Self::QUEUE_SIZE {
+        for index in 0..Self::INITIAL_BUFFER_COUNT {
             let buffer = RxPacket::new_builder().map_err(VirtioDeviceError::ResourceAlloc)?;
             let token = queue.add_output_bufs(&[buffer.inner()]).unwrap();
             assert_eq!(token, index);
@@ -186,6 +187,8 @@ impl RxQueue {
             return None;
         }
 
+        let grow = self.buffers.len() < usize::from(Self::QUEUE_SIZE)
+            && usize::from(self.queue.reported_used_count()) >= self.buffers.len() / 2;
         let (token, len) = self
             .queue
             .pop_used_with_min_bytes(size_of::<VirtioVsockHdr>())
@@ -196,6 +199,17 @@ impl RxQueue {
         let new_token = self.queue.add_output_bufs(&[new_buffer.inner()]).unwrap();
         debug_assert_eq!(new_token, token);
         self.buffers.put_at(new_token as usize, new_buffer);
+
+        if grow {
+            let target = (self.buffers.len() * 2).min(usize::from(Self::QUEUE_SIZE));
+            while self.buffers.len() < target {
+                let Ok(buffer) = RxPacket::new_builder() else {
+                    break;
+                };
+                let token = self.queue.add_output_bufs(&[buffer.inner()]).unwrap();
+                assert!(self.buffers.put_at(usize::from(token), buffer).is_none());
+            }
+        }
 
         self.notify_if_needed();
 
