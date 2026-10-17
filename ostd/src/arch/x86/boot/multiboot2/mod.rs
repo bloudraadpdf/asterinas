@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::arch::global_asm;
-
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 
 use super::ToEarlyBootInfo;
@@ -13,7 +11,8 @@ use crate::{
     mm::{Paddr, kspace::paddr_to_vaddr},
 };
 
-global_asm!(include_str!("header.S"));
+#[cfg(not(feature = "pvh_boot_only"))]
+core::arch::global_asm!(include_str!("header.S"));
 
 unsafe fn make_str_vaddr_static(str: &str) -> &'static str {
     let vaddr = paddr_to_vaddr(str.as_ptr() as Paddr);

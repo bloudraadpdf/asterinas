@@ -31,6 +31,14 @@ ENTRYTYPE_PVH           = 5
 MULTIBOOT_ENTRY_MAGIC   = 0x2BADB002
 MULTIBOOT2_ENTRY_MAGIC  = 0x36D76289
 
+.global __kernel_entry
+.if {PVH_BOOT_ONLY}
+.global __pvh_boot_only
+__pvh_boot_only = 1
+__kernel_entry = __pvh_boot
+.else
+__kernel_entry = __multiboot_boot
+
 // The Linux 32-bit Boot Protocol entry point.
 // Must be located at 0x8001000, ABI immutable!
 .code32
@@ -80,6 +88,8 @@ __linux64_boot:
     lgdt [boot_gdtr]
     retf
 
+.endif
+
 // The PVH entry point.
 .code32
 .global __pvh_boot
@@ -97,6 +107,7 @@ __pvh_boot:
 
     jmp initial_boot_setup
 
+.if {PVH_BOOT_ONLY} == 0
 // The multiboot & multiboot2 entry point.
 .code32
 .global __multiboot_boot
@@ -125,6 +136,8 @@ magic_is_mb2:
     push 0      // Upper 32-bits.
     push ENTRYTYPE_MULTIBOOT2
     jmp initial_boot_setup
+
+.endif
 
 initial_boot_setup:
     // Prepare for far return. We use a far return as a fence after setting GDT.
@@ -359,6 +372,7 @@ long_mode:
 
     // Call the corresponding Rust entrypoint according to the boot entrypoint.
     pop rax
+.if {PVH_BOOT_ONLY} == 0
     cmp rax, ENTRYTYPE_MULTIBOOT
     je entry_type_multiboot
     cmp rax, ENTRYTYPE_MULTIBOOT2
@@ -367,15 +381,16 @@ long_mode:
     je entry_type_linux
     cmp rax, ENTRYTYPE_LINUX_64
     je entry_type_linux
+.endif
     cmp rax, ENTRYTYPE_PVH
     je entry_type_pvh
     // Unreachable!
     jmp halt
 
+.if {PVH_BOOT_ONLY} == 0
 .extern __linux_boot
 .extern __multiboot_entry
 .extern __multiboot2_entry
-.extern __pvh_entry
 
 entry_type_linux:
     pop rdi // boot_params ptr
@@ -400,6 +415,9 @@ entry_type_multiboot2:
     call rax
     jmp halt
 
+.endif
+
+.extern __pvh_entry
 entry_type_pvh:
     pop rdi // the address of `hvm_start_info`
 

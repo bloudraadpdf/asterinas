@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::{
+    fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use super::file::BundleFile;
-use crate::{arch::Arch, util::hard_link_or_copy};
+use crate::{
+    arch::Arch,
+    config::scheme::{BootMethod, BootProtocol},
+    util::hard_link_or_copy,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AsterBin {
@@ -32,6 +37,41 @@ pub struct AsterElfMeta {
     pub has_pvh_header: bool,
     pub has_multiboot_header: bool,
     pub has_multiboot2_header: bool,
+}
+
+impl AsterElfMeta {
+    pub fn read(path: &Path) -> Self {
+        let bytes = fs::read(path).expect("cannot read kernel ELF");
+        let elf = xmas_elf::ElfFile::new(&bytes).expect("invalid kernel ELF");
+        let has_section = |name| {
+            elf.find_section_by_name(name)
+                .is_some_and(|section| section.size() != 0)
+        };
+        Self {
+            has_linux_header: false,
+            has_pvh_header: has_section(".note.Xen"),
+            has_multiboot_header: has_section(".multiboot_header"),
+            has_multiboot2_header: has_section(".multiboot2_header"),
+        }
+    }
+
+    pub fn is_pvh_only(&self) -> bool {
+        self.has_pvh_header && !self.has_multiboot_header && !self.has_multiboot2_header
+    }
+
+    pub fn validate_boot(
+        &self,
+        method: BootMethod,
+        protocol: BootProtocol,
+        linux_legacy: bool,
+    ) -> Result<(), &'static str> {
+        if self.is_pvh_only()
+            && (method != BootMethod::VmmDirect || protocol == BootProtocol::Linux || linux_legacy)
+        {
+            return Err("PVH-only kernels require vmm-direct and cannot use Linux or GRUB boot");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -146,6 +146,14 @@ pub fn do_cached_build(
         &rustflags,
     );
 
+    if let AsterBinType::Elf(meta) = aster_elf.typ()
+        && let Err(error) =
+            meta.validate_boot(boot.method, grub.boot_protocol, build.linux_x86_legacy_boot)
+    {
+        error_msg!("{}", error);
+        process::exit(Errno::BuildCrate as _);
+    }
+
     // Check the existing bundle's reusability
     if let Some(existing_bundle) = get_reusable_existing_bundle(&bundle_path, config, action)
         && aster_elf.modified_time() < &existing_bundle.last_modified_time()
@@ -313,15 +321,11 @@ fn build_kernel_elf(
         .join(profile_name_adapter(&build.profile))
         .join(get_current_crates().remove(0).name);
 
+    let meta = AsterElfMeta::read(&aster_bin_path);
     AsterBin::new(
         aster_bin_path,
         arch,
-        AsterBinType::Elf(AsterElfMeta {
-            has_linux_header: false,
-            has_pvh_header: false,
-            has_multiboot_header: true,
-            has_multiboot2_header: true,
-        }),
+        AsterBinType::Elf(meta),
         get_current_crates().remove(0).version,
         false,
     )

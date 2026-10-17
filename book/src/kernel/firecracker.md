@@ -21,6 +21,19 @@ This builds a PVH-bootable kernel image.
 `BOOT_PROTOCOL=pvh` automatically uses the `vmm-direct` boot method
 and enables the `pvh_boot` feature.
 
+For a small guest RAM allocation, also enable `pvh_boot_only` and disable
+all default features:
+
+```bash
+cargo osdk build --target-arch x86_64 --boot-method vmm-direct \
+    --features pvh_boot_only --no-default-features
+```
+
+This feature loads the kernel at 16 MiB and removes the Linux and Multiboot
+entry points and headers. OSDK rejects Linux and GRUB image packaging for this
+kernel. Builds without `pvh_boot_only` keep the Linux entry points at `0x8001000` and `0x8001200`.
+The guest must still have enough RAM for its kernel, archive and application.
+
 The output kernel image is:
 
 ```text

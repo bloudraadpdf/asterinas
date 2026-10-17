@@ -10,7 +10,8 @@
 //!  - Linux x86 Boot Protocol
 //!  - PVH
 //!
-//! without any additional configurations.
+//! by default. The `pvh_boot_only` feature accepts only PVH and loads below
+//! the fixed Linux boot entry addresses.
 //!
 //! Asterinas differentiates the boot protocol by the entry point
 //! chosen by the boot loader. In each entry point function,
@@ -40,6 +41,7 @@ use crate::{
 
 global_asm!(
     include_str!("bsp_boot.S"),
+    PVH_BOOT_ONLY = const cfg!(feature = "pvh_boot_only") as usize,
     KCODE64 = const super::trap::gdt::KCODE64,
     KDATA = const super::trap::gdt::KDATA,
     KCODE32 = const super::trap::gdt::KCODE32,

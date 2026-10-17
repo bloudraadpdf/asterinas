@@ -83,3 +83,11 @@ Route netlink replies identify the recipient in their outer header and keep
 the original request header in errors. Unsupported link mutations still fail.
 The consumer verifies the preconfigured loopback state through `RTM_GETLINK`;
 Linux continues to initialise its loopback interface through `RTM_NEWLINK`.
+
+The optional AMD64 `pvh_boot_only` feature loads the kernel at 16 MiB and
+removes Linux and Multiboot entry points and headers. Builds without this
+feature keep the Linux entry addresses. OSDK reads the linked ELF headers,
+retains the PVH ELF machine type, and rejects Linux and GRUB image packaging
+for a PVH-only kernel. Linked-assembly regression tests check both layouts
+and the rejected image types. Tokoloshe uses this feature to permit a smaller
+guest RAM allocation and decrease frame metadata. Upstream submission is pending.

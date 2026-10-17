@@ -133,7 +133,8 @@ pub fn make_stripped_boot_elf(
 }
 
 pub fn make_elf_for_qemu(elf: AsterBin) -> AsterBin {
-    if elf.arch() == Arch::X86_64 {
+    let pvh_only = matches!(elf.typ(), AsterBinType::Elf(meta) if meta.is_pvh_only());
+    if elf.arch() == Arch::X86_64 && !pvh_only {
         // Because QEMU denies a x86_64 multiboot ELF file (GRUB2 accept it, btw),
         // modify `em_machine` to pretend to be an x86 (32-bit) ELF image,
         //

@@ -17,6 +17,9 @@
 #![no_std]
 #![warn(missing_docs)]
 
+#[cfg(all(feature = "pvh_boot_only", not(target_arch = "x86_64")))]
+compile_error!("pvh_boot_only requires x86_64");
+
 extern crate alloc;
 #[macro_use]
 extern crate ostd_pod;

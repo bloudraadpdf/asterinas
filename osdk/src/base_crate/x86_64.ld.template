@@ -1,12 +1,12 @@
-ENTRY(__multiboot_boot)
+ENTRY(__kernel_entry)
 OUTPUT_ARCH(i386:x86-64)
 OUTPUT_FORMAT(elf64-x86-64)
 
 # The physical address where the kernel will start to be loaded.
-KERNEL_LMA = 0x8000000;
+KERNEL_LMA = DEFINED(__pvh_boot_only) ? 0x1000000 : 0x8000000;
 
 # The physical address of the boot section for the bootstrap processor.
-BSP_BOOT_LMA = 0x8001000;
+BSP_BOOT_LMA = KERNEL_LMA + 0x1000;
 
 # The application processors need to start with low physical addresses.
 # We link the symbols to low address plus virtual offset, and load the segment
