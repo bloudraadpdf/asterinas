@@ -8,6 +8,11 @@ pub(crate) use endpoint::{Endpoint, EndpointState};
 #[cfg(feature = "filesystems_extra")]
 pub(crate) use id_bitmap::IdBitmap;
 
+use crate::{
+    process::{Gid, Uid, posix_thread::AsPosixThread},
+    thread::Thread,
+};
+
 mod dirent_visitor;
 mod direntry_vec;
 mod endpoint;
@@ -29,3 +34,14 @@ pub(crate) type CStr256 = aster_util::fixed_str::FixedCStr<256>;
 pub(crate) type Str16 = aster_util::fixed_str::FixedNonTerminatedCStr<16>;
 #[cfg(any(feature = "filesystems_extra", ktest))]
 pub(crate) type Str64 = aster_util::fixed_str::FixedNonTerminatedCStr<64>;
+
+/// Returns the current thread's filesystem IDs, or root IDs for kernel threads.
+pub(in crate::fs) fn current_fs_ids() -> (Uid, Gid) {
+    Thread::current()
+        .and_then(|thread| {
+            let posix_thread = thread.as_posix_thread()?;
+            let credentials = posix_thread.credentials();
+            Some((credentials.fsuid(), credentials.fsgid()))
+        })
+        .unwrap_or((Uid::new_root(), Gid::new_root()))
+}

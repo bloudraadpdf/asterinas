@@ -61,8 +61,9 @@ ABIs from Unikraft. The devices check the clock ABI, use sequence reads, and
 supply descriptor events, refresh and quiescence operations. Random output checks
 the shared generation before use; restore refresh requires fresh hardware entropy
 and completion of the vsock connection reset. Clock interrupts reseed before
-notification. The driver boots under Firecracker. Snapshot qualification remains
-pending; this feature does not establish Tokoloshe runtime compatibility.
+notification. The driver boots under Firecracker. Tokoloshe's qualification
+records cover AMD64 snapshot restore and single-use HTTP jobs. Each result
+applies to its recorded source revision. Confidential-VM execution is not qualified.
 
 `clock_settime(CLOCK_REALTIME)` requires `CAP_SYS_TIME` in the initial user
 namespace. It rejects malformed times, values outside Linux's clock range and
@@ -91,3 +92,11 @@ retains the PVH ELF machine type, and rejects Linux and GRUB image packaging
 for a PVH-only kernel. Linked-assembly regression tests check both layouts
 and the rejected image types. Tokoloshe uses this feature to permit a smaller
 guest RAM allocation and decrease frame metadata. Upstream submission is pending.
+
+The v0.19.0 base predates upstream permission fixes for chmod, chown and mount.
+The fork backports upstream commits `21c0b04d3`, `9f53affb2`, `01acaa7ee`
+and `dbf521a1b`, including their regression tests. The consumer's unprivileged
+native-policy probe reproduces all three accepted operations before the fix
+and verifies denial afterwards. It also checks setgid handling for another
+group and set-ID removal on an ownership change. These changes are already
+upstream and must not be submitted again.
