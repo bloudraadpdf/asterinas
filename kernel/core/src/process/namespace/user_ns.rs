@@ -5,7 +5,8 @@ use spin::Once;
 use crate::{
     fs::pseudofs::{NsCommonOps, NsType, StashedDentry},
     prelude::*,
-    process::Uid,
+    process::{Uid, credentials::capabilities::CapSet, posix_thread::PosixThread},
+    security::lsm::hooks as lsm_hooks,
 };
 
 /// The user namespace.
@@ -14,6 +15,10 @@ pub struct UserNamespace {
 }
 
 impl UserNamespace {
+    pub(crate) fn check_capability(&self, caller: &PosixThread, capability: CapSet) -> Result<()> {
+        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(self, caller, capability))
+    }
+
     /// Returns a reference to the singleton initial user namespace.
     pub fn get_init_singleton() -> &'static Arc<UserNamespace> {
         static INIT: Once<Arc<UserNamespace>> = Once::new();

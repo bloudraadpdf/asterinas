@@ -7,7 +7,7 @@ use ostd::arch::cpu::context::{FsBase, GsBase};
 use ostd::{
     arch::cpu::context::{FpuContext, UserContext},
     cpu::CpuSet,
-    sync::RwArc,
+    sync::{Rcu, RwArc},
     task::Task,
 };
 use spin::Once;
@@ -17,12 +17,12 @@ use crate::{
     fs::{file::file_table::FileTable, thread_info::ThreadFsInfo},
     prelude::*,
     process::{
-        Credentials, NsProxy, Process, UserNamespace,
+        Credentials, NsProxy, PidIdentity, Process, UserNamespace,
         posix_thread::{ThreadName, thread_local::SuppUserContext},
         signal::{sig_mask::AtomicSigMask, sig_queues::SigQueues},
     },
     sched::{Nice, SchedPolicy},
-    thread::{Thread, Tid, task},
+    thread::{Thread, task},
     time::{TimerManager, clocks::ProfClock},
     vm::vmar::VmarHandle,
 };
@@ -30,7 +30,7 @@ use crate::{
 /// The builder to build a POSIX thread
 pub(crate) struct PosixThreadBuilder {
     // The essential part
-    tid: Tid,
+    identity: Arc<PidIdentity>,
     thread_name: ThreadName,
     user_ctx: Box<UserContext>,
     process: Weak<Process>,
@@ -53,14 +53,14 @@ pub(crate) struct PosixThreadBuilder {
 
 impl PosixThreadBuilder {
     pub(crate) fn new(
-        tid: Tid,
+        identity: Arc<PidIdentity>,
         thread_name: ThreadName,
         user_ctx: Box<UserContext>,
         credentials: Credentials,
         vmar: VmarHandle,
     ) -> Self {
         Self {
-            tid,
+            identity,
             thread_name,
             user_ctx,
             process: Weak::new(),
@@ -150,7 +150,7 @@ impl PosixThreadBuilder {
 
     pub(crate) fn build(self) -> Arc<Task> {
         let Self {
-            tid,
+            identity,
             user_ctx,
             process,
             credentials,
@@ -187,7 +187,7 @@ impl PosixThreadBuilder {
                 PosixThread {
                     process,
                     task: weak_task.clone(),
-                    tid: AtomicU32::new(tid),
+                    identity: Rcu::new(identity),
                     name: Mutex::new(thread_name),
                     credentials,
                     fs: RwMutex::new(fs.clone()),

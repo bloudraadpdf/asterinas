@@ -4,8 +4,10 @@ use core::sync::atomic::Ordering;
 
 use super::{INIT_PROCESS_PID, Pid, Process, pid_table};
 use crate::{
-    events::IoEvents, fs::cgroupfs::CgroupMembership, prelude::*,
-    process::signal::signals::kernel::KernelSignal,
+    events::IoEvents,
+    fs::cgroupfs::CgroupMembership,
+    prelude::*,
+    process::{signal::signals::kernel::KernelSignal, wait::reap_namespace_children},
 };
 
 /// Exits the current POSIX process.
@@ -18,13 +20,17 @@ use crate::{
 pub(super) fn exit_process(current_process: &Process) {
     current_process.status().set_vfork_child(false);
 
+    if current_process.is_namespace_init() && !current_process.is_init_process() {
+        exit_pid_namespace(current_process);
+    }
+
     // Drop fields in `Process`.
     drop_after!(current_process.lock_vmar().set_vmar(None));
 
     // Move the children to the reaper process and send them signals. The children should see a new
     // parent when they receive the signal.
     let children = move_children_to_reaper_process(current_process);
-    send_parent_death_signal(&children);
+    send_parent_death_signal(current_process, &children);
     drop(children);
 
     // Mark the current process as a zombie. After this point, it may be reaped concurrently and
@@ -34,6 +40,7 @@ pub(super) fn exit_process(current_process: &Process) {
     // This must happen after `move_children_to_reaper_process`. See the comments in
     // `find_reaper_process` for details.
     current_process.status().set_zombie();
+    current_process.pid_namespace().notify_exit();
 
     current_process.pidfile_pollee.notify(IoEvents::IN);
 
@@ -43,6 +50,26 @@ pub(super) fn exit_process(current_process: &Process) {
     let mut cgroup_guard = CgroupMembership::write_lock();
     cgroup_guard.move_process_to_root(current_process);
     drop(cgroup_guard);
+}
+
+fn exit_pid_namespace(init: &Process) {
+    let namespace = init.pid_namespace();
+    let identities = namespace.close();
+    let processes: Vec<_> = {
+        let table = pid_table::pid_table_mut();
+        identities
+            .iter()
+            .filter_map(|identity| {
+                let process = table.get_process(identity.global())?;
+                (process.pid() != init.pid()).then_some(process)
+            })
+            .collect()
+    };
+    for process in &processes {
+        process.enqueue_signal(Box::new(KernelSignal::new_kill()));
+    }
+    namespace.wait_for_exit(&processes);
+    reap_namespace_children(init);
 }
 
 /// Drops a value after releasing the lock or borrow guard.
@@ -72,6 +99,11 @@ fn move_children_to_reaper_process(current_process: &Process) -> BTreeMap<Pid, A
     if current_process.is_init_process() {
         return BTreeMap::new();
     }
+    if current_process.is_namespace_init() {
+        let children = current_process.children().lock().take().unwrap();
+        debug_assert!(children.is_empty());
+        return children;
+    }
 
     while let Some(reaper_process) = find_reaper_process(current_process) {
         if let Ok(children) = move_process_children(current_process, &reaper_process) {
@@ -98,14 +130,17 @@ fn find_reaper_process(current_process: &Process) -> Option<Arc<Process>> {
     // current process to a new reaper (updating this `Weak` reference) before becoming zombie
     // itself. Therefore, the parent is always alive and `upgrade` cannot fail.
     let mut parent = current_process.parent().lock().process().upgrade().unwrap();
+    let namespace = current_process.pid_namespace();
 
     loop {
-        if parent.is_init_process() {
+        if parent.pid_in(namespace) == 0 {
+            return namespace.child_reaper();
+        }
+        if parent.is_namespace_init() {
             return Some(parent);
         }
-
         if !parent.has_child_subreaper.load(Ordering::Acquire) {
-            return None;
+            return namespace.child_reaper();
         }
 
         let is_reaper = parent.is_child_subreaper();
@@ -162,14 +197,24 @@ fn move_process_children(
 // FIXME: According to the Linux implementation, the signal should be sent when the POSIX thread
 // that created the child exits, not when the whole process exits. For more details, see the
 // "CAVEATS" section in <https://man7.org/linux/man-pages/man2/pr_set_pdeathsig.2const.html>.
-fn send_parent_death_signal(children: &BTreeMap<Pid, Arc<Process>>) {
+fn send_parent_death_signal(parent: &Process, children: &BTreeMap<Pid, Arc<Process>>) {
+    use crate::process::{
+        posix_thread::AsPosixThread,
+        signal::signals::user::{UserSignal, UserSignalKind},
+    };
+    let main_thread = parent.main_thread();
+    let uid = main_thread.as_posix_thread().unwrap().credentials().ruid();
     for child in children.values() {
         let Some(signum) = child.parent_death_signal() else {
             continue;
         };
 
-        // FIXME: Set `si_pid` in the `siginfo_t` argument.
-        let signal = Box::new(KernelSignal::new(signum));
+        let signal = Box::new(UserSignal::new(
+            signum,
+            UserSignalKind::Kill,
+            parent.pid_identity().clone(),
+            uid,
+        ));
         child.enqueue_signal(signal);
     }
 }

@@ -10,6 +10,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub(crate) enum ProcessFilter {
     Any,
+    NoMatch,
     WithPid(Pid),
     WithPgid(Pgid),
     WithPidfd(Arc<PidFile>),
@@ -27,8 +28,12 @@ impl ProcessFilter {
 
         match which {
             P_ALL => Ok(ProcessFilter::Any),
-            P_PID => Ok(ProcessFilter::WithPid(id)),
-            P_PGID => Ok(ProcessFilter::WithPgid(id)),
+            P_PID if id != 0 => Ok(Self::resolve(id, ctx, Self::WithPid)),
+            P_PGID => Ok(if id == 0 {
+                Self::WithPgid(ctx.process.pgid())
+            } else {
+                Self::resolve(id, ctx, Self::WithPgid)
+            }),
             P_PIDFD => {
                 let fd = FileDesc::try_from(id.cast_signed())
                     .map_err(|_| Error::with_message(Errno::EINVAL, "the pidfd is invalid"))?;
@@ -46,7 +51,7 @@ impl ProcessFilter {
     }
 
     // For `wait4` and `kill`.
-    pub(crate) fn from_id(wait_pid: i32) -> Result<Self> {
+    pub(crate) fn from_id(wait_pid: i32, ctx: &Context) -> Result<Self> {
         // Reference:
         // <https://man7.org/linux/man-pages/man2/waitpid.2.html>
         // <https://man7.org/linux/man-pages/man2/kill.2.html>
@@ -56,18 +61,29 @@ impl ProcessFilter {
         } else if wait_pid < -1 {
             // "wait for any child process whose process group ID is equal to the absolute value of
             // `pid`"
-            Ok(ProcessFilter::WithPgid((-wait_pid).cast_unsigned()))
+            Ok(Self::resolve(
+                (-wait_pid).cast_unsigned(),
+                ctx,
+                Self::WithPgid,
+            ))
         } else if wait_pid == -1 {
             // "wait for any child process"
             Ok(ProcessFilter::Any)
         } else if wait_pid == 0 {
             // "wait for any child process whose process group ID is equal to that of the calling
             // process at the time of the call to `waitpid()`"
-            let pgid = current!().pgid();
+            let pgid = ctx.process.pgid();
             Ok(ProcessFilter::WithPgid(pgid))
         } else {
             // "wait for the child whose process ID is equal to the value of `pid`"
-            Ok(ProcessFilter::WithPid(wait_pid.cast_unsigned()))
+            Ok(Self::resolve(wait_pid.cast_unsigned(), ctx, Self::WithPid))
         }
+    }
+
+    fn resolve(id: Pid, ctx: &Context, found: impl FnOnce(Pid) -> Self) -> Self {
+        ctx.process
+            .pid_namespace()
+            .resolve(id)
+            .map_or(Self::NoMatch, found)
     }
 }

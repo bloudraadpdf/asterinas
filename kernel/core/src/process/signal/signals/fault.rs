@@ -24,9 +24,13 @@ impl Signal for FaultSignal {
         self.num
     }
 
-    fn to_info(&self) -> siginfo_t {
+    fn to_info(&self, _namespace: &crate::process::PidNamespace) -> siginfo_t {
         let mut info = siginfo_t::new(self.num, self.code);
         info.set_si_addr(self.addr.unwrap_or_default() as Vaddr);
         info
+    }
+
+    fn forces_namespace_init(&self, _namespace: &Arc<crate::process::PidNamespace>) -> bool {
+        true
     }
 }

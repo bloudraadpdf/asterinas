@@ -331,11 +331,12 @@ impl AuxiliaryData {
             return false;
         }
 
-        if is_pass_cred
-            && self.cred.as_ref().map(SocketCred::to_real_c_cred)
-                != other.cred.as_ref().map(SocketCred::to_real_c_cred)
-        {
-            return false;
+        if is_pass_cred {
+            return match (&self.cred, &other.cred) {
+                (Some(left), Some(right)) => left.same_real_identity(right),
+                (None, None) => true,
+                _ => false,
+            };
         }
 
         true

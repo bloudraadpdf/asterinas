@@ -43,7 +43,7 @@ pub(super) fn sys_capget(
 
     let credentials = if cap_user_header.pid != 0 {
         pid_table::pid_table_mut()
-            .get_thread(cap_user_header.pid)
+            .get_thread_in(cap_user_header.pid, ctx.process.pid_namespace())
             .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target thread does not exist"))?
             .as_posix_thread()
             .unwrap()

@@ -20,7 +20,7 @@ pub(super) fn sys_pidfd_open(pid: Pid, flags: u32, ctx: &Context) -> Result<Sysc
     }
 
     let process = pid_table::pid_table_mut()
-        .get_process(pid)
+        .get_process_in(pid, ctx.process.pid_namespace())
         .ok_or_else(|| Error::with_message(Errno::ESRCH, "the process does not exist"))?;
 
     let pid_fd = {

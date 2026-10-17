@@ -30,6 +30,7 @@ pub(crate) use kill::{kill, kill_all, kill_group, tgkill};
 pub use namespace::user_ns::UserNamespace;
 pub(crate) use namespace::{
     nsproxy::{ContextSetNsAdminApi, NsProxy, NsProxyBuilder, check_unsupported_ns_flags},
+    pid_ns::{PidAllocation, PidIdentity, PidNamespace},
     unshare::ContextUnshareAdminApi,
 };
 pub(crate) use pid_file::PidFile;

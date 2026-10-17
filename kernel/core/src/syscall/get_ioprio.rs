@@ -27,13 +27,13 @@ impl IoPrioWho {
             Self::IOPRIO_WHO_PROCESS => {
                 // In Linux, IOPRIO_WHO_PROCESS identifies a single thread by its TID
                 let target_tid = if who == 0 {
-                    ctx.posix_thread.tid()
+                    ctx.posix_thread.namespace_tid()
                 } else {
                     who
                 };
 
                 let thread = crate::process::pid_table::pid_table_mut()
-                    .get_thread(target_tid)
+                    .get_thread_in(target_tid, ctx.process.pid_namespace())
                     .ok_or_else(|| Error::new(Errno::ESRCH))?;
                 Ok(Self::Thread(thread))
             }

@@ -10,7 +10,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        Process,
+        PidNamespace, Process,
         signal::{PollHandle, Pollable},
     },
 };
@@ -90,10 +90,15 @@ impl FileLike for PidFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             flags: u32,
-            pid: u32,
+            pid: i32,
+            namespace_pids: Vec<i32>,
         }
 
         impl Display for FdInfo {
@@ -103,8 +108,11 @@ impl FileLike for PidFile {
                 writeln!(f, "mnt_id:\t{}", PidfdFs::mount_node().id())?;
                 writeln!(f, "ino:\t{}", PidfdFs::shared_inode().ino())?;
                 writeln!(f, "Pid:\t{}", self.pid)?;
-                // TODO: Currently we do not support PID namespaces. Just print the PID once.
-                writeln!(f, "NSpid:\t{}", self.pid)
+                write!(f, "NSpid:")?;
+                for pid in &self.namespace_pids {
+                    write!(f, "\t{pid}")?;
+                }
+                writeln!(f)
             }
         }
 
@@ -112,9 +120,25 @@ impl FileLike for PidFile {
         if fd_flags.contains(FdFlags::CLOEXEC) {
             flags |= CreationFlags::O_CLOEXEC.bits();
         }
-        let pid = self.process.upgrade().map_or(u32::MAX, |p| p.pid());
+        let (pid, namespace_pids) = self.process.upgrade().map_or_else(
+            || (-1, vec![-1]),
+            |process| {
+                let pid = process.pid_in(namespace).cast_signed();
+                let ids = process
+                    .pid_identity()
+                    .namespace_ids_from(namespace)
+                    .into_iter()
+                    .map(|pid| pid.cast_signed())
+                    .collect();
+                (pid, ids)
+            },
+        );
 
-        Box::new(FdInfo { flags, pid })
+        Box::new(FdInfo {
+            flags,
+            pid,
+            namespace_pids,
+        })
     }
 }
 

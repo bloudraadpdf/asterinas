@@ -25,10 +25,11 @@ use crate::{
     },
     prelude::*,
     process::{
+        PidNamespace,
         posix_thread::{AsPosixThread, PosixThread},
         signal::{
             HandlePendingSignal, PollHandle, Pollable, Poller,
-            constants::{SIGKILL, SIGSTOP},
+            constants::{SI_QUEUE, SI_TKILL, SI_USER, SIGCHLD, SIGKILL, SIGSTOP},
             sig_mask::{AtomicSigMask, SigMask},
             signals::Signal,
         },
@@ -251,7 +252,11 @@ impl FileLike for SignalFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             flags: u32,
             sigmask: u64,
@@ -307,13 +312,21 @@ trait ToSignalfdSiginfo {
 
 impl ToSignalfdSiginfo for Box<dyn Signal> {
     fn to_signalfd_siginfo(&self) -> SignalfdSiginfo {
-        let siginfo = self.to_info();
+        let siginfo = self.to_info(current!().pid_namespace());
+        let (pid, uid) = if matches!(siginfo.si_code, SI_USER | SI_TKILL | SI_QUEUE)
+            || siginfo.si_signo == i32::from(SIGCHLD.as_u8())
+        {
+            let (pid, uid) = siginfo.pid_uid();
+            (pid, u32::from(uid))
+        } else {
+            (0, 0)
+        };
         SignalfdSiginfo {
             ssi_signo: siginfo.si_signo as _,
             ssi_errno: siginfo.si_errno,
             ssi_code: siginfo.si_code,
-            ssi_pid: 0,
-            ssi_uid: 0,
+            ssi_pid: pid,
+            ssi_uid: uid,
             ssi_fd: 0,
             ssi_tid: 0,
             ssi_band: 0,

@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub(super) fn sys_kill(process_filter: u64, sig_num: u64, ctx: &Context) -> Result<SyscallReturn> {
-    let process_filter = ProcessFilter::from_id(process_filter as _)?;
+    let process_filter = ProcessFilter::from_id(process_filter as _, ctx)?;
     let sig_num = if sig_num == 0 {
         None
     } else {
@@ -32,6 +32,9 @@ fn do_sys_kill(filter: ProcessFilter, sig_num: Option<SigNum>, ctx: &Context) ->
 
     match filter {
         ProcessFilter::Any => kill_all(signal, ctx)?,
+        ProcessFilter::NoMatch => {
+            return_errno_with_message!(Errno::ESRCH, "no visible process matches the filter")
+        }
         ProcessFilter::WithPid(pid) => {
             kill(pid, signal.map(|s| Box::new(s) as Box<dyn Signal>), ctx)?
         }

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{BOOTSTRAP_SID, Pgid, Process, ProcessGroup, Sid, Terminal};
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    process::{PidIdentity, PidNamespace},
+};
 
 /// A session.
 ///
@@ -16,6 +19,7 @@ use crate::prelude::*;
 /// controlling terminal is established when the session leader first opens a terminal.
 pub(crate) struct Session {
     sid: Sid,
+    identity: Arc<PidIdentity>,
     inner: Mutex<Inner>,
 }
 
@@ -33,7 +37,7 @@ impl Session {
     /// The caller needs to ensure that the process does not belong to other process group or other
     /// session.
     pub(super) fn new_pair(process: &Arc<Process>) -> (Arc<Self>, Arc<ProcessGroup>) {
-        let session = Self::new_empty(process.pid());
+        let session = Self::new_empty(process.pid(), process.pid_identity().clone());
         let process_group = ProcessGroup::new(process, session.clone());
         session.lock().insert_process_group(&process_group);
 
@@ -47,16 +51,17 @@ impl Session {
     pub(super) fn new_bootstrap_pair(process: &Arc<Process>) -> (Arc<Self>, Arc<ProcessGroup>) {
         debug_assert!(process.is_init_process());
 
-        let session = Self::new_empty(BOOTSTRAP_SID);
+        let session = Self::new_empty(BOOTSTRAP_SID, process.pid_identity().clone());
         let process_group = ProcessGroup::new_bootstrap(process, session.clone());
         session.lock().insert_process_group(&process_group);
 
         (session, process_group)
     }
 
-    fn new_empty(sid: Sid) -> Arc<Self> {
+    fn new_empty(sid: Sid, identity: Arc<PidIdentity>) -> Arc<Self> {
         Arc::new(Self {
             sid,
+            identity,
             inner: Mutex::new(Inner {
                 process_groups: BTreeMap::new(),
                 terminal: None,
@@ -67,6 +72,14 @@ impl Session {
     /// Returns the session identifier.
     pub(crate) fn sid(&self) -> Sid {
         self.sid
+    }
+
+    pub(crate) fn sid_in(&self, namespace: &PidNamespace) -> Sid {
+        if self.sid == BOOTSTRAP_SID {
+            0
+        } else {
+            self.identity.in_namespace(namespace)
+        }
     }
 
     /// Returns whether the process is the session leader.

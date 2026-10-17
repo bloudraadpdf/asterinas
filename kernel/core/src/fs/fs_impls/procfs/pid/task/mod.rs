@@ -25,7 +25,7 @@ use crate::{
         vfs::inode::{Inode, RevalidationPolicy},
     },
     prelude::*,
-    process::{Process, pid_table, pid_table::PidEntry, posix_thread::AsPosixThread},
+    process::{PidNamespace, Process, pid_table, pid_table::PidEntry, posix_thread::AsPosixThread},
     thread::{Thread, Tid},
 };
 
@@ -49,16 +49,16 @@ mod status;
 mod uid_map;
 
 /// Represents the inode at `/proc/[pid]/task`.
-pub(super) struct TaskDirOps(Arc<PidEntry>);
+pub(super) struct TaskDirOps(TidDirOps);
 
 impl TaskDirOps {
     pub(super) fn new_inode(dir: &PidDirOps, parent: Weak<dyn Inode>) -> Arc<dyn Inode> {
         // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/base.c#L3316>
-        ProcDir::new(Self(dir.pid_entry().clone()), parent, mkmod!(a+rx))
+        ProcDir::new(Self(dir.tid_dir_ops().clone()), parent, mkmod!(a+rx))
     }
 
     fn process(&self) -> Option<Arc<Process>> {
-        self.0.process_of_thread()
+        self.0.process()
     }
 }
 
@@ -66,19 +66,27 @@ impl TaskDirOps {
 #[derive(Clone)]
 pub(in procfs) struct TidDirOps {
     pid_entry: Arc<PidEntry>,
+    namespace: Arc<PidNamespace>,
 }
 
 impl TidDirOps {
-    pub(super) fn new(pid_entry: Arc<PidEntry>) -> Self {
-        Self { pid_entry }
+    pub(super) fn new(pid_entry: Arc<PidEntry>, namespace: Arc<PidNamespace>) -> Self {
+        Self {
+            pid_entry,
+            namespace,
+        }
     }
 
     pub(in procfs) fn new_inode(
         pid_entry: Arc<PidEntry>,
         parent: Weak<dyn Inode>,
     ) -> Arc<dyn Inode> {
+        let namespace = crate::fs::procfs::ProcFs::namespace_of(&parent);
         ProcDir::new(
-            Self { pid_entry },
+            Self {
+                pid_entry,
+                namespace,
+            },
             parent,
             // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/base.c#L3796>
             mkmod!(a+rx),
@@ -198,16 +206,6 @@ impl ProcDirOps for TaskDirOps {
             return_errno_with_message!(Errno::ENOENT, "the name is not a valid TID");
         };
 
-        // Note: After a PID-number recycling mechanism is introduced, there may be a race here:
-        // - If a PID number is recycled as soon as its `PidEntry` is removed from the `PidTable`,
-        //   then before the `PidTable` lock is acquired below, the current inode’s `PidEntry` may
-        //   already have been removed and replaced with a new entry using the same PID number.
-        //   In that case, it is possible that the main thread of the `Process` obtained here has not
-        //   yet been deleted, causing `contains_tid` to return true even though we have actually
-        //   retrieved the wrong `PidEntry`.
-        // - If the PID number is not recycled until the `PidEntry` is dropped, then this race does not arise.
-        //
-        // TODO: Revisit and handle this potential race as appropriate once PID-number recycling is implemented.
         let Some(process) = self.process() else {
             return_errno_with_message!(Errno::ESRCH, "the process does not exist");
         };
@@ -215,6 +213,9 @@ impl ProcDirOps for TaskDirOps {
         // Lock order: PID table -> tasks of process
 
         let pid_table = pid_table::pid_table_mut();
+        let Some(tid) = self.0.namespace.resolve(tid) else {
+            return_errno_with_message!(Errno::ENOENT, "the thread does not exist");
+        };
 
         let contains_tid = process
             .tasks()
@@ -245,13 +246,15 @@ impl ProcDirOps for TaskDirOps {
         };
 
         // Collect TIDs before visiting entries, as `visit_fn` may copy data to user memory.
-        let tids = process
+        let mut tids = process
             .tasks()
             .lock()
             .as_slice()
             .iter()
-            .filter_map(|task| usize::try_from(task.as_posix_thread().unwrap().tid()).ok())
+            .map(|task| task.as_posix_thread().unwrap().tid_in(&self.0.namespace) as usize)
+            .filter(|tid| *tid != 0)
             .collect::<Vec<_>>();
+        tids.sort_unstable();
 
         visit_readdir_entries(
             keyed_readdir_entries(offset, 2, tids, |tid| {
@@ -295,6 +298,6 @@ impl ProcDirOps for TaskDirOps {
             .lock()
             .as_slice()
             .iter()
-            .all(|task| task.as_posix_thread().unwrap().tid() != tid)
+            .all(|task| task.as_posix_thread().unwrap().tid_in(&self.0.namespace) != tid)
     }
 }

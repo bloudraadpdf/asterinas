@@ -71,9 +71,13 @@ Supported functionality in SCML:
 {{#include unshare.scml}}
 ```
 
+`CLONE_NEWPID` selects a new PID namespace for future children.
+The calling process keeps its active PID namespace and identifiers.
+The first child becomes namespace init, with PID 1.
+Namespace init exit kills the namespace's members and prevents further forks.
+
 Unsupported flags:
 * `CLONE_NEWNET`
-* `CLONE_NEWPID`
 * `CLONE_NEWTIME`
 * `CLONE_NEWUSER`
 
@@ -91,9 +95,12 @@ Supported functionality in SCML:
 {{#include setns.scml}}
 ```
 
+PID namespace selection affects future children.
+The target must be the calling process's active namespace or a descendant.
+It does not change the calling process's identifiers.
+
 Unsupported flags:
 * `CLONE_NEWNET`
-* `CLONE_NEWPID`
 * `CLONE_NEWTIME`
 * `CLONE_NEWUSER`
 

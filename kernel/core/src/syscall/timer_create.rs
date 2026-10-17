@@ -69,9 +69,11 @@ pub(super) fn sys_timer_create(
                 // Send a signal to the specified thread when the timer is expired.
                 SigNotify::SIGEV_THREAD_ID => {
                     let tid = sig_event.sigev_un.read_tid() as u32;
-                    let thread = pid_table::pid_table_mut().get_thread(tid).ok_or_else(|| {
-                        Error::with_message(Errno::EINVAL, "the target thread does not exist")
-                    })?;
+                    let thread = pid_table::pid_table_mut()
+                        .get_thread_in(tid, ctx.process.pid_namespace())
+                        .ok_or_else(|| {
+                            Error::with_message(Errno::EINVAL, "the target thread does not exist")
+                        })?;
                     let posix_thread = thread.as_posix_thread().unwrap();
                     if posix_thread.process().pid() != ctx.process.pid() {
                         return_errno_with_message!(
@@ -134,7 +136,7 @@ where
         match dynamic_clockid_info {
             DynamicClockIdInfo::Pid(pid, clock_type) => {
                 let process = pid_table::pid_table_mut()
-                    .get_process(pid)
+                    .get_process_in(pid, ctx.process.pid_namespace())
                     .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid clock ID"))?;
                 let process_timer_manager = process.timer_manager();
                 match clock_type {
@@ -144,7 +146,7 @@ where
             }
             DynamicClockIdInfo::Tid(tid, clock_type) => {
                 let thread = pid_table::pid_table_mut()
-                    .get_thread(tid)
+                    .get_thread_in(tid, ctx.process.pid_namespace())
                     .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid clock ID"))?;
                 let posix_thread = thread.as_posix_thread().unwrap();
                 match clock_type {

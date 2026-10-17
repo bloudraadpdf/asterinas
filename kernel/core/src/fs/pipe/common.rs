@@ -482,7 +482,7 @@ impl PipeWriter {
             posix_thread.enqueue_signal(Box::new(UserSignal::new(
                 SIGPIPE,
                 UserSignalKind::Kill,
-                posix_thread.process().pid(),
+                posix_thread.process().pid_identity().clone(),
                 posix_thread.credentials().ruid(),
             )));
         }

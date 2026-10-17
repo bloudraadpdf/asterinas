@@ -14,7 +14,7 @@ use crate::{
     fs::vfs::{inode::FallocMode, path::Path},
     net::socket::Socket,
     prelude::*,
-    process::{Process, signal::Pollable},
+    process::{PidNamespace, Process, signal::Pollable},
     util::ioctl::RawIoctl,
     vm::{
         page_cache::Vmo,
@@ -146,7 +146,11 @@ pub(crate) trait FileLike: Pollable + Send + Sync + Any {
     ///    return a `Box<dyn Display>` containing the `Arc<Self>`, so that the information can be
     ///    collected later in its `Display::display()` method, after dropping the file table's spin
     ///    lock.
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display>;
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        namespace: &PidNamespace,
+    ) -> Box<dyn Display>;
 
     /// Synchronizes the file according to `mode`.
     ///

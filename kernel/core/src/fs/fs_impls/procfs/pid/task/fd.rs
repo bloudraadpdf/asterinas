@@ -310,7 +310,10 @@ impl ProcFileOps for FileInfoOps {
         let info = if let Some(file_table) = posix_thread.file_table().lock().as_ref()
             && let Ok(entry) = file_table.read().get_entry(self.file_desc)
         {
-            entry.file().clone().dump_proc_fdinfo(entry.flags())
+            entry
+                .file()
+                .clone()
+                .dump_proc_fdinfo(entry.flags(), &self.tid_dir_ops.namespace)
         } else {
             return_errno_with_message!(Errno::ENOENT, "the file does not exist");
         };

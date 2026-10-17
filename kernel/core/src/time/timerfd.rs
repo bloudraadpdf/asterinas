@@ -15,7 +15,10 @@ use crate::{
         pseudofs::AnonInodeFs,
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable, Pollee},
+    process::{
+        PidNamespace,
+        signal::{PollHandle, Pollable, Pollee},
+    },
     syscall::{ClockId, create_timer_for_clock},
     time::{
         Timer, clockid_t,
@@ -233,7 +236,11 @@ impl FileLike for TimerfdFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             flags: u32,
             clockid: i32,
