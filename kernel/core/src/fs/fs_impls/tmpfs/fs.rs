@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use super::options::MountOptions;
 use crate::{
     fs::{
-        fs_impls::ramfs::{self, RamFs},
+        fs_impls::ramfs::{self, RamFs, RamFsConfig, RamFsQuota},
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FileSystem, SuperBlock},
@@ -15,12 +16,7 @@ use crate::{
 
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 
-/// The temporary file system (tmpfs) structure.
-//
-// TODO: `TmpFs` currently aliases `RamFs` and relies on `RamFs::new_tmpfs()`
-// to create tmpfs-flavored ramfs instances. In the future we need to
-// implement a dedicated tmpfs with tmpfs-specific features such as memory
-// limits and swap support.
+/// RAM-backed temporary files, with per-mount page and inode limits.
 pub(crate) type TmpFs = RamFs;
 
 impl TmpFs {
@@ -35,6 +31,22 @@ impl TmpFs {
         name: &'static str,
         revalidation_policy: RevalidationPolicy,
     ) -> Arc<Self> {
+        Self::new_tmpfs_instance(
+            name,
+            revalidation_policy,
+            RamFsConfig::default(),
+            default_max_blocks(),
+            default_max_inodes(),
+        )
+    }
+
+    fn new_tmpfs_instance(
+        name: &'static str,
+        revalidation_policy: RevalidationPolicy,
+        config: RamFsConfig,
+        max_blocks: usize,
+        max_inodes: usize,
+    ) -> Arc<Self> {
         let anon_device_id = AnonDeviceId::acquire().expect("no device ID is available for tmpfs");
         let sb = {
             let mut super_block = SuperBlock::new(
@@ -43,8 +55,6 @@ impl TmpFs {
                 ramfs::NAME_MAX,
                 anon_device_id.id(),
             );
-            let max_blocks = default_max_blocks();
-            let max_inodes = default_max_inodes();
             super_block.blocks = max_blocks;
             super_block.bfree = max_blocks;
             super_block.bavail = max_blocks;
@@ -52,13 +62,10 @@ impl TmpFs {
             super_block.ffree = max_inodes;
             super_block
         };
-        Self::new_with_sb(name, anon_device_id, sb, revalidation_policy)
+        Self::new_with_sb(name, anon_device_id, sb, revalidation_policy, config)
     }
 }
 
-// FIXME: These defaults are only a rough approximation for tmpfs-over-ramfs.
-// A dedicated tmpfs implementation should replace them with real tmpfs limit
-// and accounting semantics.
 fn default_max_blocks() -> usize {
     crate::vm::mem_total() / PAGE_SIZE / 2
 }
@@ -79,8 +86,21 @@ impl FsType for TmpFsType {
         FsProperties::empty()
     }
 
-    fn create(&self, _fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
-        Ok(TmpFs::new_tmpfs())
+    fn create(&self, ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+        let options = MountOptions::parse(ctx.args())?;
+        let config = RamFsConfig {
+            mode: options.mode,
+            uid: options.uid,
+            gid: options.gid,
+            quota: Some(RamFsQuota::new(options.pages, options.inodes)?),
+        };
+        Ok(TmpFs::new_tmpfs_instance(
+            "tmpfs",
+            RevalidationPolicy::empty(),
+            config,
+            options.pages,
+            options.inodes,
+        ))
     }
 
     fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {

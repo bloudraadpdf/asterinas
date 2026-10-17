@@ -4,6 +4,7 @@ mod copy_compact;
 pub mod ioctl;
 mod iovec;
 pub(crate) mod net;
+pub(crate) mod quota;
 pub(crate) mod random;
 mod read_cstring;
 pub(crate) mod ring_buffer;

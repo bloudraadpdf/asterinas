@@ -1,3 +1,4 @@
+// tmpfs accepts size, nr_blocks, nr_inodes, mode, uid and gid options.
 // Create a new mount
 mount(
     source, target, filesystemtype,

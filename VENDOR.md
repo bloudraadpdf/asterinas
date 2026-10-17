@@ -127,3 +127,13 @@ also pass. These process boundaries apply to Linux and Asterinas guests;
 Unikraft retains its shared address space and VM boundary. This patch does not
 change TDX or AMD confidential-VM code or establish confidential-VM execution
 support.
+
+The tmpfs patch parses size, inode, mode and ownership options for mounts.
+Page and inode reservations use checked atomic counters and owned charges.
+Writes and shared mapping faults use one page budget. Truncate removes mappings
+before it releases charges; sparse reads leave holes unallocated. Failed and
+partial writes preserve the file size and report the bytes written. Internal
+ramfs, memfd and device backings retain their previous limits.
+The eight Linux-reference cases also pass on four-vCPU Firecracker guests.
+The checks cover exhaustion, release, sparse files, partial writes, live
+unlinked inodes and concurrent writers. This patch adds no unsafe kernel code.
