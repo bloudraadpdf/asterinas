@@ -22,6 +22,11 @@ The OSDK lockfile patch adds `--lockfile PATH` for the generated kernel crate.
 OSDK copies that file into the generated crate and invokes Cargo with `--locked`.
 Tokoloshe owns this lockfile separately from the OSDK builder lockfile. A stale
 kernel lockfile fails before compilation. The OSDK unit tests and Clippy pass.
+The CLI resolves lockfile paths before entering the generated crate and
+rejects missing files and directories without a panic. Installation reads
+the input before writing the generated lockfile, so equal paths and hard links
+cannot truncate the input. Regression tests cover invalid paths, stale locks
+and aliased input and output files.
 
 The descriptor patch honours `MSG_CMSG_CLOEXEC` when `recvmsg` installs
 `SCM_RIGHTS` descriptors. Flags are set during file-table insertion and returned

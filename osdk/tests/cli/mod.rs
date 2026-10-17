@@ -26,6 +26,53 @@ fn cli_build_help_message() {
 }
 
 #[test]
+fn cli_build_rejects_invalid_lockfiles_without_panicking() {
+    let work = tempfile::tempdir_in(".").unwrap();
+    let work = work.path().canonicalize().unwrap();
+    let output = cargo_osdk(["new", "--kernel", "lockfile-kernel"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let kernel = work.join("lockfile-kernel");
+    fs::create_dir(kernel.join("lock-directory")).unwrap();
+    for path in ["missing.lock", "lock-directory"] {
+        let output = cargo_osdk(["build", "--lockfile", path])
+            .current_dir(&kernel)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("lockfile"), "{error}");
+        assert!(!error.contains("panicked"), "{error}");
+    }
+}
+
+#[test]
+fn cli_build_rejects_a_stale_kernel_lockfile_without_changing_it() {
+    let work = tempfile::tempdir_in(".").unwrap();
+    let work = work.path().canonicalize().unwrap();
+    let output = cargo_osdk(["new", "--kernel", "locked-kernel"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let kernel = work.join("locked-kernel");
+    edit_config_files(&kernel);
+    let contents = b"version = 4\n";
+    fs::write(kernel.join("pinned.lock"), contents).unwrap();
+    let output = cargo_osdk(["build", "--lockfile", "pinned.lock"])
+        .current_dir(&kernel)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("--locked"), "{error}");
+    assert!(!error.contains("panicked"), "{error}");
+    assert_eq!(fs::read(kernel.join("pinned.lock")).unwrap(), contents);
+}
+
+#[test]
 fn cli_run_help_message() {
     let output = cargo_osdk(["run", "-h"]).output().unwrap();
     assert_success(&output);
