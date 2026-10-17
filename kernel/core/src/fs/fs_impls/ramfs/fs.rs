@@ -37,12 +37,52 @@ use crate::{
     prelude::*,
     process::{Gid, Uid},
     time::clocks::RealTimeCoarseClock,
+    util::quota::{Quota, QuotaCharge},
     vm::page_cache::{PageCache, Vmo},
 };
+
+pub(in crate::fs) struct RamFsQuota {
+    pages: Option<Arc<Quota>>,
+    inodes: Option<Arc<Quota>>,
+    root: Option<QuotaCharge>,
+}
+
+impl RamFsQuota {
+    pub(in crate::fs) fn new(pages: usize, inodes: usize) -> Result<Self> {
+        let pages = (pages != 0).then(|| Quota::new(pages));
+        let inodes = (inodes != 0).then(|| Quota::new(inodes));
+        let root = inodes.as_ref().map(Quota::charge).transpose()?;
+        Ok(Self {
+            pages,
+            inodes,
+            root,
+        })
+    }
+}
+
+pub(in crate::fs) struct RamFsConfig {
+    pub(in crate::fs) mode: InodeMode,
+    pub(in crate::fs) uid: Uid,
+    pub(in crate::fs) gid: Gid,
+    pub(in crate::fs) quota: Option<RamFsQuota>,
+}
+
+impl Default for RamFsConfig {
+    fn default() -> Self {
+        Self {
+            mode: mkmod!(a+rx, u+w),
+            uid: Uid::new_root(),
+            gid: Gid::new_root(),
+            quota: None,
+        }
+    }
+}
 
 /// A volatile file system whose data and metadata exists only in memory.
 pub(crate) struct RamFs {
     name: &'static str,
+    page_quota: Option<Arc<Quota>>,
+    inode_quota: Option<Arc<Quota>>,
     _anon_device_id: AnonDeviceId,
     revalidation_policy: RevalidationPolicy,
     /// The super block
@@ -69,21 +109,25 @@ impl RamFs {
         anon_device_id: AnonDeviceId,
         sb: SuperBlock,
         revalidation_policy: RevalidationPolicy,
+        config: RamFsConfig,
     ) -> Arc<Self> {
+        let (page_quota, inode_quota, root_charge) = match config.quota {
+            Some(quota) => (quota.pages, quota.inodes, quota.root),
+            None => (None, None, None),
+        };
         let root_dev_id = anon_device_id.id();
         Arc::new_cyclic(move |weak_fs| Self {
             name,
+            page_quota,
+            inode_quota,
             _anon_device_id: anon_device_id,
             revalidation_policy,
             sb,
             root: Arc::new_cyclic(|weak_root| RamInode {
                 inner: Inner::new_dir(weak_root.clone(), weak_root.clone()),
-                metadata: SpinLock::new(InodeMeta::new_dir(
-                    mkmod!(a+rx, u+w),
-                    Uid::new_root(),
-                    Gid::new_root(),
-                )),
+                metadata: SpinLock::new(InodeMeta::new_dir(config.mode, config.uid, config.gid)),
                 ino: ROOT_INO,
+                _inode_charge: root_charge,
                 typ: InodeType::Dir,
                 dir_revalidation_policy: revalidation_policy,
                 this: weak_root.clone(),
@@ -102,7 +146,17 @@ impl RamFs {
     fn new_internal(name: &'static str) -> Arc<Self> {
         let anon_device_id = AnonDeviceId::acquire().expect("no device ID is available for ramfs");
         let sb = SuperBlock::new(RAMFS_MAGIC, BLOCK_SIZE, NAME_MAX, anon_device_id.id());
-        Self::new_with_sb(name, anon_device_id, sb, RevalidationPolicy::empty())
+        Self::new_with_sb(
+            name,
+            anon_device_id,
+            sb,
+            RevalidationPolicy::empty(),
+            RamFsConfig::default(),
+        )
+    }
+
+    fn reserve_inode(&self) -> Result<Option<QuotaCharge>> {
+        self.inode_quota.as_ref().map(Quota::charge).transpose()
     }
 
     fn alloc_id(&self) -> u64 {
@@ -125,7 +179,15 @@ impl FileSystem for RamFs {
     }
 
     fn sb(&self) -> SuperBlock {
-        self.sb.clone()
+        let mut sb = self.sb.clone();
+        if let Some(quota) = &self.page_quota {
+            sb.bfree = quota.remaining();
+            sb.bavail = sb.bfree;
+        }
+        if let Some(quota) = &self.inode_quota {
+            sb.ffree = quota.remaining();
+        }
+        sb
     }
 
     fn fs_event_subscriber_stats(&self) -> &FsEventSubscriberStats {
@@ -141,6 +203,7 @@ pub(in crate::fs::fs_impls) struct RamInode {
     metadata: SpinLock<InodeMeta>,
     /// Inode number
     ino: u64,
+    _inode_charge: Option<QuotaCharge>,
     /// Type of the inode
     typ: InodeType,
     /// Directory-entry revalidation policy inherited from the filesystem.
@@ -198,8 +261,8 @@ impl Inner {
         Self::Dir(RwLock::new(DirEntry::new(this, parent)))
     }
 
-    pub(self) fn new_file() -> Self {
-        Self::File(Mutex::new(PageCache::new_anon(0).unwrap()))
+    pub(self) fn new_file(quota: Option<Arc<Quota>>) -> Self {
+        Self::File(Mutex::new(PageCache::new_anon(0, quota).unwrap()))
     }
 
     pub(self) fn new_symlink(target: &str) -> Self {
@@ -223,7 +286,7 @@ impl Inner {
     }
 
     pub(self) fn new_file_in_memfd() -> Self {
-        Self::File(Mutex::new(PageCache::new_anon(0).unwrap()))
+        Self::File(Mutex::new(PageCache::new_anon(0, None).unwrap()))
     }
 
     fn as_direntry(&self) -> Option<&RwLock<DirEntry>> {
@@ -521,6 +584,36 @@ impl DirEntry {
 }
 
 impl RamInode {
+    fn new(
+        fs: &Arc<RamFs>,
+        make_inner: impl FnOnce(Weak<Self>) -> Inner,
+        metadata: InodeMeta,
+        typ: InodeType,
+        hard_linkability: HardLinkability,
+        to_be_revalidated: ToBeRevalidated,
+    ) -> Result<Arc<Self>> {
+        let inode_charge = fs.reserve_inode()?;
+        Ok(Arc::new_cyclic(|weak_self| Self {
+            inner: make_inner(weak_self.clone()),
+            metadata: SpinLock::new(metadata),
+            ino: fs.alloc_id(),
+            _inode_charge: inode_charge,
+            typ,
+            dir_revalidation_policy: if typ == InodeType::Dir {
+                fs.revalidation_policy
+            } else {
+                RevalidationPolicy::empty()
+            },
+            this: weak_self.clone(),
+            fs: Arc::downgrade(fs),
+            container_dev_id: fs.sb.container_dev_id,
+            hard_linkability,
+            extension: Extension::new(),
+            to_be_revalidated: to_be_revalidated.as_bool(),
+            xattr: RamXattr::new(),
+        }))
+    }
+
     fn new_dir(
         fs: &Arc<RamFs>,
         mode: InodeMode,
@@ -528,21 +621,15 @@ impl RamInode {
         gid: Gid,
         parent: &Weak<RamInode>,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_dir(weak_self.clone(), parent.clone()),
-            metadata: SpinLock::new(InodeMeta::new_dir(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: InodeType::Dir,
-            dir_revalidation_policy: fs.revalidation_policy,
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+    ) -> Result<Arc<Self>> {
+        Self::new(
+            fs,
+            |this| Inner::new_dir(this, parent.clone()),
+            InodeMeta::new_dir(mode, uid, gid),
+            InodeType::Dir,
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn new_file(
@@ -551,21 +638,15 @@ impl RamInode {
         uid: Uid,
         gid: Gid,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_file(),
-            metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: InodeType::File,
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+    ) -> Result<Arc<Self>> {
+        Self::new(
+            fs,
+            |_| Inner::new_file(fs.page_quota.clone()),
+            InodeMeta::new(mode, uid, gid),
+            InodeType::File,
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn new_tmpfile(
@@ -575,21 +656,15 @@ impl RamInode {
         gid: Gid,
         hard_linkability: HardLinkability,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_file(),
-            metadata: SpinLock::new(InodeMeta::new_tmpfile(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: InodeType::File,
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
+    ) -> Result<Arc<Self>> {
+        Self::new(
+            fs,
+            |_| Inner::new_file(fs.page_quota.clone()),
+            InodeMeta::new_tmpfile(mode, uid, gid),
+            InodeType::File,
             hard_linkability,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+            to_be_revalidated,
+        )
     }
 
     /// Creates a `RamInode` that is detached from any `RamFs`, and resides in a `MemfdInode`.
@@ -604,6 +679,7 @@ impl RamInode {
             inner: Inner::new_file_in_memfd(),
             metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
             ino: weak_self.as_ptr() as u64,
+            _inode_charge: None,
             typ: InodeType::File,
             dir_revalidation_policy: RevalidationPolicy::empty(),
             this: Weak::new(),
@@ -623,25 +699,17 @@ impl RamInode {
         gid: Gid,
         target: &str,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_symlink(target),
-            metadata: SpinLock::new({
-                let mut metadata = InodeMeta::new(mode, uid, gid);
-                metadata.size = target.len();
-                metadata
-            }),
-            ino: fs.alloc_id(),
-            typ: InodeType::SymLink,
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+    ) -> Result<Arc<Self>> {
+        let mut metadata = InodeMeta::new(mode, uid, gid);
+        metadata.size = target.len();
+        Self::new(
+            fs,
+            |_| Inner::new_symlink(target),
+            metadata,
+            InodeType::SymLink,
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn new_device(
@@ -652,26 +720,19 @@ impl RamInode {
         dev_type: DeviceType,
         dev_id: u64,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
         let inner = match dev_type {
             DeviceType::Block => Inner::new_block_device(dev_id),
             DeviceType::Char => Inner::new_char_device(dev_id),
         };
-
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner,
-            metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: dev_type.into(),
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+        Self::new(
+            fs,
+            |_| inner,
+            InodeMeta::new(mode, uid, gid),
+            dev_type.into(),
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn new_socket(
@@ -680,21 +741,15 @@ impl RamInode {
         uid: Uid,
         gid: Gid,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_socket(),
-            metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: InodeType::Socket,
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+    ) -> Result<Arc<Self>> {
+        Self::new(
+            fs,
+            |_| Inner::new_socket(),
+            InodeMeta::new(mode, uid, gid),
+            InodeType::Socket,
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn new_named_pipe(
@@ -703,21 +758,15 @@ impl RamInode {
         uid: Uid,
         gid: Gid,
         to_be_revalidated: ToBeRevalidated,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_named_pipe(),
-            metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
-            ino: fs.alloc_id(),
-            typ: InodeType::NamedPipe,
-            dir_revalidation_policy: RevalidationPolicy::empty(),
-            this: weak_self.clone(),
-            fs: Arc::downgrade(fs),
-            container_dev_id: fs.sb.container_dev_id,
-            hard_linkability: HardLinkability::Linkable,
-            extension: Extension::new(),
-            to_be_revalidated: to_be_revalidated.as_bool(),
-            xattr: RamXattr::new(),
-        })
+    ) -> Result<Arc<Self>> {
+        Self::new(
+            fs,
+            |_| Inner::new_named_pipe(),
+            InodeMeta::new(mode, uid, gid),
+            InodeType::NamedPipe,
+            HardLinkability::Linkable,
+            to_be_revalidated,
+        )
     }
 
     fn find(&self, name: &str) -> Result<Arc<Self>> {
@@ -923,7 +972,7 @@ impl RamInode {
                 to_be_revalidated,
             ),
             _ => panic!("unsupported inode type"),
-        };
+        }?;
 
         let mut self_dir = self_dir.upgrade();
         self_dir.append_entry(name, new_inode.clone());
@@ -981,7 +1030,7 @@ impl RamInode {
                 gid,
                 to_be_revalidated,
             ),
-        };
+        }?;
 
         let mut self_dir = self_dir.upgrade();
         self_dir.append_entry(name, new_inode.clone());
@@ -1070,7 +1119,9 @@ impl FileOps for RamInode {
 
                 let mut inode_meta = self.metadata.lock();
                 let file_size = inode_meta.size;
-                let new_size = offset + write_len;
+                let new_size = offset
+                    .checked_add(write_len)
+                    .ok_or_else(|| Error::new(Errno::EFBIG))?;
                 let should_expand_size = new_size > file_size;
                 let new_size_aligned = new_size.align_up(BLOCK_SIZE);
                 inode_meta.set_mtime(now);
@@ -1084,9 +1135,21 @@ impl FileOps for RamInode {
                 if should_expand_size {
                     page_cache.resize(new_size_aligned, file_size)?;
                 }
-                page_cache.write(offset, reader)?;
-
-                write_len
+                let result = page_cache.as_vmo().write(offset, reader);
+                let written = write_len - reader.remain();
+                let final_size = if written == 0 {
+                    file_size
+                } else {
+                    file_size.max(offset + written)
+                };
+                if should_expand_size && final_size != new_size {
+                    page_cache.resize(final_size, new_size)?;
+                    self.metadata.lock().resize(final_size);
+                }
+                if written == 0 {
+                    result?;
+                }
+                written
             }
             _ => return_errno_with_message!(Errno::EISDIR, "write is not supported"),
         };
@@ -1256,7 +1319,7 @@ impl Inode for RamInode {
             gid,
             hard_linkability,
             ToBeRevalidated::No,
-        ))
+        )?)
     }
 
     fn link(&self, _self_dentry: &Dentry, old_dentry: &Dentry, name: &str) -> Result<()> {

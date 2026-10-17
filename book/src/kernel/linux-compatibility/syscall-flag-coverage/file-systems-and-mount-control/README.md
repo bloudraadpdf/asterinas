@@ -38,6 +38,15 @@ Partially supported mount flags:
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/mount.2.html).
 
+For `tmpfs`, mount options include `size`, `nr_blocks`, `nr_inodes`, `mode`,
+`uid` and `gid`. Size and inode limits default to half the physical memory,
+with one inode for each page. A zero limit disables that limit.
+The limits apply to allocated data pages and live inodes. Shared mappings
+use the same page budget as file writes. Sparse reads do not allocate pages.
+Page exhaustion returns `ENOSPC` for writes and `SIGBUS` for mapping faults.
+Unsupported options return `EINVAL`. Swap and remount limit changes are not
+implemented.
+
 ### `umount` and `umount2`
 
 Supported functionality in SCML:

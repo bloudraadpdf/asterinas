@@ -13,7 +13,7 @@ use ostd::{
     sync::WaitQueue,
 };
 
-use crate::prelude::*;
+use crate::{prelude::*, util::quota::QuotaCharge};
 
 /// The state of a page in the page cache.
 #[repr(u8)]
@@ -89,6 +89,7 @@ pub(crate) struct CachePageMeta {
     /// cleared without the page lock only from the BIO completion callback after
     /// the VMO writeback path has handed off the writeback state.
     is_writing_back: AtomicBool,
+    _charge: SpinLock<Option<QuotaCharge>>,
     // TODO: Add a reverse mapping from the page to VMO for eviction.
 }
 
@@ -98,6 +99,7 @@ impl Default for CachePageMeta {
             state: AtomicPageState::new(PageState::Uninit),
             lock: AtomicBool::new(false),
             is_writing_back: AtomicBool::new(false),
+            _charge: SpinLock::new(None),
         }
     }
 }
@@ -163,15 +165,23 @@ pub(crate) trait CachePageExt: Sized {
     }
 
     /// Allocates a new zeroed cache page with the up-to-date state.
-    fn alloc_zero() -> Result<CachePage> {
+    fn alloc_zero(charge: Option<QuotaCharge>) -> Result<CachePage> {
         let meta = CachePageMeta {
             state: AtomicPageState::new(PageState::UpToDate),
+            _charge: SpinLock::new(charge),
             ..Default::default()
         };
         let page = FrameAllocOptions::new()
             .zeroed(true)
             .alloc_frame_with(meta)?;
         Ok(page)
+    }
+
+    /// Releases a reservation after removal from the VMO and its mappings.
+    /// RCU can retain old page-array entries after logical removal.
+    fn release_quota(&self) {
+        let charge = self.metadata()._charge.lock().take();
+        drop(charge);
     }
 
     /// Returns the state of the cache page.

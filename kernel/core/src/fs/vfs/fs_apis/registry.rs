@@ -108,7 +108,6 @@ pub(crate) struct FsCreationCtx<'a> {
     #[cfg(any(feature = "filesystems_extra", ktest))]
     source: Option<&'a str>,
     flags: FsFlags,
-    #[cfg(any(feature = "filesystems_extra", ktest))]
     args: Option<&'a str>,
     #[cfg(any(feature = "filesystems_extra", ktest))]
     block_device: BlockDeviceResolution<'a>,
@@ -133,7 +132,6 @@ impl<'a> FsCreationCtx<'a> {
             #[cfg(any(feature = "filesystems_extra", ktest))]
             source: _source,
             flags,
-            #[cfg(any(feature = "filesystems_extra", ktest))]
             args: _args,
             #[cfg(any(feature = "filesystems_extra", ktest))]
             block_device: BlockDeviceResolution::Pending(_task_ctx),
@@ -151,7 +149,6 @@ impl<'a> FsCreationCtx<'a> {
             #[cfg(any(feature = "filesystems_extra", ktest))]
             source: None,
             flags,
-            #[cfg(any(feature = "filesystems_extra", ktest))]
             args: _args,
             #[cfg(any(feature = "filesystems_extra", ktest))]
             block_device: BlockDeviceResolution::Resolved(_block_device),
@@ -171,7 +168,6 @@ impl<'a> FsCreationCtx<'a> {
     }
 
     /// Returns the file system specific mount arguments.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) fn args(&self) -> Option<&str> {
         self.args
     }

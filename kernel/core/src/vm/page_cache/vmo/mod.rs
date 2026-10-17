@@ -34,6 +34,7 @@ use xarray::{Cursor, LockedXArray, XArray};
 use crate::vm::page_cache::PageRun;
 use crate::{
     prelude::*,
+    util::quota::Quota,
     vm::{
         page_cache::{CachePage, CachePageExt, PageCacheBackend, cache_page::PageState},
         vmar::Rmap,
@@ -124,6 +125,7 @@ pub struct Vmo {
     pub(super) backend: Option<Weak<dyn PageCacheBackend>>,
     /// Flags
     pub(super) flags: VmoFlags,
+    pub(super) quota: Option<Arc<Quota>>,
     /// The virtual pages where the VMO resides.
     pub(super) pages: XArray<CachePage>,
     /// The size of the VMO.
@@ -142,6 +144,24 @@ pub struct Vmo {
     pub(super) writable_mapping_status: WritableMappingStatus,
     /// Reverse mappings.
     pub(super) rmap: Mutex<Rmap>,
+}
+
+impl Drop for Vmo {
+    fn drop(&mut self) {
+        if self.quota.is_none() {
+            return;
+        }
+        let pages = self.pages.lock();
+        let mut cursor = pages.cursor(0);
+        loop {
+            if let Some(page) = cursor.load() {
+                page.release_quota();
+            }
+            if cursor.next_present().is_none() {
+                break;
+            }
+        }
+    }
 }
 
 impl Debug for Vmo {
@@ -320,7 +340,8 @@ impl Vmo {
             return Ok(page.clone());
         }
 
-        let new_page = CachePage::alloc_zero()?;
+        let charge = self.quota.as_ref().map(Quota::charge).transpose()?;
+        let new_page = CachePage::alloc_zero(charge)?;
         cursor.store(new_page.clone());
         Ok(new_page)
     }
@@ -496,8 +517,11 @@ impl Vmo {
         // We remove pages before unmapping them in the page table. So a concurrent page fault will
         // synchronize via the page table lock. Either the mapped item will be unmapped below or the
         // page fault handler will commit the page and be blocked on the reverse-mapping lock.
+        let mut removed = Vec::new();
         loop {
-            cursor.remove();
+            if let Some(page) = cursor.remove() {
+                removed.push(page.clone());
+            }
             let page_idx = cursor.next_present();
             if page_idx.is_none_or(|idx| idx >= page_idx_range.end as u64) {
                 break;
@@ -507,6 +531,9 @@ impl Vmo {
         drop(locked_pages);
 
         locked_rmap.unmap(page_idx_range.start * PAGE_SIZE..page_idx_range.end * PAGE_SIZE);
+        for page in removed {
+            page.release_quota();
+        }
 
         Ok(())
     }
@@ -540,6 +567,9 @@ impl Vmo {
             return Ok(());
         }
         let read_end = offset + read_len;
+        if self.quota.is_some() && !self.has_backend() {
+            return self.read_sparse_anonymous(offset..read_end, writer);
+        }
 
         let range = offset..read_end;
         let page_idx_range = get_page_idx_range(&range);
@@ -566,6 +596,32 @@ impl Vmo {
             current_idx = page_batch.last().unwrap().0 + 1;
         }
 
+        Ok(())
+    }
+
+    fn read_sparse_anonymous(&self, range: Range<usize>, writer: &mut VmWriter) -> Result<()> {
+        static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let mut offset = range.start;
+        while offset < range.end {
+            let page_offset = offset % PAGE_SIZE;
+            let length = (PAGE_SIZE - page_offset).min(range.end - offset);
+            let page = {
+                let pages = self.pages.lock();
+                pages
+                    .cursor((offset / PAGE_SIZE) as u64)
+                    .load()
+                    .map(|page| page.clone())
+            };
+            if let Some(page) = page {
+                page.reader()
+                    .skip(page_offset)
+                    .limit(length)
+                    .read_fallible(writer)?;
+            } else {
+                VmReader::from(&ZERO_PAGE[..length]).read_fallible(writer)?;
+            }
+            offset += length;
+        }
         Ok(())
     }
 
@@ -660,7 +716,22 @@ impl Vmo {
             let write_len = (range.end - current_offset).min(page_remaining);
             let mut reader = VmReader::from(&ZERO_PAGE[..write_len]).to_fallible();
 
-            self.write(current_offset, &mut reader)?;
+            if !self.has_backend() {
+                let page = {
+                    let pages = self.pages.lock();
+                    pages
+                        .cursor((current_offset / PAGE_SIZE) as u64)
+                        .load()
+                        .map(|page| page.clone())
+                };
+                if let Some(page) = page {
+                    page.writer()
+                        .skip(current_offset % PAGE_SIZE)
+                        .write_fallible(&mut reader)?;
+                }
+            } else {
+                self.write(current_offset, &mut reader)?;
+            }
             current_offset += write_len;
         }
 
@@ -795,7 +866,11 @@ impl Vmo {
             match self.try_operate_on_range_internal(&current_range, &mut operate, commit_mode) {
                 Ok(()) => break 'retry,
                 Err(err) => {
-                    let (idx, page) = self.handle_commit_error(err, commit_mode)?;
+                    let (idx, page) = match self.handle_commit_error(err, commit_mode) {
+                        Ok(value) => value,
+                        Err(_) if !pages.is_empty() => break 'retry,
+                        Err(error) => return Err(error),
+                    };
                     pages.push((idx, page));
                     current_range.start = (idx + 1) * PAGE_SIZE;
                     if current_range.start >= range.end {

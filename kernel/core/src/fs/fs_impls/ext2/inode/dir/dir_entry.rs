@@ -398,7 +398,7 @@ mod test {
 
     #[ktest]
     fn iter_all_zero_block_returns_eio() {
-        let page_cache = PageCache::new_anon(BLOCK_SIZE).unwrap();
+        let page_cache = PageCache::new_anon(BLOCK_SIZE, None).unwrap();
         let view = DirBlockView::from_index(&page_cache, 0, BLOCK_SIZE);
         let mut iter = view.iter_entries();
         assert_errno!(iter.next_entry(), Errno::EIO);
@@ -406,7 +406,7 @@ mod test {
 
     #[ktest]
     fn iter_bad_entry_returns_eio() {
-        let page_cache = PageCache::new_anon(BLOCK_SIZE).unwrap();
+        let page_cache = PageCache::new_anon(BLOCK_SIZE, None).unwrap();
 
         // Write a first entry with ino=2, rec_len=8, name_len=1, type=Dir, name='.'.
         // rec_len=8 is exactly the header size, which is too small for name_len=1
@@ -426,7 +426,7 @@ mod test {
 
     #[ktest]
     fn iter_valid_entries_ok() {
-        let page_cache = PageCache::new_anon(BLOCK_SIZE).unwrap();
+        let page_cache = PageCache::new_anon(BLOCK_SIZE, None).unwrap();
         let mut block = vec![0u8; BLOCK_SIZE];
 
         // Entry 1: ino=2, name=".", type=Dir, rec_len=12
@@ -466,7 +466,7 @@ mod test {
 
     #[ktest]
     fn iter_deleted_entry_yields_empty_name() {
-        let page_cache = PageCache::new_anon(BLOCK_SIZE).unwrap();
+        let page_cache = PageCache::new_anon(BLOCK_SIZE, None).unwrap();
         let mut block = vec![0u8; BLOCK_SIZE];
 
         // Deleted entry: ino=0, rec_len=BLOCK_SIZE (fills entire block)

@@ -11,6 +11,7 @@ use xarray::XArray;
 use super::{Vmo, VmoFlags, WritableMappingStatus};
 use crate::{
     prelude::*,
+    util::quota::Quota,
     vm::{
         page_cache::{CachePage, CachePageMeta, PageCacheBackend},
         vmar::Rmap,
@@ -43,6 +44,7 @@ use crate::{
 pub(crate) struct VmoOptions {
     size: usize,
     flags: VmoFlags,
+    quota: Option<Arc<Quota>>,
     backend: Option<Weak<dyn PageCacheBackend>>,
 }
 
@@ -59,6 +61,7 @@ impl VmoOptions {
         Self {
             size,
             flags: VmoFlags::empty(),
+            quota: None,
             backend: None,
         }
     }
@@ -72,6 +75,11 @@ impl VmoOptions {
     #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn new_page_cache(size: usize, backend: Weak<dyn PageCacheBackend>) -> Self {
         Self::new(size).flags(VmoFlags::RESIZABLE).backend(backend)
+    }
+
+    pub(crate) fn quota(mut self, quota: Option<Arc<Quota>>) -> Self {
+        self.quota = quota;
+        self
     }
 
     /// Sets the VMO flags.
@@ -99,9 +107,10 @@ impl VmoOptions {
             size,
             flags,
             backend,
+            quota,
             ..
         } = self;
-        let vmo = alloc_vmo(size, flags, backend)?;
+        let vmo = alloc_vmo(size, flags, backend, quota)?;
         Ok(Arc::new(vmo))
     }
 }
@@ -110,6 +119,7 @@ fn alloc_vmo(
     size: usize,
     flags: VmoFlags,
     backend: Option<Weak<dyn PageCacheBackend>>,
+    quota: Option<Arc<Quota>>,
 ) -> Result<Vmo> {
     let size = size.align_up(PAGE_SIZE);
     let pages = committed_pages_if_continuous(flags, size)?;
@@ -118,6 +128,7 @@ fn alloc_vmo(
     Ok(Vmo {
         backend,
         flags,
+        quota,
         pages,
         size: AtomicUsize::new(size),
         writable_mapping_status,
@@ -200,7 +211,7 @@ mod test {
     fn resize() {
         use crate::vm::page_cache::PageCache;
 
-        let mut page_cache = PageCache::new_anon(PAGE_SIZE).unwrap();
+        let mut page_cache = PageCache::new_anon(PAGE_SIZE, None).unwrap();
         page_cache.write_val(10, &42u8).unwrap();
         page_cache.resize(2 * PAGE_SIZE, page_cache.size()).unwrap();
         assert_eq!(page_cache.size(), 2 * PAGE_SIZE);
