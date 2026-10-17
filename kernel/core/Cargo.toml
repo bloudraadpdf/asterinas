@@ -80,12 +80,13 @@ log_max_level_info = ["ostd/log_max_level_info"]
 default = ["cvm_guest", "console_video", "storage_nvme", "filesystems_extra", "virtio_devices", "virtio_pci"]
 console_video = ["dep:aster-framebuffer", "dep:aster-input"]
 storage_nvme = ["dep:aster-nvme"]
-filesystems_extra = ["dep:aster-fuse", "virtio_devices"]
+configfs = []
+filesystems_extra = ["configfs", "dep:aster-fuse", "virtio_devices"]
 virtio_devices = ["aster-virtio/devices"]
 virtio_pci = ["aster-virtio/pci"]
 coverage = ["ostd/coverage"]
 cvm_guest = [
-    "filesystems_extra",
+    "configfs",
     "dep:tdx-guest",
     "ostd/cvm_guest",
     "aster-virtio/cvm_guest",

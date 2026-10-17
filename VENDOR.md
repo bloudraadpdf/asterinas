@@ -128,3 +128,10 @@ ramfs, memfd and device backings retain their previous limits.
 The eight Linux-reference cases also pass on four-vCPU Firecracker guests.
 The checks cover exhaustion, release, sparse files, partial writes, live
 unlinked inodes and concurrent writers. This patch adds no unsafe kernel code.
+
+The configuration patch gives configfs its own feature. `cvm_guest` keeps
+configfs, the TDX guest device, attestation and OSTD support without selecting
+unrelated extra filesystems or Virtio devices. Default builds retain those
+components through `filesystems_extra`. The reduced CVM profile, default and
+ktest builds pass Clippy. Linked symbols include the TDX device and configfs.
+Ordinary KVM checks do not establish TDX hardware execution. No AMD code changes.
