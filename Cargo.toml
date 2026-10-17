@@ -322,7 +322,3 @@ lto = true
 panic = "abort"
 # set codegen-units as the smallest number
 codegen-units = 1
-
-[profile.release-microvm]
-inherits = "release-lto"
-opt-level = "s"
