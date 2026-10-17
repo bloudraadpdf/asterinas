@@ -135,3 +135,8 @@ unrelated extra filesystems or Virtio devices. Default builds retain those
 components through `filesystems_extra`. The reduced CVM profile, default and
 ktest builds pass Clippy. Linked symbols include the TDX device and configfs.
 Ordinary KVM checks do not establish TDX hardware execution. No AMD code changes.
+
+The OSDK image installer writes an independent boot ELF and replaces its output
+atomically. QEMU's ELF-header change can no longer modify a hard-linked compiler
+artifact. This also handles an output left as a hard link by an earlier build.
+The regression fails before the change and passes afterwards for both cases.
