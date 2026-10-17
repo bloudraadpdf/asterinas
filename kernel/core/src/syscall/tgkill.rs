@@ -40,10 +40,26 @@ fn do_sys_tgkill(tgid: Option<Pid>, tid: Tid, sig_num: u8, ctx: &Context) -> Res
     }
 
     let signal = sig_num.map(|sig_num| {
-        let pid = ctx.process.pid();
+        let identity = ctx.process.pid_identity().clone();
         let uid = ctx.posix_thread.credentials().ruid();
-        Box::new(UserSignal::new(sig_num, UserSignalKind::Tkill, pid, uid)) as Box<dyn Signal>
+        Box::new(UserSignal::new(
+            sig_num,
+            UserSignalKind::Tkill,
+            identity,
+            uid,
+        )) as Box<dyn Signal>
     });
+    let namespace = ctx.process.pid_namespace();
+    let tid = namespace
+        .resolve(tid)
+        .ok_or_else(|| Error::new(Errno::ESRCH))?;
+    let tgid = tgid
+        .map(|pid| {
+            namespace
+                .resolve(pid)
+                .ok_or_else(|| Error::new(Errno::ESRCH))
+        })
+        .transpose()?;
     tgkill(tid, tgid, signal, ctx)?;
     Ok(SyscallReturn::Return(0))
 }

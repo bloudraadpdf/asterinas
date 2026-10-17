@@ -21,7 +21,10 @@ use crate::{
         },
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable},
+    process::{
+        PidNamespace,
+        signal::{PollHandle, Pollable},
+    },
     util::ioctl::RawIoctl,
     vm::vmar::FileMmapRequest,
 };
@@ -495,7 +498,11 @@ impl FileLike for InodeHandle {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             inner: Arc<InodeHandle>,
             fd_flags: FdFlags,

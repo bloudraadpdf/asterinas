@@ -10,7 +10,7 @@ use super::sem::{
 use crate::{
     ipc::{IpcKey, IpcPermission},
     prelude::*,
-    process::{Credentials, Pid},
+    process::{Credentials, PidIdentity},
     time::clocks::RealTimeCoarseClock,
 };
 
@@ -162,7 +162,7 @@ impl SemaphoreSet {
         self.num_sems
     }
 
-    pub(crate) fn setval(&self, sem_num: usize, val: i32, pid: Pid) -> Result<()> {
+    pub(crate) fn setval(&self, sem_num: usize, val: i32, pid: Arc<PidIdentity>) -> Result<()> {
         if !(0..=SEMVMX).contains(&val) {
             return_errno_with_message!(Errno::ERANGE, "the semaphore value exceeds SEMVMX");
         }

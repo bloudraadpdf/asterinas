@@ -57,7 +57,7 @@ pub(super) fn sys_semctl(
         }
         IpcControlCmd::SEM_GETPID => {
             fn sem_pid(sem: &Semaphore) -> Pid {
-                sem.latest_modified_pid()
+                sem.latest_modified_pid(current!().pid_namespace())
             }
             let pid: Pid = ipc_ns.with_sem_set(semid, PermissionMode::READ, |sem_set| {
                 sem_set.get(semnum as usize, sem_pid)
@@ -94,7 +94,7 @@ pub(super) fn sys_semctl(
             let val = arg as i32;
 
             ipc_ns.with_sem_set(semid, PermissionMode::ALTER, |sem_set| {
-                sem_set.setval(semnum as usize, val, ctx.process.pid())
+                sem_set.setval(semnum as usize, val, ctx.process.pid_identity().clone())
             })?;
         }
     }

@@ -21,7 +21,7 @@ use crate::{
     net::uts_ns::UtsNamespace,
     prelude::*,
     process::{
-        CloneFlags, ContextSetNsAdminApi, NsProxy, NsProxyBuilder, PidFile,
+        CloneFlags, ContextSetNsAdminApi, NsProxy, NsProxyBuilder, PidFile, PidNamespace,
         check_unsupported_ns_flags, credentials::capabilities::CapSet, posix_thread::AsPosixThread,
     },
     security::lsm::hooks as lsm_hooks,
@@ -71,10 +71,10 @@ fn build_proxy_from_pid_file(
 
     check_unsupported_ns_flags(flags)?;
 
-    let target_thread = pid_file
+    let target_process = pid_file
         .process_opt()
-        .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target process has been reaped"))?
-        .main_thread();
+        .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target process has been reaped"))?;
+    let target_thread = target_process.main_thread();
     let target_proxy = target_thread.as_posix_thread().unwrap().ns_proxy().lock();
     let Some(target_proxy) = target_proxy.as_ref() else {
         return_errno_with_message!(Errno::ESRCH, "the target process has exited");
@@ -103,6 +103,10 @@ fn build_proxy_from_pid_file(
     if flags.contains(CloneFlags::CLONE_NEWUTS) {
         let target_ns = target_proxy.uts_ns();
         set_uts_ns(&mut builder, target_ns, ctx)?;
+    }
+
+    if flags.contains(CloneFlags::CLONE_NEWPID) {
+        set_pid_ns(&mut builder, target_process.pid_namespace(), ctx)?;
     }
 
     // TODO: Support setting other namespaces from the target process.
@@ -143,6 +147,9 @@ fn build_proxy_from_ns_file(
         })?
         || try_apply_ns_from_inode::<UtsNamespace>(inode_handle, flags, |ns| {
             set_uts_ns(&mut builder, &ns, ctx)
+        })?
+        || try_apply_ns_from_inode::<PidNamespace>(inode_handle, flags, |ns| {
+            set_pid_ns(&mut builder, &ns, ctx)
         })?;
     // TODO: Support setting other namespaces from the ns file.
 
@@ -227,6 +234,19 @@ fn set_uts_ns(
 
     builder.uts_ns(target_ns.clone());
 
+    Ok(())
+}
+
+fn set_pid_ns(
+    builder: &mut NsProxyBuilder,
+    target: &Arc<PidNamespace>,
+    ctx: &Context,
+) -> Result<()> {
+    check_set_ns_perms(target, ctx)?;
+    if !ctx.process.pid_namespace().is_same_or_ancestor_of(target) {
+        return_errno_with_message!(Errno::EINVAL, "the PID namespace is not a descendant");
+    }
+    builder.pid_ns_for_children(target.clone());
     Ok(())
 }
 

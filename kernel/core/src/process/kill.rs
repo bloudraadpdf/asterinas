@@ -64,6 +64,9 @@ pub(crate) fn kill_group<S: Signal + Clone>(
 
     let inner = process_group.lock();
     for process in inner.iter() {
+        if process.pid_in(ctx.process.pid_namespace()) == 0 {
+            continue;
+        }
         let res = kill_process(
             &process,
             signal.clone().map(|s| Box::new(s) as Box<dyn Signal>),
@@ -94,6 +97,16 @@ pub(crate) fn tgkill(
         .get_thread(tid)
         .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target thread does not exist"))?;
     let target_posix_thread = thread.as_posix_thread().unwrap();
+    if target_posix_thread
+        .process()
+        .pid_in(ctx.process.pid_namespace())
+        == 0
+    {
+        return_errno_with_message!(
+            Errno::ESRCH,
+            "the target thread is outside the PID namespace"
+        );
+    }
 
     if let Some(tgid) = tgid {
         // Check the TGID
@@ -132,7 +145,7 @@ pub(crate) fn kill_all<S: Signal + Clone>(signal: Option<S>, ctx: &Context) -> R
     let mut result = Ok(());
 
     for process in pid_table::pid_table_mut().iter_processes() {
-        if Arc::ptr_eq(&ctx.process, &process) || process.is_init_process() {
+        if Arc::ptr_eq(&ctx.process, &process) || process.pid_in(ctx.process.pid_namespace()) <= 1 {
             continue;
         }
 
@@ -150,6 +163,12 @@ pub(crate) fn kill_all<S: Signal + Clone>(signal: Option<S>, ctx: &Context) -> R
 }
 
 fn kill_process(process: &Process, signal: Option<Box<dyn Signal>>, ctx: &Context) -> Result<()> {
+    if process.pid_in(ctx.process.pid_namespace()) == 0 {
+        return_errno_with_message!(
+            Errno::ESRCH,
+            "the target process is outside the PID namespace"
+        );
+    }
     let signum = signal.as_ref().map(|signal| signal.num());
     let target_main_thread = process.main_thread();
     check_signal_perm(target_main_thread.as_posix_thread().unwrap(), ctx, signum)?;

@@ -50,12 +50,14 @@ pub(super) fn sys_prlimit64(
         Some(user_space.read_val(new_rlim_addr)?)
     };
 
-    let old_raw = if pid == 0 || pid == ctx.process.pid() {
+    let old_raw = if pid == 0 || pid == ctx.process.namespace_pid() {
         do_prlimit64(&ctx.process, resource, new_raw, ctx)?
     } else {
-        let target_process = pid_table::pid_table_mut().get_process(pid).ok_or_else(|| {
-            Error::with_message(Errno::ESRCH, "the target process does not exist")
-        })?;
+        let target_process = pid_table::pid_table_mut()
+            .get_process_in(pid, ctx.process.pid_namespace())
+            .ok_or_else(|| {
+                Error::with_message(Errno::ESRCH, "the target process does not exist")
+            })?;
         // Check permissions
         check_rlimit_perm(&target_process, ctx)?;
         do_prlimit64(&target_process, resource, new_raw, ctx)?

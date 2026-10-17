@@ -13,7 +13,7 @@ pub(super) fn sys_get_priority(which: i32, who: u32, ctx: &Context) -> Result<Sy
     let prio_target = PriorityTarget::new(which, who, ctx)?;
     debug!("get_priority prio_target: {:?}", prio_target);
 
-    let processes = get_processes(prio_target)?;
+    let processes = get_processes(prio_target, ctx)?;
     let highest_prio = {
         let mut nice = Nice::MAX.value().get();
         for process in processes.iter() {
@@ -32,7 +32,10 @@ pub(super) fn sys_get_priority(which: i32, who: u32, ctx: &Context) -> Result<Sy
     Ok(SyscallReturn::Return(highest_prio as _))
 }
 
-pub(super) fn get_processes(prio_target: PriorityTarget) -> Result<Vec<Arc<Process>>> {
+pub(super) fn get_processes(
+    prio_target: PriorityTarget,
+    ctx: &Context,
+) -> Result<Vec<Arc<Process>>> {
     Ok(match prio_target {
         PriorityTarget::Process(pid) => {
             let process = pid_table::pid_table_mut()
@@ -44,7 +47,11 @@ pub(super) fn get_processes(prio_target: PriorityTarget) -> Result<Vec<Arc<Proce
             let process_group = pid_table::pid_table_mut()
                 .get_process_group(&pgid)
                 .ok_or(Error::new(Errno::ESRCH))?;
-            let processes: Vec<Arc<Process>> = process_group.lock().iter().collect();
+            let processes: Vec<Arc<Process>> = process_group
+                .lock()
+                .iter()
+                .filter(|process| process.pid_in(ctx.process.pid_namespace()) != 0)
+                .collect();
             if processes.is_empty() {
                 return_errno!(Errno::ESRCH);
             }
@@ -58,7 +65,8 @@ pub(super) fn get_processes(prio_target: PriorityTarget) -> Result<Vec<Arc<Proce
                 .filter(|process| {
                     let main_thread = process.main_thread();
                     let posix_thread = main_thread.as_posix_thread().unwrap();
-                    uid == posix_thread.credentials().ruid()
+                    process.pid_in(ctx.process.pid_namespace()) != 0
+                        && uid == posix_thread.credentials().ruid()
                 })
                 .collect();
             if processes.is_empty() {
@@ -85,7 +93,10 @@ impl PriorityTarget {
                 let pid = if who == 0 {
                     ctx.process.pid()
                 } else {
-                    who as Pid
+                    ctx.process
+                        .pid_namespace()
+                        .resolve(who)
+                        .ok_or_else(|| Error::new(Errno::ESRCH))?
                 };
                 Self::Process(pid)
             }
@@ -93,7 +104,10 @@ impl PriorityTarget {
                 let pgid = if who == 0 {
                     ctx.process.pgid()
                 } else {
-                    who as Pgid
+                    ctx.process
+                        .pid_namespace()
+                        .resolve(who)
+                        .ok_or_else(|| Error::new(Errno::ESRCH))?
                 };
                 Self::ProcessGroup(pgid)
             }

@@ -15,7 +15,7 @@ use crate::{
         TermStatus,
         exit::{drop_after, exit_process},
         pid_table,
-        signal::{constants::SIGKILL, signals::kernel::KernelSignal},
+        signal::signals::kernel::KernelSignal,
         task_set::TaskSet,
     },
     thread::{AsThread, Tid},
@@ -100,7 +100,7 @@ fn exit_internal(
 
     wake_clear_ctid(thread_local);
 
-    wake_robust_list(thread_local, posix_thread.tid());
+    wake_robust_list(thread_local, posix_thread.namespace_tid());
 
     // According to Linux behavior, the main thread shouldn't be removed from the table until the
     // process is reaped by its parent.
@@ -137,7 +137,7 @@ pub(in crate::process) fn sigkill_other_threads(current_task: &Task, task_set: &
         }
         task.as_posix_thread()
             .unwrap()
-            .enqueue_signal(Box::new(KernelSignal::new(SIGKILL)));
+            .enqueue_signal(Box::new(KernelSignal::new_kill()));
     }
 }
 

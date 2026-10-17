@@ -36,7 +36,7 @@ pub(super) fn sys_capset(
     // Reference: The "With VFS capabilities support" section in
     // <https://man7.org/linux/man-pages/man2/capset.2.html>.
     let header_pid = cap_user_header.pid;
-    if header_pid != 0 && header_pid != ctx.posix_thread.tid() {
+    if header_pid != 0 && header_pid != ctx.posix_thread.namespace_tid() {
         return_errno_with_message!(
             Errno::EPERM,
             "setting other threads' capabilities is not allowed"

@@ -572,8 +572,9 @@ inherit_sys_branch_node!(CgroupSystem, fields, {
             "cgroup.procs" => {
                 let pid_table = pid_table::pid_table_mut();
                 for process in pid_table.iter_processes() {
-                    if process.cgroup().is_none() {
-                        writeln!(printer, "{}", process.pid())?;
+                    let pid = process.pid_in(current!().pid_namespace());
+                    if pid != 0 && process.cgroup().is_none() {
+                        writeln!(printer, "{}", pid)?;
                     }
                 }
             }
@@ -691,8 +692,11 @@ inherit_sys_branch_node!(CgroupNode, fields, {
                 .ok_or(Error::IsDead)?,
             "cgroup.procs" => self
                 .with_inner(|processes| {
-                    for pid in processes.keys() {
-                        writeln!(printer, "{}", pid)?;
+                    for process in processes.values().filter_map(Weak::upgrade) {
+                        let pid = process.pid_in(current!().pid_namespace());
+                        if pid != 0 {
+                            writeln!(printer, "{}", pid)?;
+                        }
                     }
 
                     Ok::<usize, Error>(printer.bytes_written())
@@ -812,7 +816,7 @@ where
         current!()
     } else {
         pid_table::pid_table_mut()
-            .get_process(pid)
+            .get_process_in(pid, current!().pid_namespace())
             .ok_or(Error::InvalidOperation)?
     };
 

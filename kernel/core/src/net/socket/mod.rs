@@ -15,6 +15,7 @@ use crate::{
     },
     net::socket::util::ioctl::socket_ioctl,
     prelude::*,
+    process::PidNamespace,
     util::{MultiRead, MultiWrite, ioctl::RawIoctl},
 };
 
@@ -200,7 +201,11 @@ impl<T: Socket + 'static> FileLike for T {
         Socket::common(self)
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             flags: u32,
             ino: u64,

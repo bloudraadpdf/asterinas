@@ -19,6 +19,7 @@ use crate::{
     },
     prelude::*,
     process::{
+        PidNamespace,
         posix_thread::ThreadLocal,
         signal::{PollHandle, Pollable},
     },
@@ -273,7 +274,11 @@ impl FileLike for EpollFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             inner: Arc<EpollFile>,
             fd_flags: FdFlags,

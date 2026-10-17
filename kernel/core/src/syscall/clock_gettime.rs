@@ -121,7 +121,7 @@ pub(super) fn read_clock(clockid: clockid_t, ctx: &Context) -> Result<Duration> 
         match dynamic_clockid_info {
             DynamicClockIdInfo::Pid(pid, clock_type) => {
                 let process = pid_table::pid_table_mut()
-                    .get_process(pid)
+                    .get_process_in(pid, ctx.process.pid_namespace())
                     .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid clock ID"))?;
                 match clock_type {
                     DynamicClockType::Profiling => Ok(process.prof_clock().read_time()),
@@ -130,7 +130,7 @@ pub(super) fn read_clock(clockid: clockid_t, ctx: &Context) -> Result<Duration> 
             }
             DynamicClockIdInfo::Tid(tid, clock_type) => {
                 let thread = pid_table::pid_table_mut()
-                    .get_thread(tid)
+                    .get_thread_in(tid, ctx.process.pid_namespace())
                     .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid clock ID"))?;
                 let posix_thread = thread.as_posix_thread().unwrap();
                 match clock_type {

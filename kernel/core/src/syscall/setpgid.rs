@@ -17,10 +17,23 @@ pub(super) fn sys_setpgid(pid: Pid, pgid: Pgid, ctx: &Context) -> Result<Syscall
     }
 
     // "If `pid` is zero, then the process ID of the calling process is used."
-    let pid = if pid == 0 { current.pid() } else { pid };
+    let namespace = current.pid_namespace();
+    let pid = if pid == 0 {
+        current.pid()
+    } else {
+        namespace
+            .resolve(pid)
+            .ok_or_else(|| Error::new(Errno::ESRCH))?
+    };
     // "If `pgid` is zero, then the PGID of the process specified by `pid` is made the same as its
     // process ID."
-    let pgid = if pgid == 0 { pid } else { pgid };
+    let pgid = if pgid == 0 {
+        pid
+    } else {
+        namespace
+            .resolve(pgid)
+            .ok_or_else(|| Error::new(Errno::EPERM))?
+    };
 
     debug!("pid = {}, pgid = {}", pid, pgid);
 

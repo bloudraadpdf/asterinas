@@ -16,7 +16,7 @@ use super::{
 use crate::{
     ipc::{IpcFlags, IpcId, IpcNamespace},
     prelude::*,
-    process::Pid,
+    process::{Pid, PidIdentity, PidNamespace},
 };
 
 #[repr(C)]
@@ -54,7 +54,7 @@ pub(super) struct PendingOp {
     sops: Vec<SemBuf>,
     status: Arc<AtomicStatus>,
     waker: Option<Arc<Waker>>,
-    pid: Pid,
+    pid: Arc<PidIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub(super) enum PendingBlocker {
 }
 
 impl PendingOp {
-    fn new(sops: Vec<SemBuf>, pid: Pid, num_sems: usize) -> Result<Self> {
+    fn new(sops: Vec<SemBuf>, pid: Arc<PidIdentity>, num_sems: usize) -> Result<Self> {
         for op in sops.iter() {
             if op.sem_num as usize >= num_sems {
                 return_errno_with_message!(Errno::EFBIG, "the semaphore number is out of bounds");
@@ -150,7 +150,7 @@ pub(crate) struct Semaphore {
     /// - through `semop` with a zero or non-zero `sem_op`,
     /// - through `semctl` with `SETVAL` and `SETALL`, and
     /// - through `SEM_UNDO` on process exit.
-    latest_modified_pid: Pid,
+    latest_modified_pid: Option<Arc<PidIdentity>>,
 }
 
 impl Semaphore {
@@ -162,18 +162,20 @@ impl Semaphore {
         self.val
     }
 
-    pub(super) fn set_latest_modified_pid(&mut self, pid: Pid) {
-        self.latest_modified_pid = pid;
+    pub(super) fn set_latest_modified_pid(&mut self, pid: Arc<PidIdentity>) {
+        self.latest_modified_pid = Some(pid);
     }
 
-    pub(crate) fn latest_modified_pid(&self) -> Pid {
+    pub(crate) fn latest_modified_pid(&self, namespace: &PidNamespace) -> Pid {
         self.latest_modified_pid
+            .as_ref()
+            .map_or(0, |identity| identity.in_namespace(namespace))
     }
 
     pub(super) fn new(val: i32) -> Self {
         Self {
             val,
-            latest_modified_pid: 0,
+            latest_modified_pid: None,
         }
     }
 }
@@ -210,7 +212,8 @@ pub(crate) fn sem_op(
     }
 
     let sem_op_result = ipc_ns.with_sem_set(sem_id, PermissionMode::empty(), |sem_set| {
-        let mut pending_op = PendingOp::new(sops, ctx.process.pid(), sem_set.num_sems())?;
+        let mut pending_op =
+            PendingOp::new(sops, ctx.process.pid_identity().clone(), sem_set.num_sems())?;
 
         let mut inner = sem_set.inner();
 
@@ -461,7 +464,7 @@ fn perform_atomic_semop(sems: &mut [Semaphore], pending_op: &mut PendingOp) -> O
     for op in pending_op.sops_iter() {
         let sem = &mut sems[op.sem_num as usize];
         sem.val += i32::from(op.sem_op);
-        sem.latest_modified_pid = pending_op.pid;
+        sem.latest_modified_pid = Some(pending_op.pid.clone());
     }
 
     Some(Status::Normal)

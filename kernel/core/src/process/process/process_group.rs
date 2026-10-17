@@ -3,7 +3,10 @@
 use alloc::collections::btree_map::Values;
 
 use super::{BOOTSTRAP_PGID, BOOTSTRAP_SID, Pgid, Pid, Process, Session};
-use crate::{prelude::*, process::signal::signals::Signal};
+use crate::{
+    prelude::*,
+    process::{PidIdentity, PidNamespace, signal::signals::Signal},
+};
 
 /// A process group.
 ///
@@ -11,6 +14,7 @@ use crate::{prelude::*, process::signal::signals::Signal};
 /// which has a unique identifier PGID (i.e., [`Pgid`]).
 pub(crate) struct ProcessGroup {
     pgid: Pgid,
+    identity: Arc<PidIdentity>,
     session: Arc<Session>,
     inner: Mutex<Inner>,
 }
@@ -51,6 +55,7 @@ impl ProcessGroup {
 
         Arc::new(ProcessGroup {
             pgid,
+            identity: process.pid_identity().clone(),
             session,
             inner: Mutex::new(inner),
         })
@@ -59,6 +64,14 @@ impl ProcessGroup {
     /// Returns the process group identifier.
     pub(crate) fn pgid(&self) -> Pgid {
         self.pgid
+    }
+
+    pub(crate) fn pgid_in(&self, namespace: &PidNamespace) -> Pgid {
+        if self.pgid == BOOTSTRAP_PGID {
+            0
+        } else {
+            self.identity.in_namespace(namespace)
+        }
     }
 
     /// Returns the session to which the process group belongs.

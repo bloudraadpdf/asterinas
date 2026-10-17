@@ -12,14 +12,14 @@ use crate::{
     },
     prelude::*,
     process::{
-        Credentials, ProcessVm, ShebangScriptPath, UndetectedExecutable, UserNamespace, pid_table,
-        posix_thread::{PosixThreadBuilder, allocate_posix_tid, derive_thread_name},
+        Credentials, PidNamespace, ProcessVm, ShebangScriptPath, UndetectedExecutable,
+        UserNamespace, pid_table,
+        posix_thread::{PosixThreadBuilder, derive_thread_name},
         program_loader::ProgramToLoad,
         rlimit::new_resource_limits_for_init,
         signal::sig_disposition::SigDispositions,
     },
     sched::Nice,
-    thread::Tid,
     vm::vmar::VmarHandle,
 };
 
@@ -54,7 +54,7 @@ fn create_init_process(
 ) -> Result<Arc<Process>> {
     let fs = ThreadFsInfo::new(path_resolver);
 
-    let pid = allocate_posix_tid();
+    let pid_allocation = PidNamespace::get_init_singleton().allocate()?;
     let vmar = VmarHandle::new(ProcessVm::new(executable_path.clone()));
     let resource_limits = new_resource_limits_for_init();
     let nice = Nice::default();
@@ -63,7 +63,7 @@ fn create_init_process(
     let user_ns = UserNamespace::get_init_singleton().clone();
 
     let init_proc = Process::new(
-        pid,
+        pid_allocation.identity().clone(),
         vmar.clone_arc(),
         resource_limits,
         nice,
@@ -72,8 +72,9 @@ fn create_init_process(
         user_ns,
     );
 
-    let init_task = create_init_task(pid, &init_proc, fs, vmar, executable_path, argv, envp)?;
+    let init_task = create_init_task(&init_proc, fs, vmar, executable_path, argv, envp)?;
     init_proc.tasks().lock().insert(init_task).unwrap();
+    pid_allocation.publish(&init_proc);
 
     Ok(init_proc)
 }
@@ -94,7 +95,6 @@ fn set_bootstrap_session_and_group(process: &Arc<Process>) {
 
 /// Creates the init task from the given executable path.
 fn create_init_task(
-    tid: Tid,
     process: &Arc<Process>,
     fs: ThreadFsInfo,
     vmar: VmarHandle,
@@ -125,9 +125,14 @@ fn create_init_task(
 
     let thread_name = derive_thread_name(&executable_abs_path);
 
-    let thread_builder =
-        PosixThreadBuilder::new(tid, thread_name, Box::new(user_ctx), credentials, vmar)
-            .process(Arc::downgrade(process))
-            .fs(Arc::new(fs));
+    let thread_builder = PosixThreadBuilder::new(
+        process.pid_identity().clone(),
+        thread_name,
+        Box::new(user_ctx),
+        credentials,
+        vmar,
+    )
+    .process(Arc::downgrade(process))
+    .fs(Arc::new(fs));
     Ok(thread_builder.build())
 }

@@ -112,14 +112,14 @@ fn handle_getlk(fd: FileDesc, arg: u64, ctx: &Context) -> Result<SyscallReturn> 
     }
     let lock = RangeLockItem::new(
         owner,
-        ctx.process.pid(),
+        ctx.process.pid_identity().clone(),
         lock_type,
         from_c_flock_and_file(&lock_mut_c, &**file)?,
     );
 
     let lock = file.as_inode_handle_or_err()?.test_range_lock(lock)?;
 
-    lock_mut_c.copy_from_range_lock(&lock);
+    lock_mut_c.copy_from_range_lock(&lock, ctx.process.pid_namespace());
     ctx.user_space().write_val(lock_mut_ptr, &lock_mut_c)?;
 
     Ok(SyscallReturn::Return(0))
@@ -140,7 +140,7 @@ fn handle_setlk(
     let lock_type = RangeLockType::try_from(lock_mut_c.l_type)?;
     let lock = RangeLockItem::new(
         owner,
-        ctx.process.pid(),
+        ctx.process.pid_identity().clone(),
         lock_type,
         from_c_flock_and_file(&lock_mut_c, &*file)?,
     );
@@ -174,7 +174,11 @@ fn handle_getown(fd: FileDesc, ctx: &Context) -> Result<SyscallReturn> {
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, fd);
 
-    let pid = file.common().owner().pid().unwrap_or(0);
+    let pid = file
+        .common()
+        .owner()
+        .pid_in(ctx.process.pid_namespace())
+        .unwrap_or(0);
     Ok(SyscallReturn::Return(pid as _))
 }
 
@@ -189,12 +193,16 @@ fn handle_setown(fd: FileDesc, arg: u64, ctx: &Context) -> Result<SyscallReturn>
     let owner_process = if pid == 0 {
         None
     } else {
-        Some(pid_table::pid_table_mut().get_process(pid).ok_or_else(|| {
-            Error::with_message(
-                Errno::ESRCH,
-                "the process to be a file owner does not exist",
-            )
-        })?)
+        Some(
+            pid_table::pid_table_mut()
+                .get_process_in(pid, ctx.process.pid_namespace())
+                .ok_or_else(|| {
+                    Error::with_message(
+                        Errno::ESRCH,
+                        "the process to be a file owner does not exist",
+                    )
+                })?,
+        )
     };
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
@@ -273,7 +281,11 @@ struct c_flock {
 }
 
 impl c_flock {
-    pub(crate) fn copy_from_range_lock(&mut self, lock: &RangeLockItem) {
+    pub(crate) fn copy_from_range_lock(
+        &mut self,
+        lock: &RangeLockItem,
+        namespace: &crate::process::PidNamespace,
+    ) {
         self.l_type = lock.type_() as u16;
         if RangeLockType::Unlock != lock.type_() {
             self.l_whence = RangeLockWhence::SEEK_SET as u16;
@@ -283,7 +295,7 @@ impl c_flock {
             } else {
                 lock.range().len() as off_t
             };
-            self.l_pid = lock.pid();
+            self.l_pid = lock.pid_in(namespace);
         }
     }
 }

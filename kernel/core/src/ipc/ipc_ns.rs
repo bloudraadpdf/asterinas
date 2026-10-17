@@ -26,7 +26,6 @@ use crate::{
     process::{
         Credentials, UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread,
     },
-    security::lsm::hooks as lsm_hooks,
 };
 
 /// The IPC namespace.
@@ -82,11 +81,7 @@ impl IpcNamespace {
         owner: Arc<UserNamespace>,
         posix_thread: &PosixThread,
     ) -> Result<Arc<Self>> {
-        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
-            owner.as_ref(),
-            posix_thread,
-            CapSet::SYS_ADMIN,
-        ))?;
+        owner.check_capability(posix_thread, CapSet::SYS_ADMIN)?;
         Ok(Self::new(owner))
     }
 

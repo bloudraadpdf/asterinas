@@ -55,11 +55,7 @@ impl UtsNamespace {
         owner: Arc<UserNamespace>,
         posix_thread: &PosixThread,
     ) -> Result<Arc<Self>> {
-        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
-            owner.as_ref(),
-            posix_thread,
-            CapSet::SYS_ADMIN,
-        ))?;
+        owner.check_capability(posix_thread, CapSet::SYS_ADMIN)?;
         Ok(Self::new(*self.uts_name.read(), owner))
     }
 

@@ -35,7 +35,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        Pid,
+        Pid, PidNamespace, Process,
         pid_table::{self, PidEntryType},
     },
 };
@@ -74,18 +74,24 @@ struct ProcFs {
     _anon_device_id: AnonDeviceId,
     sb: SuperBlock,
     root: Arc<dyn Inode>,
+    pid_namespace: Arc<PidNamespace>,
     inode_allocator: AtomicU64,
     fs_event_subscriber_stats: FsEventSubscriberStats,
 }
 
 impl ProcFs {
     pub(self) fn new() -> Arc<Self> {
+        let pid_namespace = Process::current().map_or_else(
+            || PidNamespace::get_init_singleton().clone(),
+            |process| process.pid_namespace().clone(),
+        );
         let anon_device_id = AnonDeviceId::acquire().expect("no device ID is available for procfs");
         let sb = SuperBlock::new(PROC_MAGIC, BLOCK_SIZE, NAME_MAX, anon_device_id.id());
         Arc::new_cyclic(|weak_fs| Self {
             _anon_device_id: anon_device_id,
             sb: sb.clone(),
-            root: RootDirOps::new_inode(weak_fs.clone(), &sb),
+            root: RootDirOps::new_inode(weak_fs.clone(), &sb, pid_namespace.clone()),
+            pid_namespace,
             inode_allocator: AtomicU64::new(PROC_ROOT_INO + 1),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
         })
@@ -93,6 +99,17 @@ impl ProcFs {
 
     pub(self) fn alloc_id(&self) -> u64 {
         self.inode_allocator.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn namespace_of(parent: &Weak<dyn Inode>) -> Arc<PidNamespace> {
+        parent
+            .upgrade()
+            .unwrap()
+            .fs()
+            .downcast_ref::<Self>()
+            .unwrap()
+            .pid_namespace
+            .clone()
     }
 }
 
@@ -141,13 +158,17 @@ impl FsType for ProcFsType {
 }
 
 /// Represents the inode at `/proc`.
-struct RootDirOps;
+struct RootDirOps(Arc<PidNamespace>);
 
 impl RootDirOps {
-    pub(crate) fn new_inode(fs: Weak<ProcFs>, sb: &SuperBlock) -> Arc<dyn Inode> {
+    fn new_inode(
+        fs: Weak<ProcFs>,
+        sb: &SuperBlock,
+        namespace: Arc<PidNamespace>,
+    ) -> Arc<dyn Inode> {
         // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/root.c#L368>
         let fs: Weak<dyn FileSystem> = fs;
-        ProcDir::new_root(Self, fs, PROC_ROOT_INO, sb, mkmod!(a+rx))
+        ProcDir::new_root(Self(namespace), fs, PROC_ROOT_INO, sb, mkmod!(a+rx))
     }
 
     const STATIC_ENTRIES: &'static [StaticEntry] = &[
@@ -179,7 +200,7 @@ impl ProcDirOps for RootDirOps {
         if let Ok(pid) = name.parse::<Pid>() {
             let pid_entry = {
                 let pid_table = pid_table::pid_table_mut();
-                pid_table.get_entry(pid)
+                self.0.resolve(pid).and_then(|pid| pid_table.get_entry(pid))
             };
             if let Some(pid_entry) = pid_entry
                 && let Some(type_) = pid_entry.type_()
@@ -215,13 +236,15 @@ impl ProcDirOps for RootDirOps {
         )?;
 
         // Collect PIDs before visiting entries, as `visit_fn` may copy data to user memory.
-        let process_pids = {
+        let mut process_pids = {
             let pid_table = pid_table::pid_table_mut();
             pid_table
                 .iter_processes()
-                .filter_map(|process| usize::try_from(process.pid()).ok())
+                .map(|process| process.pid_in(&self.0) as usize)
+                .filter(|pid| *pid != 0)
                 .collect::<Vec<_>>()
         };
+        process_pids.sort_unstable();
 
         visit_readdir_entries(
             keyed_readdir_entries(offset, FIRST_PID_OFFSET, process_pids, |process_pid| {
@@ -268,7 +291,7 @@ impl ProcDirOps for RootDirOps {
 
         let pid_entry = {
             let pid_table = pid_table::pid_table_mut();
-            pid_table.get_entry(pid)
+            self.0.resolve(pid).and_then(|pid| pid_table.get_entry(pid))
         };
 
         pid_entry.is_none_or(|pid_entry| pid_entry.type_().is_none())

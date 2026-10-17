@@ -6,7 +6,10 @@ use ostd::sync::{RwMutexWriteGuard, WaitQueue, Waiter, Waker};
 pub(crate) use range::{FileRange, OFFSET_MAX};
 use range::{FileRangeChange, OverlapWith};
 
-use crate::{prelude::*, process::Pid};
+use crate::{
+    prelude::*,
+    process::{Pid, PidIdentity, PidNamespace},
+};
 
 mod range;
 
@@ -26,7 +29,7 @@ struct RangeLock {
     /// File-table identity that owns the lock.
     owner: RangeLockOwner,
     /// PID associated with this lock.
-    pid: Pid,
+    identity: Arc<PidIdentity>,
     /// Type of the lock: `F_RDLCK` (read lock), `F_WRLCK` (write lock), or `F_UNLCK` (unlock).
     type_: RangeLockType,
     /// Range of the lock which specifies the portion of the file being locked.
@@ -49,13 +52,13 @@ impl RangeLockItem {
     /// The new instance will be associated with the current process and the given lock owner.
     pub(crate) fn new(
         owner: RangeLockOwner,
-        pid: Pid,
+        identity: Arc<PidIdentity>,
         type_: RangeLockType,
         range: FileRange,
     ) -> Self {
         let lock = RangeLock {
             owner,
-            pid,
+            identity,
             type_,
             range,
         };
@@ -76,13 +79,13 @@ impl RangeLockItem {
     }
 
     /// Returns the process ID reported for the lock.
-    pub(crate) fn pid(&self) -> Pid {
-        self.lock.pid
+    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> Pid {
+        self.lock.identity.in_namespace(namespace)
     }
 
     /// Sets the process ID reported for the lock.
-    pub(crate) fn set_pid(&mut self, pid: Pid) {
-        self.lock.pid = pid;
+    fn copy_identity_from(&mut self, other: &Self) {
+        self.lock.identity = other.lock.identity.clone();
     }
 
     /// Returns the type of the lock (READ/WRITE/UNLOCK)
@@ -185,7 +188,7 @@ impl Debug for RangeLockItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RangeLock")
             .field("owner", &self.owner())
-            .field("pid", &self.pid())
+            .field("pid", &self.lock.identity.global())
             .field("type_", &self.type_())
             .field("range", &self.range())
             .finish()
@@ -236,7 +239,7 @@ impl RangeLockList {
         for existing_lock in list.iter() {
             if lock.conflict_with(existing_lock) {
                 req_lock.set_owner(existing_lock.owner());
-                req_lock.set_pid(existing_lock.pid());
+                req_lock.copy_identity_from(existing_lock);
                 req_lock.set_type(existing_lock.type_());
                 req_lock.set_range(existing_lock.range());
                 return req_lock;

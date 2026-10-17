@@ -52,7 +52,8 @@ pub(crate) fn create_new_user_task(
         if is_userspace_vaddr(child_tid_ptr) {
             // At this point, we can do almost nothing if the address is not valid and the store
             // operation fails. So we ignore the error here.
-            let _ = current_userspace!().write_val(child_tid_ptr, &current_posix_thread.tid());
+            let _ = current_userspace!()
+                .write_val(child_tid_ptr, &current_posix_thread.namespace_tid());
         }
 
         let ctx = Context {

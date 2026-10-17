@@ -131,7 +131,9 @@ pub(super) fn sys_ptrace(
             let tracee = tracee.as_posix_thread().unwrap();
 
             let event = tracee.ptrace_get_event()?;
-            let eventmsg = event.map(|event| event.message()).unwrap_or(0);
+            let eventmsg = event
+                .map(|event| event.message(ctx.process.pid_namespace()))
+                .unwrap_or(0);
             ctx.user_space().write_val(data, &eventmsg)?;
         }
         PtraceRequest::PTRACE_GETSIGINFO => {

@@ -114,15 +114,19 @@ impl ProcFileOps for StatusFileOps {
         };
         writeln!(printer, "State:\t{}", state)?;
 
-        writeln!(printer, "Tgid:\t{}", process.pid())?;
-        writeln!(printer, "Pid:\t{}", posix_thread.tid())?;
-        writeln!(printer, "PPid:\t{}", process.parent().pid())?;
+        writeln!(printer, "Tgid:\t{}", process.pid_in(&self.0.namespace))?;
+        writeln!(printer, "Pid:\t{}", posix_thread.tid_in(&self.0.namespace))?;
+        writeln!(
+            printer,
+            "PPid:\t{}",
+            process.parent_pid_in(&self.0.namespace)
+        )?;
         writeln!(
             printer,
             "TracerPid:\t{}",
             posix_thread
                 .tracer()
-                .map(|tracer| tracer.as_posix_thread().unwrap().tid())
+                .map(|tracer| tracer.as_posix_thread().unwrap().tid_in(&self.0.namespace))
                 .unwrap_or(0)
         )?;
 

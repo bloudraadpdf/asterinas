@@ -14,19 +14,20 @@ use crate::{
         vfs::inode::Inode,
     },
     prelude::*,
-    process::posix_thread,
+    process::PidNamespace,
     sched::{self, loadavg::get_loadavg},
 };
 
 /// Represents the inode at `/proc/loadavg`.
-pub(super) struct LoadAvgFileOps;
+pub(super) struct LoadAvgFileOps(Arc<PidNamespace>);
 
 impl LoadAvgFileOps {
     pub(super) fn new_inode(parent: Weak<dyn Inode>) -> Arc<dyn Inode> {
         // Reference:
         // <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/loadavg.c#L33>
         // <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/generic.c#L549-L550>
-        ProcFile::new(Self, parent, mkmod!(a+r))
+        let namespace = super::ProcFs::namespace_of(&parent);
+        ProcFile::new(Self(namespace), parent, mkmod!(a+r))
     }
 }
 
@@ -44,7 +45,7 @@ impl ProcFileOps for LoadAvgFileOps {
             avg[2],
             nr_running,
             nr_queued,
-            posix_thread::last_tid(),
+            self.0.last_pid(),
         )?;
 
         Ok(printer.bytes_written())

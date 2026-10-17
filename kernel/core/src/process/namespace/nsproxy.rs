@@ -7,7 +7,7 @@ use crate::{
     ipc::IpcNamespace,
     net::uts_ns::UtsNamespace,
     prelude::*,
-    process::{CloneFlags, Process, UserNamespace, posix_thread::PosixThread},
+    process::{CloneFlags, PidNamespace, Process, UserNamespace, posix_thread::PosixThread},
 };
 
 /// A struct that acts as a per-thread proxy to give access to most namespaces.
@@ -16,11 +16,12 @@ use crate::{
 /// and keeps a local copy in `ThreadLocal` for fast access.
 /// `NsProxy` contains all types of namespaces except
 /// 1. The user namespace, which is included in the `Process` struct.
-/// 2. The PID namespace, which is included in the `Process` struct (TODO).
+/// 2. The active PID namespace, which is fixed by the process's PID identity.
 pub(crate) struct NsProxy {
     cgroup_ns: Arc<CgroupNamespace>,
     ipc_ns: Arc<IpcNamespace>,
     mnt_ns: Arc<MountNamespace>,
+    pid_ns_for_children: Arc<PidNamespace>,
     uts_ns: Arc<UtsNamespace>,
 }
 
@@ -33,6 +34,7 @@ impl NsProxy {
                 cgroup_ns: CgroupNamespace::get_init_singleton().clone(),
                 ipc_ns: IpcNamespace::get_init_singleton().clone(),
                 mnt_ns: MountNamespace::get_init_singleton().clone(),
+                pid_ns_for_children: PidNamespace::get_init_singleton().clone(),
                 uts_ns: UtsNamespace::get_init_singleton().clone(),
             })
         })
@@ -43,10 +45,6 @@ impl NsProxy {
     /// If no namespaces need to be cloned, this method simply clones `self` and returns.
     /// Otherwise, a new `NsProxy` will be created
     /// by selectively cloning fields from the proxy and newly created namespaces.
-    //
-    // FIXME: This method is currently used by both `unshare()` and `clone()`.
-    // Once we support PID and time namespaces, their semantics diverge.
-    // We will need to refactor (or split) this method accordingly.
     pub(in crate::process) fn new_clone(
         self: &Arc<Self>,
         user_ns: &Arc<UserNamespace>,
@@ -91,6 +89,19 @@ impl NsProxy {
             builder.uts_ns(new_uts_ns);
         }
 
+        if clone_ns_flags.contains(CloneFlags::CLONE_NEWPID) {
+            if !Arc::ptr_eq(process.pid_namespace(), &self.pid_ns_for_children) {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "a new PID namespace for children has already been selected"
+                );
+            }
+            builder.pid_ns_for_children(
+                self.pid_ns_for_children
+                    .new_clone(user_ns.clone(), posix_thread)?,
+            );
+        }
+
         // TODO: Support other namespaces.
 
         Ok(Arc::new(builder.build()))
@@ -111,6 +122,10 @@ impl NsProxy {
         &self.mnt_ns
     }
 
+    pub(crate) fn pid_ns_for_children(&self) -> &Arc<PidNamespace> {
+        &self.pid_ns_for_children
+    }
+
     /// Returns the associated UTS namespace.
     pub(crate) fn uts_ns(&self) -> &Arc<UtsNamespace> {
         &self.uts_ns
@@ -126,6 +141,7 @@ pub(crate) struct NsProxyBuilder<'a> {
     cgroup_ns: Option<Arc<CgroupNamespace>>,
     ipc_ns: Option<Arc<IpcNamespace>>,
     mnt_ns: Option<Arc<MountNamespace>>,
+    pid_ns_for_children: Option<Arc<PidNamespace>>,
     uts_ns: Option<Arc<UtsNamespace>>,
 }
 
@@ -137,6 +153,7 @@ impl<'a> NsProxyBuilder<'a> {
             cgroup_ns: None,
             ipc_ns: None,
             mnt_ns: None,
+            pid_ns_for_children: None,
             uts_ns: None,
         }
     }
@@ -159,6 +176,11 @@ impl<'a> NsProxyBuilder<'a> {
         self
     }
 
+    pub(crate) fn pid_ns_for_children(&mut self, namespace: Arc<PidNamespace>) -> &mut Self {
+        self.pid_ns_for_children = Some(namespace);
+        self
+    }
+
     /// Sets the new UTS namespace for the context being built.
     pub(crate) fn uts_ns(&mut self, uts_ns: Arc<UtsNamespace>) -> &mut Self {
         self.uts_ns = Some(uts_ns);
@@ -172,18 +194,21 @@ impl<'a> NsProxyBuilder<'a> {
             cgroup_ns: new_cgroup,
             ipc_ns: new_ipc,
             mnt_ns: new_mnt,
+            pid_ns_for_children: new_pid,
             uts_ns: new_uts,
         } = self;
 
         let new_cgroup = new_cgroup.unwrap_or_else(|| old_proxy.cgroup_ns.clone());
         let new_ipc = new_ipc.unwrap_or_else(|| old_proxy.ipc_ns.clone());
         let new_mnt = new_mnt.unwrap_or_else(|| old_proxy.mnt_ns.clone());
+        let new_pid = new_pid.unwrap_or_else(|| old_proxy.pid_ns_for_children.clone());
         let new_uts = new_uts.unwrap_or_else(|| old_proxy.uts_ns.clone());
 
         NsProxy {
             cgroup_ns: new_cgroup,
             ipc_ns: new_ipc,
             mnt_ns: new_mnt,
+            pid_ns_for_children: new_pid,
             uts_ns: new_uts,
         }
     }
@@ -196,6 +221,7 @@ pub(crate) fn check_unsupported_ns_flags(flags: CloneFlags) -> Result<()> {
     const SUPPORTED_FLAGS: CloneFlags = CloneFlags::CLONE_NEWCGROUP
         .union(CloneFlags::CLONE_NEWIPC)
         .union(CloneFlags::CLONE_NEWNS)
+        .union(CloneFlags::CLONE_NEWPID)
         .union(CloneFlags::CLONE_NEWUTS);
 
     let unsupported_flags =
