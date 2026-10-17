@@ -12,6 +12,9 @@ use std::{
 
 use crate::util::get_cargo_metadata;
 
+#[cfg(test)]
+mod boot_layout_tests;
+
 const LINKER_SCRIPTS: &[(&str, &str)] = &[
     ("x86_64.ld", include_str!("x86_64.ld.template")),
     ("riscv64.ld", include_str!("riscv64.ld.template")),

@@ -32,6 +32,7 @@ toml = { version = "0.8.8", features = ["preserve_order"] }
 which = "8.0.0"
 whoami = "1.6.1"
 rustc_version = "0.4.1"
+xmas-elf = "0.10.0"
 
 [dev-dependencies]
 assert_cmd = "2.0.13"

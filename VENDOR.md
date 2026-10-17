@@ -87,3 +87,11 @@ address. Wildcard and specific binds conflict on overlapping ports. UDP binding
 keeps its previous interface selection. AMD64 Firecracker checks pass loopback
 and wildcard byte exchange, listener and accepted addresses, and conflicting
 binds in both orders.
+
+The optional AMD64 `pvh_boot_only` feature loads the kernel at 16 MiB and
+removes Linux and Multiboot entry points and headers. Builds without this
+feature keep the Linux entry addresses. OSDK reads the linked ELF headers,
+retains the PVH ELF machine type, and rejects Linux and GRUB image packaging
+for a PVH-only kernel. Linked-assembly regression tests check both layouts
+and the rejected image types. Tokoloshe uses this feature to permit a smaller
+guest RAM allocation and decrease frame metadata. Upstream submission is pending.
