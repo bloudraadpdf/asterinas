@@ -44,6 +44,9 @@ borrows cannot outlive its owner.
 
 The `release-lto` profile uses full LTO and release optimisation. The example
 reserves 128 KiB per task stack and retains its guard pages.
+The `release-microvm` profile inherits `release-lto`, optimises kernel code for
+size, and keeps OSTD at optimisation level 3. It retains the same features,
+unwind tables and guarded stacks. The general-purpose profiles do not change.
 `log_max_level_info` removes kernel debug messages at compile time and keeps
 informational messages, warnings and errors.
 
