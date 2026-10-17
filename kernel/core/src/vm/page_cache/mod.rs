@@ -115,7 +115,7 @@ use aster_block::{BlockDevice, id::Bid};
 use io_util::batch::IoBatch;
 use ostd::mm::{Segment, VmIo, VmIoFill};
 
-use crate::prelude::*;
+use crate::{prelude::*, util::quota::Quota};
 
 mod cache_page;
 #[cfg(ktest)]
@@ -173,8 +173,8 @@ impl PageCache {
 
     /// Creates an anonymous page cache with the specified initial capacity in
     /// bytes.
-    pub(crate) fn new_anon(size: usize) -> Result<Self> {
-        Ok(Self(VmoOptions::new_anon(size).alloc()?))
+    pub(crate) fn new_anon(size: usize, quota: Option<Arc<Quota>>) -> Result<Self> {
+        Ok(Self(VmoOptions::new_anon(size).quota(quota).alloc()?))
     }
 
     /// Returns the wrapped [`Vmo`].
@@ -233,7 +233,7 @@ impl PageCache {
     ///
     /// use crate::vm::page_cache::PageCache;
     ///
-    /// let mut page_cache = PageCache::new_anon(0).unwrap();
+    /// let mut page_cache = PageCache::new_anon(0, None).unwrap();
     ///
     /// // Extend: publish the new file size first, then grow the page cache
     /// // with the previous file size.

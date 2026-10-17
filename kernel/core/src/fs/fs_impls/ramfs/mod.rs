@@ -5,6 +5,7 @@
 pub(crate) use fs::RamFs;
 use fs::RamFsType;
 pub(super) use fs::RamInode;
+pub(in crate::fs) use fs::{RamFsConfig, RamFsQuota};
 
 mod fs;
 pub(crate) mod memfd;
