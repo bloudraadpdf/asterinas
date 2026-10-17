@@ -68,12 +68,6 @@ feature enables `filesystems_extra` for its configfs interface.
 Process isolation, namespaces and cgroup accounting remain available in a
 minimal build. The default console is `ttyS0` when `console_video` is disabled.
 
-Virtio-vsock posts 16 receive buffers at boot. When reported completions reach
-half of the posted buffers, the driver doubles its receive allocation up to
-64 buffers. It retains the 64-descriptor queue and the existing packet and
-credit limits. If expansion cannot allocate a buffer, the current allocation
-continues to receive packets.
-
 The output kernel image is:
 
 ```text
