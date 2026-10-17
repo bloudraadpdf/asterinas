@@ -22,7 +22,10 @@ use crate::{
         pseudofs::AnonInodeFs,
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable, Pollee},
+    process::{
+        PidNamespace,
+        signal::{PollHandle, Pollable, Pollee},
+    },
 };
 
 bitflags! {
@@ -258,7 +261,11 @@ impl FileLike for EventFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             inner: Arc<EventFile>,
             fd_flags: FdFlags,

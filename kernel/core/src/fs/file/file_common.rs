@@ -10,7 +10,7 @@ use crate::{
     fs::vfs::{notify, path::Path},
     prelude::*,
     process::{
-        Pid, Process,
+        Pid, PidIdentity, PidNamespace, Process,
         signal::{PollAdaptor, constants::SIGIO},
     },
 };
@@ -108,8 +108,11 @@ impl FileOwner {
     }
 
     /// Returns the process ID of the current owner.
-    pub(crate) fn pid(&self) -> Option<Pid> {
-        self.inner.lock().as_ref().map(|owner| owner.pid)
+    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> Option<Pid> {
+        self.inner
+            .lock()
+            .as_ref()
+            .map(|owner| owner.identity.in_namespace(namespace))
     }
 
     pub(super) fn set(&self, file: &dyn FileLike, owner: Option<&Arc<Process>>) {
@@ -135,7 +138,7 @@ impl Default for FileOwner {
 }
 
 struct Owner {
-    pid: Pid,
+    identity: Arc<PidIdentity>,
     process: Weak<Process>,
     poller: Option<PollAdaptor<OwnerObserver>>,
 }
@@ -143,7 +146,7 @@ struct Owner {
 impl Owner {
     fn new(process: &Arc<Process>) -> Self {
         Self {
-            pid: process.pid(),
+            identity: process.pid_identity().clone(),
             process: Arc::downgrade(process),
             poller: None,
         }

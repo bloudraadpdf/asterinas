@@ -65,7 +65,15 @@ impl siginfo_t {
     }
 
     pub(crate) fn set_pid_uid_by(&mut self, ctx: &Context) {
-        self.set_pid_uid(ctx.process.pid(), ctx.posix_thread.credentials().ruid());
+        self.set_pid_uid(
+            ctx.process.namespace_pid(),
+            ctx.posix_thread.credentials().ruid(),
+        );
+    }
+
+    pub(crate) fn pid_uid(&self) -> (Pid, Uid) {
+        let value = self.siginfo_fields.common().first.piduid();
+        (value.pid, value.uid)
     }
 
     pub(crate) fn set_status(&mut self, status: i32) {

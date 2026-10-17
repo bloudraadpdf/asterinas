@@ -8,7 +8,7 @@ use super::{
 use crate::{
     prelude::*,
     process::{
-        ReapedChildrenStats, Uid, pid_table,
+        PidNamespace, ReapedChildrenStats, Uid, pid_table,
         posix_thread::{AsPosixThread, PosixThread, ptrace::PtraceWaitStatus},
         signal::sig_num::SigNum,
         status::StopWaitStatus,
@@ -108,6 +108,7 @@ pub(crate) fn do_wait(
 fn wait_filter(child_pid: Pid, child: &Arc<Process>, child_filter: &ProcessFilter) -> bool {
     match &child_filter {
         ProcessFilter::Any => true,
+        ProcessFilter::NoMatch => false,
         ProcessFilter::WithPid(pid) => child_pid == *pid,
         ProcessFilter::WithPgid(pgid) => child.pgid() == *pgid,
         ProcessFilter::WithPidfd(pid_file) => match pid_file.process_opt() {
@@ -126,10 +127,10 @@ pub(crate) enum WaitStatus {
 }
 
 impl WaitStatus {
-    pub(crate) fn pid(&self) -> Pid {
+    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> Pid {
         match self.source() {
-            WaitStatusSource::Process(process) => process.pid(),
-            WaitStatusSource::Thread(thread) => thread.tid(),
+            WaitStatusSource::Process(process) => process.pid_in(namespace),
+            WaitStatusSource::Thread(thread) => thread.tid_in(namespace),
         }
     }
 
@@ -372,4 +373,20 @@ fn reap_zombie_child(
     reaped_children_stats.lock().add(user_time, kernel_time);
 
     child_process.status().exit_code()
+}
+
+pub(super) fn reap_namespace_children(init: &Process) {
+    init.children_wait_queue().wait_until(|| {
+        let mut children = init.children().lock();
+        let children = children.as_mut().unwrap();
+        let zombies: Vec<_> = children
+            .values()
+            .filter(|child| child.status().is_zombie())
+            .map(|child| child.pid())
+            .collect();
+        for pid in zombies {
+            reap_zombie_child(pid, children, init.reaped_children_stats());
+        }
+        children.is_empty().then_some(())
+    });
 }

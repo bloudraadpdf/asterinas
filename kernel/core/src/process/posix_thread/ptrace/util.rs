@@ -5,13 +5,12 @@
 use crate::{
     prelude::*,
     process::{
-        ExitCode, WaitOptions,
+        ExitCode, PidIdentity, PidNamespace, WaitOptions,
         signal::{
             DequeuedSignal, c_types::siginfo_t, constants::SIGTRAP, sig_num::SigNum,
             signals::Signal,
         },
     },
-    thread::Tid,
 };
 
 /// The requests that can continue a stopped tracee.
@@ -131,17 +130,17 @@ bitflags! {
         /// Marks syscall stops with signal number set to `SIGTRAP | 0x80`.
         const PTRACE_O_TRACESYSGOOD = 1;
         /// Stops the tracee at `fork` and automatically traces the new thread.
-        const PTRACE_O_TRACEFORK = 1 << PtraceEvent::Fork(0).code();
+        const PTRACE_O_TRACEFORK = 1 << 1;
         /// Stops the tracee at `vfork` and automatically traces the new thread.
-        const PTRACE_O_TRACEVFORK = 1 << PtraceEvent::Vfork(0).code();
+        const PTRACE_O_TRACEVFORK = 1 << 2;
         /// Stops the tracee at `clone` and automatically traces the new thread.
-        const PTRACE_O_TRACECLONE = 1 << PtraceEvent::Clone(0).code();
+        const PTRACE_O_TRACECLONE = 1 << 3;
         /// Stops the tracee at `execve`.
-        const PTRACE_O_TRACEEXEC = 1 << PtraceEvent::Exec(0).code();
+        const PTRACE_O_TRACEEXEC = 1 << 4;
         /// Stops the tracee at the completion of `vfork`.
-        const PTRACE_O_TRACEVFORKDONE = 1 << PtraceEvent::VforkDone(0).code();
+        const PTRACE_O_TRACEVFORKDONE = 1 << 5;
         /// Stops the tracee at `exit`.
-        const PTRACE_O_TRACEEXIT = 1 << PtraceEvent::Exit(0).code();
+        const PTRACE_O_TRACEEXIT = 1 << 6;
         /// Send a `SIGKILL` signal to the tracee if the tracer exits.
         const PTRACE_O_EXITKILL = 1 << 20;
     }
@@ -150,16 +149,8 @@ bitflags! {
 /// The events of ptrace-event-stops.
 #[derive(Debug, Clone)]
 pub(crate) enum PtraceEvent {
-    /// A `fork` event with the new child thread ID.
-    Fork(Tid),
-    /// A `vfork` event with the new child thread ID.
-    Vfork(Tid),
-    /// A `clone` event with the new child thread ID.
-    Clone(Tid),
     /// An `execve` event with the former thread ID.
-    Exec(Tid),
-    /// A done `vfork` event with the child thread ID.
-    VforkDone(Tid),
+    Exec(Arc<PidIdentity>),
     /// An `exit` event with the tracee's exit code.
     Exit(ExitCode),
 }
@@ -168,11 +159,7 @@ impl PtraceEvent {
     /// Returns the Linux `PTRACE_EVENT_*` code of this event.
     const fn code(&self) -> u32 {
         match self {
-            Self::Fork(_) => 1,
-            Self::Vfork(_) => 2,
-            Self::Clone(_) => 3,
             Self::Exec(_) => 4,
-            Self::VforkDone(_) => 5,
             Self::Exit(_) => 6,
         }
     }
@@ -183,13 +170,9 @@ impl PtraceEvent {
     }
 
     /// Returns the message of this event.
-    pub(crate) const fn message(&self) -> usize {
+    pub(crate) fn message(&self, namespace: &PidNamespace) -> usize {
         match self {
-            Self::Fork(tid)
-            | Self::Vfork(tid)
-            | Self::Clone(tid)
-            | Self::Exec(tid)
-            | Self::VforkDone(tid) => *tid as usize,
+            Self::Exec(identity) => identity.in_namespace(namespace) as usize,
             Self::Exit(exit_code) => *exit_code as usize,
         }
     }

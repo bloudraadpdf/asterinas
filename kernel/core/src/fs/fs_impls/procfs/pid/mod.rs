@@ -31,7 +31,8 @@ pub(super) struct PidDirOps(
 
 impl PidDirOps {
     pub(super) fn new_inode(pid_entry: Arc<PidEntry>, parent: Weak<dyn Inode>) -> Arc<dyn Inode> {
-        let this = Self(TidDirOps::new(pid_entry));
+        let namespace = super::ProcFs::namespace_of(&parent);
+        let this = Self(TidDirOps::new(pid_entry, namespace));
         // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/base.c#L3493>
         ProcDir::new(this, parent, mkmod!(a+rx))
     }

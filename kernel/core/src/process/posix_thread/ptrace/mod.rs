@@ -18,7 +18,7 @@ use crate::{
         signal::{
             DequeuedSignal, PauseReason,
             c_types::siginfo_t,
-            constants::{CLD_TRAPPED, SIGCHLD, SIGKILL, SIGTRAP},
+            constants::{CLD_TRAPPED, SIGCHLD, SIGTRAP},
             signals::{kernel::KernelSignal, raw::RawSignal, user::UserSignal},
         },
     },
@@ -303,6 +303,11 @@ impl PosixThread {
     ///
     /// Returns `ESRCH` if there is no tracee with the given tid.
     pub(crate) fn get_tracee(&self, tid: Tid) -> Result<Arc<Thread>> {
+        let tid = self
+            .process()
+            .pid_namespace()
+            .resolve(tid)
+            .ok_or_else(|| Error::with_message(Errno::ESRCH, "no such tracee"))?;
         self.tracees()
             .and_then(|tracees| tracees.lock().get(&tid).cloned())
             .ok_or_else(|| Error::with_message(Errno::ESRCH, "no such tracee"))
@@ -335,7 +340,7 @@ impl PosixThread {
 
         for tracee in tracees_to_kill {
             let tracee = tracee.as_posix_thread().unwrap();
-            tracee.enqueue_signal(Box::new(KernelSignal::new(SIGKILL)));
+            tracee.enqueue_signal(Box::new(KernelSignal::new_kill()));
         }
     }
 }
@@ -430,7 +435,10 @@ impl TraceeStatus {
         }
 
         let siginfo = event.siginfo(ctx);
-        let signal = Box::new(RawSignal::new(siginfo));
+        let signal = Box::new(RawSignal::from_process(
+            siginfo,
+            ctx.process.pid_identity().clone(),
+        ));
         let signal = DequeuedSignal::FromThread(signal);
         let wait_status = PtraceWaitStatus::from_event(&event);
 
@@ -460,7 +468,10 @@ impl TraceeStatus {
         }
 
         let siginfo = util::syscall_stop_siginfo(&state.options, ctx);
-        let signal = Box::new(RawSignal::new(siginfo));
+        let signal = Box::new(RawSignal::from_process(
+            siginfo,
+            ctx.process.pid_identity().clone(),
+        ));
         let signal = DequeuedSignal::FromThread(signal);
         let wait_status = PtraceWaitStatus::from_syscall(&state.options);
 
@@ -497,11 +508,14 @@ impl TraceeStatus {
         drop(state);
 
         let tracer = tracer.as_posix_thread().unwrap();
-        tracer.enqueue_signal(Box::new(RawSignal::new({
-            let mut siginfo = siginfo_t::new(SIGCHLD, CLD_TRAPPED);
-            siginfo.set_pid_uid_by(ctx);
-            siginfo
-        })));
+        tracer.enqueue_signal(Box::new(RawSignal::from_process(
+            {
+                let mut siginfo = siginfo_t::new(SIGCHLD, CLD_TRAPPED);
+                siginfo.set_pid_uid_by(ctx);
+                siginfo
+            },
+            ctx.process.pid_identity().clone(),
+        )));
         tracer.process().children_wait_queue().wake_all();
 
         let waiter = Waiter::new_pair().0;
@@ -754,7 +768,11 @@ impl TraceeStatus {
         let state = self.state.lock();
         self.check_ptrace_stopped(&state)?;
 
-        Ok(state.signal.get().unwrap().to_info())
+        Ok(state
+            .signal
+            .get()
+            .unwrap()
+            .to_info(current!().pid_namespace()))
     }
 }
 

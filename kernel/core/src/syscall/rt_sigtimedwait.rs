@@ -67,7 +67,7 @@ pub(super) fn sys_rt_sigtimedwait(
     // Fast path: If a signal is already pending, dequeue and return it immediately.
     if let Some(signal) = dequeue_signal_with_checking_ignore(ctx, mask, block_list) {
         if info_ptr != 0 {
-            let siginfo = signal.to_info();
+            let siginfo = signal.to_info(ctx.process.pid_namespace());
             ctx.user_space().write_val(info_ptr, &siginfo)?;
         }
 
@@ -94,7 +94,7 @@ pub(super) fn sys_rt_sigtimedwait(
                 })?;
 
             if info_ptr != 0 {
-                let siginfo = signal.to_info();
+                let siginfo = signal.to_info(ctx.process.pid_namespace());
                 ctx.user_space().write_val(info_ptr, &siginfo)?;
             }
 

@@ -9,7 +9,7 @@
 
 use alloc::collections::btree_map::Entry;
 
-use super::{Pgid, Pid, Process, ProcessGroup, Session, Sid};
+use super::{Pgid, Pid, PidNamespace, Process, ProcessGroup, Session, Sid};
 use crate::{
     prelude::*,
     process::posix_thread::AsPosixThread,
@@ -120,6 +120,10 @@ impl PidTable {
             .and_then(|entry| entry.lock().thread())
     }
 
+    pub(crate) fn get_thread_in(&self, tid: Tid, namespace: &PidNamespace) -> Option<Arc<Thread>> {
+        self.get_thread(namespace.resolve(tid)?)
+    }
+
     /// Returns an iterator over threads that have a live thread reference.
     pub(crate) fn iter_threads(&self) -> impl Iterator<Item = Arc<Thread>> + '_ {
         self.entries
@@ -174,6 +178,14 @@ impl PidTable {
             .and_then(|entry| entry.lock().process())
     }
 
+    pub(crate) fn get_process_in(
+        &self,
+        pid: Pid,
+        namespace: &PidNamespace,
+    ) -> Option<Arc<Process>> {
+        self.get_process(namespace.resolve(pid)?)
+    }
+
     /// Returns an iterator over processes that have a live process reference.
     pub(crate) fn iter_processes(&self) -> impl Iterator<Item = Arc<Process>> + '_ {
         self.entries
@@ -217,6 +229,14 @@ impl PidTable {
         self.entries
             .get(pgid)
             .and_then(|entry| entry.lock().process_group())
+    }
+
+    pub(crate) fn get_process_group_in(
+        &self,
+        pgid: Pgid,
+        namespace: &PidNamespace,
+    ) -> Option<Arc<ProcessGroup>> {
+        self.get_process_group(&namespace.resolve(pgid)?)
     }
 
     /// Returns whether a process group with the given PGID exists.

@@ -10,7 +10,6 @@ use crate::{
     },
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread},
-    security::lsm::hooks as lsm_hooks,
 };
 
 /// The cgroup namespace for the unified cgroup hierarchy.
@@ -40,11 +39,7 @@ impl CgroupNamespace {
         owner: Arc<UserNamespace>,
         posix_thread: &PosixThread,
     ) -> Result<Arc<Self>> {
-        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
-            owner.as_ref(),
-            posix_thread,
-            CapSet::SYS_ADMIN,
-        ))?;
+        owner.check_capability(posix_thread, CapSet::SYS_ADMIN)?;
 
         let root: Arc<dyn CgroupSysNode> = match current_cgroup {
             Some(current_cgroup) => current_cgroup,

@@ -40,62 +40,62 @@ pub(super) fn sys_pidfd_send_signal(
 
     let target = get_target_from_pidfd(pidfd, flags, ctx)?;
 
-    let signal = if let Some(sig_num) = sig_num {
-        let siginfo = read_siginfo_from_user(info_ptr, sig_num, ctx)?;
-
-        // Only check `si_code` permissions when the user explicitly provided a siginfo.
-        // When `info_ptr` is `NULL`, the kernel generates the siginfo, so no restriction applies.
-        if info_ptr != 0 {
+    match sig_num.filter(|_| info_ptr != 0) {
+        None => {
+            send_signal(
+                target,
+                sig_num.map(|num| UserSignal::new_kill(num, ctx)),
+                ctx,
+            )?;
+        }
+        Some(sig_num) => {
+            let siginfo = ctx.user_space().read_val::<siginfo_t>(info_ptr)?;
+            if siginfo.si_signo != i32::from(sig_num.as_u8()) {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "the signal number does not match siginfo"
+                );
+            }
             let is_self = match &target {
-                SignalTarget::Thread { tid, tgid: _ } => *tid == ctx.posix_thread.tid(),
+                SignalTarget::Thread { tid, .. } => *tid == ctx.posix_thread.tid(),
                 SignalTarget::Process { pid } => *pid == ctx.posix_thread.tid(),
-                SignalTarget::ProcessGroup { pgid: _ } => false,
+                SignalTarget::ProcessGroup { .. } => false,
             };
-
             if !is_self && (siginfo.si_code >= 0 || siginfo.si_code == SI_TKILL) {
                 return_errno_with_message!(
                     Errno::EPERM,
-                    "signals with custom code can only be sent to the current thread/process"
+                    "the custom signal code requires a self target"
                 );
             }
-        }
-
-        Some(RawSignal::new(siginfo))
-    } else {
-        None
-    };
-
-    match target {
-        SignalTarget::Thread { tid, tgid } => {
-            let signal = signal.map(|s| Box::new(s) as Box<dyn Signal>);
-            tgkill(tid, Some(tgid), signal, ctx)?;
-        }
-        SignalTarget::Process { pid } => {
-            let signal = signal.map(|s| Box::new(s) as Box<dyn Signal>);
-            kill(pid, signal, ctx)?;
-        }
-        SignalTarget::ProcessGroup { pgid } => {
-            kill_group(pgid, signal, ctx)?;
+            send_signal(
+                target,
+                Some(RawSignal::from_user(
+                    siginfo,
+                    ctx.process.pid_namespace().clone(),
+                )),
+                ctx,
+            )?;
         }
     }
-
     Ok(SyscallReturn::Return(0))
 }
 
-fn read_siginfo_from_user(info_ptr: Vaddr, sig_num: SigNum, ctx: &Context) -> Result<siginfo_t> {
-    if info_ptr != 0 {
-        let si = ctx.user_space().read_val::<siginfo_t>(info_ptr)?;
-        if si.si_signo != sig_num.as_u8() as i32 {
-            return_errno_with_message!(
-                Errno::EINVAL,
-                "`siginfo.si_signo` does not match the specified signal number"
-            );
+fn send_signal<S: Signal + Clone>(
+    target: SignalTarget,
+    signal: Option<S>,
+    ctx: &Context,
+) -> Result<()> {
+    match target {
+        SignalTarget::Thread { tid, tgid } => tgkill(
+            tid,
+            Some(tgid),
+            signal.map(|s| Box::new(s) as Box<dyn Signal>),
+            ctx,
+        ),
+        SignalTarget::Process { pid } => {
+            kill(pid, signal.map(|s| Box::new(s) as Box<dyn Signal>), ctx)
         }
-        Ok(si)
-    } else {
-        // If `info_ptr` is NULL, the kernel constructs a default `siginfo_t` structure
-        // whose fields match the values that are implicitly supplied when a signal is sent using the kill(2).
-        Ok(UserSignal::new_kill(sig_num, ctx).to_info())
+        SignalTarget::ProcessGroup { pgid } => kill_group(pgid, signal, ctx),
     }
 }
 
@@ -141,6 +141,12 @@ fn get_target_from_pidfd(
                 return_errno_with_message!(Errno::ESRCH, "the target process has been reaped");
             };
 
+            if process.pid_in(ctx.process.pid_namespace()) == 0 {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "the pidfd target is outside the PID namespace"
+                );
+            }
             match flags {
                 PidfdSendSignalFlags::Default => {
                     // FIXME: On Linux, a pidfd can refer to either a process or a thread.

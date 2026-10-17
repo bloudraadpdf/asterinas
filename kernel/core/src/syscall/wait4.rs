@@ -22,7 +22,7 @@ pub(super) fn sys_wait4(
         wait_pid as i32, status_ptr, wait_options
     );
     debug!("wait4 current pid = {}", ctx.process.pid());
-    let process_filter = ProcessFilter::from_id(wait_pid as _)?;
+    let process_filter = ProcessFilter::from_id(wait_pid as _, ctx)?;
 
     if wait_options.intersects(WaitOptions::WSTOPPED | WaitOptions::WCONTINUED)
         && wait_options.contains(WaitOptions::WNOWAIT)
@@ -42,7 +42,10 @@ pub(super) fn sys_wait4(
         return Ok(SyscallReturn::Return(0 as _));
     };
 
-    let (return_pid, status_code) = (wait_status.pid(), calculate_status_code(&wait_status));
+    let (return_pid, status_code) = (
+        wait_status.pid_in(ctx.process.pid_namespace()),
+        calculate_status_code(&wait_status),
+    );
     if status_ptr != 0 {
         ctx.user_space().write_val(status_ptr as _, &status_code)?;
     }

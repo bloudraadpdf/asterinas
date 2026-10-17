@@ -25,8 +25,7 @@ use crate::{
         process_vm::{MAX_LEN_STRING_ARG, MAX_NR_STRING_ARGS, ProcessVm},
         program_loader::{ProgramToLoad, UndetectedExecutable, elf::ElfLoadInfo},
         signal::{
-            HandlePendingSignal, PauseReason, SigStack,
-            constants::{SIGCHLD, SIGKILL},
+            HandlePendingSignal, PauseReason, SigStack, constants::SIGCHLD,
             signals::kernel::KernelSignal,
         },
     },
@@ -81,7 +80,7 @@ pub(crate) fn do_execve(
     sigkill_other_threads(ctx.task, &task_set);
     drop(task_set);
 
-    let former_tid = ctx.posix_thread.tid();
+    let former_identity = ctx.posix_thread.pid_identity();
 
     // After this point, failures in subsequent operations are fatal: the process
     // state may be left inconsistent and it can never return to user mode.
@@ -97,10 +96,10 @@ pub(crate) fn do_execve(
 
     if res.is_ok() {
         ctx.posix_thread
-            .ptrace_may_stop_on(PtraceEvent::Exec(former_tid), ctx, user_context);
+            .ptrace_may_stop_on(PtraceEvent::Exec(former_identity), ctx, user_context);
     } else {
         ctx.posix_thread
-            .enqueue_signal(Box::new(KernelSignal::new(SIGKILL)));
+            .enqueue_signal(Box::new(KernelSignal::new_kill()));
     }
 
     ctx.process.tasks().lock().finish_execve();

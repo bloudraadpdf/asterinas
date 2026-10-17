@@ -4,7 +4,8 @@ use super::SyscallReturn;
 use crate::prelude::*;
 
 pub(super) fn sys_setsid(ctx: &Context) -> Result<SyscallReturn> {
-    let sid = ctx.process.to_new_session()?;
+    ctx.process.to_new_session()?;
+    let sid = ctx.process.sid_in(ctx.process.pid_namespace());
 
     Ok(SyscallReturn::Return(sid as _))
 }

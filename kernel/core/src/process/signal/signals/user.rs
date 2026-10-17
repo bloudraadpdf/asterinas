@@ -4,21 +4,21 @@
 
 use super::Signal;
 use crate::{
-    context::Context,
+    prelude::*,
     process::{
-        Pid, Uid,
+        Pid, PidIdentity, PidNamespace, Uid,
         signal::{
             c_types::siginfo_t,
-            constants::{SI_QUEUE, SI_TKILL, SI_USER},
+            constants::{SI_QUEUE, SI_TKILL, SI_USER, SIGKILL, SIGSTOP},
             sig_num::SigNum,
         },
     },
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct UserSignal {
     num: SigNum,
-    pid: Pid,
+    identity: Arc<PidIdentity>,
     uid: Uid,
     kind: UserSignalKind,
 }
@@ -31,10 +31,15 @@ pub(crate) enum UserSignalKind {
 }
 
 impl UserSignal {
-    pub(crate) fn new(num: SigNum, kind: UserSignalKind, pid: Pid, uid: Uid) -> Self {
+    pub(crate) fn new(
+        num: SigNum,
+        kind: UserSignalKind,
+        identity: Arc<PidIdentity>,
+        uid: Uid,
+    ) -> Self {
         Self {
             num,
-            pid,
+            identity,
             uid,
             kind,
         }
@@ -43,14 +48,14 @@ impl UserSignal {
     pub(crate) fn new_kill(num: SigNum, ctx: &Context) -> Self {
         Self {
             num,
-            pid: ctx.process.pid(),
+            identity: ctx.process.pid_identity().clone(),
             uid: ctx.posix_thread.credentials().ruid(),
             kind: UserSignalKind::Kill,
         }
     }
 
     pub(crate) fn pid(&self) -> Pid {
-        self.pid
+        self.identity.global()
     }
 
     pub(crate) fn kind(&self) -> UserSignalKind {
@@ -63,7 +68,7 @@ impl Signal for UserSignal {
         self.num
     }
 
-    fn to_info(&self) -> siginfo_t {
+    fn to_info(&self, namespace: &PidNamespace) -> siginfo_t {
         let code = match self.kind {
             UserSignalKind::Kill => SI_USER,
             UserSignalKind::Tkill => SI_TKILL,
@@ -71,8 +76,15 @@ impl Signal for UserSignal {
         };
 
         let mut info = siginfo_t::new(self.num, code);
-        info.set_pid_uid(self.pid, self.uid);
+        info.set_pid_uid(self.identity.in_namespace(namespace), self.uid);
 
         info
+    }
+
+    fn forces_namespace_init(&self, namespace: &Arc<PidNamespace>) -> bool {
+        let sender_namespace = self.identity.namespace();
+        (self.num == SIGKILL || self.num == SIGSTOP)
+            && !Arc::ptr_eq(sender_namespace, namespace)
+            && sender_namespace.is_same_or_ancestor_of(namespace)
     }
 }

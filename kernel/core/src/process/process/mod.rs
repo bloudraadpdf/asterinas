@@ -26,7 +26,7 @@ use crate::{
     fs::cgroupfs::CgroupNode,
     prelude::*,
     process::{
-        UserNamespace, WaitOptions,
+        PidIdentity, PidNamespace, UserNamespace, WaitOptions,
         signal::{Pollee, sig_queues::SigQueues},
         status::StopWaitStatus,
     },
@@ -85,7 +85,7 @@ pub(super) fn init_on_each_cpu() {
 /// Process stands for a set of threads that shares the same userspace.
 pub struct Process {
     // Immutable Part
-    pid: Pid,
+    identity: Arc<PidIdentity>,
 
     vmar: Mutex<Option<Arc<Vmar>>>,
     /// Wait for child status changed
@@ -226,7 +226,7 @@ impl Process {
     }
 
     pub(super) fn new(
-        pid: Pid,
+        identity: Arc<PidIdentity>,
         vmar: Arc<Vmar>,
 
         resource_limits: ResourceLimits,
@@ -244,7 +244,7 @@ impl Process {
             let timer_manager = PosixTimerManager::new(&prof_clock, process_ref);
 
             Self {
-                pid,
+                identity,
                 vmar: Mutex::new(Some(vmar)),
                 children_wait_queue,
                 pidfile_pollee: Pollee::new(),
@@ -288,7 +288,35 @@ impl Process {
     // *********** Basic structures ***********
 
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.identity.global()
+    }
+
+    pub(crate) fn pid_identity(&self) -> &Arc<PidIdentity> {
+        &self.identity
+    }
+
+    pub(crate) fn pid_namespace(&self) -> &Arc<PidNamespace> {
+        self.identity.namespace()
+    }
+
+    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> Pid {
+        self.identity.in_namespace(namespace)
+    }
+
+    pub(crate) fn namespace_pid(&self) -> Pid {
+        self.pid_in(self.pid_namespace())
+    }
+
+    pub(crate) fn parent_pid_in(&self, namespace: &PidNamespace) -> Pid {
+        self.parent()
+            .lock()
+            .process()
+            .upgrade()
+            .map_or(0, |parent| parent.pid_in(namespace))
+    }
+
+    pub(crate) fn is_namespace_init(&self) -> bool {
+        self.namespace_pid() == 1
     }
 
     /// Gets the profiling clock of the process.
@@ -333,7 +361,7 @@ impl Process {
     }
 
     pub(crate) fn is_init_process(&self) -> bool {
-        self.parent.pid() == 0
+        self.pid() == INIT_PROCESS_PID
     }
 
     pub(super) fn children(&self) -> &Mutex<Option<BTreeMap<Pid, Arc<Process>>>> {
@@ -359,6 +387,20 @@ impl Process {
             .lock()
             .as_ref()
             .map_or(0, |group| group.pgid())
+    }
+
+    pub(crate) fn pgid_in(&self, namespace: &PidNamespace) -> Pgid {
+        self.process_group
+            .lock()
+            .as_ref()
+            .map_or(0, |group| group.pgid_in(namespace))
+    }
+
+    pub(crate) fn sid_in(&self, namespace: &PidNamespace) -> Sid {
+        self.process_group
+            .lock()
+            .as_ref()
+            .map_or(0, |group| group.session().sid_in(namespace))
     }
 
     /// Returns the session ID of the process.
@@ -395,7 +437,7 @@ impl Process {
         // Lock order: PID table -> group of process -> group inner -> session inner
         let mut pid_table = pid_table::pid_table_mut();
 
-        if pid_table.contains_process_group(&self.pid) {
+        if pid_table.contains_process_group(&self.pid()) {
             return_errno_with_message!(
                 Errno::EPERM,
                 "a process group leader cannot be moved to a new session"
@@ -420,7 +462,7 @@ impl Process {
         let mut session_inner = session.lock();
 
         // Remove the process from the process group.
-        process_group_inner.remove_process(&self.pid);
+        process_group_inner.remove_process(&self.pid());
         if process_group_inner.is_empty() {
             pid_table.remove_process_group(process_group.pgid());
 
@@ -478,10 +520,10 @@ impl Process {
             Error::with_message(Errno::ESRCH, "the process to set the PGID does not exist")
         })?;
 
-        let current_session = if self.pid == process.pid() {
+        let current_session = if self.pid() == process.pid() {
             // There is no need to check if the session is the same in this case.
             None
-        } else if self.pid == process.parent().pid() {
+        } else if self.pid() == process.parent().pid() {
             // FIXME: If the child process has called `execve`, we should fail with `EACCESS`.
 
             // Immediately release the `self.process_group` lock to avoid deadlocks. Race
@@ -522,7 +564,7 @@ impl Process {
         let process_group = process_group_mut.as_ref().unwrap();
         let session = process_group.session();
 
-        if session.sid() == self.pid {
+        if session.sid() == self.pid() {
             return_errno_with_message!(
                 Errno::EPERM,
                 "a session leader cannot be moved to a new process group"
@@ -559,7 +601,7 @@ impl Process {
 
         // Remove the process from the old process group
         let mut session_inner = session.lock();
-        process_group_inner.remove_process(&self.pid);
+        process_group_inner.remove_process(&self.pid());
         if process_group_inner.is_empty() {
             pid_table.remove_process_group(process_group.pgid());
             session_inner.remove_process_group(&process_group.pgid());
@@ -592,7 +634,7 @@ impl Process {
         {
             return_errno_with_message!(Errno::EPERM, "the process belongs to a different session");
         }
-        if process_group.pgid() == self.pid {
+        if process_group.pgid() == self.pid() {
             // We'll hit this if the process is a session leader. There is no need to check below.
             return Ok(());
         }
@@ -600,7 +642,7 @@ impl Process {
         // Remove the process from the old process group
         let mut process_group_inner = process_group.lock();
         let mut session_inner = session.lock();
-        process_group_inner.remove_process(&self.pid);
+        process_group_inner.remove_process(&self.pid());
         if process_group_inner.is_empty() {
             pid_table.remove_process_group(process_group.pgid());
             session_inner.remove_process_group(&process_group.pgid());
@@ -639,7 +681,7 @@ impl Process {
     /// Therefore, unless the caller can ensure that there are no permission issues,
     /// this method should be used to enqueue kernel signals or fault signals.
     pub(crate) fn enqueue_signal(&self, signal: Box<dyn Signal>) {
-        if self.status.is_zombie() {
+        if !self.prepare_signal(signal.as_ref()) {
             return;
         }
 
@@ -654,6 +696,30 @@ impl Process {
             // Reference: <https://elixir.bootlin.com/linux/v6.17/source/kernel/signal.c#L969>.
             posix_thread.wake_signalled_waker();
         }
+    }
+
+    pub(super) fn prepare_signal(&self, signal: &dyn Signal) -> bool {
+        if self.status.is_zombie() {
+            return false;
+        }
+        if signal.num() == crate::process::signal::constants::SIGCONT {
+            self.resume();
+        }
+        self.accepts_signal(signal)
+    }
+
+    pub(super) fn accepts_signal(&self, signal: &dyn Signal) -> bool {
+        use crate::process::signal::sig_action::SigAction;
+
+        if !self.is_namespace_init() {
+            return true;
+        }
+        if signal.forces_namespace_init(self.pid_namespace()) {
+            return true;
+        }
+        let dispositions = self.sig_dispositions.lock();
+        let dispositions = dispositions.lock();
+        matches!(dispositions.get(signal.num()), SigAction::User { .. })
     }
 
     /// Clears the parent death signal.
@@ -701,9 +767,6 @@ impl Process {
         if self.status.stop_status().resume() {
             self.wake_up_parent();
 
-            // Note that the resume function is called by the thread which deals with SIGCONT,
-            // since SIGCONT is handled by any thread in this process, we need to wake
-            // up other stopped threads in the same process.
             for task in self.tasks.lock().as_slice() {
                 let posix_thread = task.as_posix_thread().unwrap();
                 posix_thread.wake_signalled_waker();

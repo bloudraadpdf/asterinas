@@ -5,41 +5,48 @@ use aster_rights_proc::require;
 
 use crate::{
     prelude::*,
-    process::{Credentials, Gid, Pid, Uid, posix_thread::AsPosixThread},
+    process::{Credentials, Gid, Pid, PidIdentity, Uid, posix_thread::AsPosixThread},
 };
 
 pub(super) struct SocketCred<R = ReadOp> {
-    pid: Pid,
+    identity: Arc<PidIdentity>,
     cred: Credentials<R>,
 }
 
 impl SocketCred<ReadOp> {
     pub(super) fn new_current() -> Self {
-        let pid = current!().pid();
+        let identity = current!().pid_identity().clone();
         let cred = current_thread!().as_posix_thread().unwrap().credentials();
 
-        Self { pid, cred }
+        Self { identity, cred }
     }
 }
 
 impl SocketCred<ReadDupOp> {
     pub(super) fn new_current() -> Self {
-        let pid = current!().pid();
+        let identity = current!().pid_identity().clone();
         let cred = current_thread!()
             .as_posix_thread()
             .unwrap()
             .credentials_dup();
 
-        Self { pid, cred }
+        Self { identity, cred }
     }
 }
 
 impl<R: TRights> SocketCred<R> {
+    #[require(R > Read)]
+    pub(super) fn same_real_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+            && self.cred.ruid() == other.cred.ruid()
+            && self.cred.rgid() == other.cred.rgid()
+    }
+
     /// Converts to a [`CUserCred`] with the PID and the _effective_ UID/GID.
     #[require(R > Read)]
     pub(super) fn to_effective_c_cred(&self) -> CUserCred {
         CUserCred {
-            pid: self.pid,
+            pid: self.identity.in_namespace(current!().pid_namespace()),
             uid: self.cred.euid(),
             gid: self.cred.egid(),
         }
@@ -49,7 +56,7 @@ impl<R: TRights> SocketCred<R> {
     #[require(R > Read)]
     pub(super) fn to_real_c_cred(&self) -> CUserCred {
         CUserCred {
-            pid: self.pid,
+            pid: self.identity.in_namespace(current!().pid_namespace()),
             uid: self.cred.ruid(),
             gid: self.cred.rgid(),
         }
@@ -62,9 +69,9 @@ impl<R: TRights> SocketCred<R> {
 
     #[require(R > R1)]
     pub(super) fn restrict<R1: TRights>(self) -> SocketCred<R1> {
-        let Self { pid, cred } = self;
+        let Self { identity, cred } = self;
         SocketCred {
-            pid,
+            identity,
             cred: cred.restrict(),
         }
     }
@@ -72,7 +79,7 @@ impl<R: TRights> SocketCred<R> {
     #[require(R > Dup)]
     pub(super) fn dup(&self) -> Self {
         Self {
-            pid: self.pid,
+            identity: self.identity.clone(),
             cred: self.cred.dup(),
         }
     }

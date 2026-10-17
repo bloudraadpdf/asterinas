@@ -35,6 +35,9 @@ pub(super) fn sys_unshare(unshare_flags: u32, ctx: &Context) -> Result<SyscallRe
 }
 
 fn apply_implied_flags(flags: &mut CloneFlags) {
+    if flags.contains(CloneFlags::CLONE_NEWPID) {
+        *flags |= CloneFlags::CLONE_THREAD;
+    }
     if flags.contains(CloneFlags::CLONE_NEWUSER) {
         *flags |= CloneFlags::CLONE_THREAD | CloneFlags::CLONE_FS;
     }

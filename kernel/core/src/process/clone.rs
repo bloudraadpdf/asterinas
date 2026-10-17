@@ -11,7 +11,7 @@ use ostd::{
 };
 
 use super::{
-    Credentials, Pid, Process, pid_table,
+    Credentials, Process, pid_table,
     posix_thread::{AsPosixThread, PosixThreadBuilder},
     rlimit::ResourceLimits,
     signal::{constants::SIGCHLD, sig_disposition::SigDispositions, sig_num::SigNum},
@@ -26,10 +26,8 @@ use crate::{
     },
     prelude::*,
     process::{
-        NsProxy, UserNamespace,
-        pid_file::PidFile,
-        posix_thread::{PosixThread, ThreadLocal, allocate_posix_tid},
-        stats::PROCESS_CREATION_COUNTER,
+        NsProxy, PidAllocation, PidIdentity, UserNamespace, pid_file::PidFile,
+        posix_thread::ThreadLocal, stats::PROCESS_CREATION_COUNTER,
     },
     sched::Nice,
     thread::{AsThread, Tid},
@@ -203,7 +201,7 @@ impl CloneArgs {
                 );
             }
 
-            if ctx.process.is_init_process() {
+            if ctx.process.is_namespace_init() {
                 return_errno_with_message!(
                     Errno::EINVAL,
                     "`CLONE_PARENT` cannot be used if the process is the init process"
@@ -220,10 +218,25 @@ impl CloneArgs {
                 );
             }
 
-            if clone_flags.intersects(CloneFlags::CLONE_PIDFD | CloneFlags::CLONE_NEWUSER) {
+            if clone_flags.intersects(
+                CloneFlags::CLONE_PIDFD | CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWPID,
+            ) {
                 return_errno_with_message!(
                     Errno::EINVAL,
-                    "`CLONE_THREAD` cannot be used together with `CLONE_PIDFD` or `CLONE_NEWUSER`"
+                    "`CLONE_THREAD` conflicts with `CLONE_PIDFD`, `CLONE_NEWUSER` and `CLONE_NEWPID`"
+                );
+            }
+
+            if !Arc::ptr_eq(
+                ctx.process.pid_namespace(),
+                ctx.thread_local
+                    .borrow_ns_proxy()
+                    .unwrap()
+                    .pid_ns_for_children(),
+            ) {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "a thread must use its process's active PID namespace"
                 );
             }
         }
@@ -276,6 +289,7 @@ impl CloneFlags {
             | CloneFlags::CLONE_VFORK
             | CloneFlags::CLONE_NEWCGROUP
             | CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_PARENT;
         let unsupported_flags = *self - supported_flags;
@@ -297,12 +311,17 @@ pub(crate) fn clone_child(
 ) -> Result<Tid> {
     clone_args.check(ctx)?;
 
+    let namespaces = ChildNamespaces::new(ctx, clone_args.flags)?;
+
     if clone_args.flags.contains(CloneFlags::CLONE_THREAD) {
-        let child_task = clone_child_task(ctx, parent_context, clone_args)?;
+        let child_task = clone_child_task(ctx, parent_context, clone_args, namespaces)?;
         let child_thread = child_task.as_thread().unwrap();
         child_thread.run();
 
-        let child_tid = child_thread.as_posix_thread().unwrap().tid();
+        let child_tid = child_thread
+            .as_posix_thread()
+            .unwrap()
+            .tid_in(ctx.process.pid_namespace());
         Ok(child_tid)
     } else {
         // Hold the read lock before charge to ensure the cgroup of current process
@@ -326,7 +345,7 @@ pub(crate) fn clone_child(
             None
         };
 
-        let child_process = clone_child_process(ctx, parent_context, clone_args)?;
+        let child_process = clone_child_process(ctx, parent_context, clone_args, namespaces)?;
 
         // Use the same cgroup snapshot that was charged above to avoid
         // a mismatch if the parent migrates concurrently.
@@ -359,8 +378,32 @@ pub(crate) fn clone_child(
             current.children_wait_queue().wait_until(cond);
         }
 
-        let child_pid = child_process.pid();
+        let child_pid = child_process.pid_in(ctx.process.pid_namespace());
         Ok(child_pid)
+    }
+}
+
+struct ChildNamespaces {
+    user_ns: Arc<UserNamespace>,
+    proxy: Arc<NsProxy>,
+    pid: PidAllocation,
+}
+
+impl ChildNamespaces {
+    fn new(ctx: &Context, flags: CloneFlags) -> Result<Self> {
+        let user_ns = clone_user_ns(flags, ctx.thread_local)?;
+        let proxy = ctx.thread_local.borrow_ns_proxy().unwrap().new_clone(
+            &user_ns,
+            &ctx.process,
+            ctx.posix_thread,
+            flags,
+        )?;
+        let pid = proxy.pid_ns_for_children().allocate()?;
+        Ok(Self {
+            user_ns,
+            proxy,
+            pid,
+        })
     }
 }
 
@@ -368,6 +411,7 @@ fn clone_child_task(
     ctx: &Context,
     parent_context: &UserContext,
     clone_args: CloneArgs,
+    namespaces: ChildNamespaces,
 ) -> Result<Arc<Task>> {
     let clone_flags = clone_args.flags;
 
@@ -398,15 +442,11 @@ fn clone_child_task(
     // Clone FPU context
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
 
-    // Clone namespaces
-    let child_user_ns = thread_local.borrow_user_ns().clone();
-    let child_ns_proxy = clone_ns_proxy(
-        thread_local.borrow_ns_proxy().unwrap(),
-        &child_user_ns,
-        process,
-        posix_thread,
-        clone_flags,
-    )?;
+    let ChildNamespaces {
+        user_ns: child_user_ns,
+        proxy: child_ns_proxy,
+        pid: pid_allocation,
+    } = namespaces;
 
     // Clone default timer slack
     let default_timer_slack_ns = posix_thread.timer_slack_ns();
@@ -436,7 +476,8 @@ fn clone_child_task(
     // Inherit the thread name.
     let thread_name = *posix_thread.thread_name().lock();
 
-    let child_tid = allocate_posix_tid();
+    let child_identity = pid_allocation.identity().clone();
+    let child_tid = child_identity.global();
     let child_task = {
         let credentials = {
             let credentials = ctx.posix_thread.credentials();
@@ -444,7 +485,7 @@ fn clone_child_task(
         };
 
         let mut thread_builder = PosixThreadBuilder::new(
-            child_tid,
+            child_identity.clone(),
             thread_name,
             child_user_ctx,
             credentials,
@@ -464,7 +505,11 @@ fn clone_child_task(
         }
 
         // Deal with SETTID/CLEARTID flags
-        clone_parent_settid(child_tid, clone_args.parent_tid, clone_flags)?;
+        clone_parent_settid(
+            child_identity.in_namespace(process.pid_namespace()),
+            clone_args.parent_tid,
+            clone_flags,
+        )?;
         thread_builder = clone_child_cleartid(thread_builder, clone_args.child_tid, clone_flags);
         thread_builder = clone_child_settid(thread_builder, clone_args.child_tid, clone_flags);
 
@@ -484,6 +529,7 @@ fn clone_child_task(
 
     let child_thread = child_task.as_thread().unwrap();
     pid_table::pid_table_mut().insert_thread(child_tid, child_thread);
+    pid_allocation.publish(process);
 
     Ok(child_task)
 }
@@ -492,6 +538,7 @@ fn clone_child_process(
     ctx: &Context,
     parent_context: &UserContext,
     clone_args: CloneArgs,
+    namespaces: ChildNamespaces,
 ) -> Result<Arc<Process>> {
     let Context {
         process,
@@ -533,15 +580,11 @@ fn clone_child_process(
     // Clone FPU context
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
 
-    // Clone the namespaces
-    let child_user_ns = clone_user_ns(clone_flags, thread_local)?;
-    let child_ns_proxy = clone_ns_proxy(
-        thread_local.borrow_ns_proxy().unwrap(),
-        &child_user_ns,
-        process,
-        posix_thread,
-        clone_flags,
-    )?;
+    let ChildNamespaces {
+        user_ns: child_user_ns,
+        proxy: child_ns_proxy,
+        pid: pid_allocation,
+    } = namespaces;
 
     // Clone default timer slack
     let default_timer_slack_ns = posix_thread.timer_slack_ns();
@@ -565,7 +608,7 @@ fn clone_child_process(
     // Inherit the parent's OOM score adjustment
     let child_oom_score_adj = process.oom_score_adj().load(Ordering::Relaxed);
 
-    let child_tid = allocate_posix_tid();
+    let child_identity = pid_allocation.identity().clone();
 
     let child = {
         let child_vmar_arc = child_vmar.clone_arc();
@@ -580,7 +623,7 @@ fn clone_child_process(
             };
 
             PosixThreadBuilder::new(
-                child_tid,
+                child_identity.clone(),
                 child_thread_name,
                 child_user_ctx,
                 credentials,
@@ -602,14 +645,18 @@ fn clone_child_process(
         }
 
         // Deal with SETTID/CLEARTID flags
-        clone_parent_settid(child_tid, clone_args.parent_tid, clone_flags)?;
+        clone_parent_settid(
+            child_identity.in_namespace(process.pid_namespace()),
+            clone_args.parent_tid,
+            clone_flags,
+        )?;
         child_thread_builder =
             clone_child_cleartid(child_thread_builder, clone_args.child_tid, clone_flags);
         child_thread_builder =
             clone_child_settid(child_thread_builder, clone_args.child_tid, clone_flags);
 
         create_child_process(
-            child_tid,
+            child_identity,
             child_vmar_arc,
             child_resource_limits,
             child_nice,
@@ -628,6 +675,7 @@ fn clone_child_process(
 
     // Sets parent process and group for child process.
     set_parent_and_group(clone_flags, process, &child);
+    pid_allocation.publish(&child);
 
     Ok(child)
 }
@@ -820,19 +868,9 @@ fn clone_user_ns(
     }
 }
 
-fn clone_ns_proxy(
-    parent_ns_proxy: &Arc<NsProxy>,
-    user_ns: &Arc<UserNamespace>,
-    process: &Process,
-    posix_thread: &PosixThread,
-    clone_flags: CloneFlags,
-) -> Result<Arc<NsProxy>> {
-    parent_ns_proxy.new_clone(user_ns, process, posix_thread, clone_flags)
-}
-
 #[expect(clippy::too_many_arguments)]
 fn create_child_process(
-    pid: Pid,
+    identity: Arc<PidIdentity>,
     vmar: Arc<Vmar>,
     resource_limits: ResourceLimits,
     nice: Nice,
@@ -842,7 +880,7 @@ fn create_child_process(
     thread_builder: PosixThreadBuilder,
 ) -> Arc<Process> {
     let child_proc = Process::new(
-        pid,
+        identity,
         vmar,
         resource_limits,
         nice,

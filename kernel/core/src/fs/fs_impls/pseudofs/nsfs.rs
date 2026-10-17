@@ -393,7 +393,6 @@ pub(crate) enum NsType {
     Mnt,
     #[expect(unused)]
     Net,
-    #[expect(unused)]
     Pid,
     #[expect(unused)]
     Time,

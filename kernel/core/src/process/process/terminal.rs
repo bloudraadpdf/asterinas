@@ -52,9 +52,9 @@ impl dyn Terminal {
             // Commands about foreground process groups
             cmd @ GetForegroundPgid => {
                 let operate = || {
-                    self.job_control()
-                        .foreground()
-                        .map_or(0, |foreground| foreground.pgid())
+                    self.job_control().foreground().map_or(0, |foreground| {
+                        foreground.pgid_in(current!().pid_namespace())
+                    })
                 };
 
                 let pgid = if via_master {
@@ -102,9 +102,11 @@ impl dyn Terminal {
                                 "the terminal is not a controlling termainal of any session",
                             )
                         })?
-                        .sid()
+                        .sid_in(current!().pid_namespace())
                 } else {
-                    self.is_control_and(&current!(), |session, _| Ok(session.sid()))?
+                    self.is_control_and(&current!(), |session, _| {
+                        Ok(session.sid_in(current!().pid_namespace()))
+                    })?
                 };
 
                 cmd.write(&sid)?;
@@ -187,7 +189,8 @@ impl dyn Terminal {
         let pid_table = pid_table::pid_table_mut();
 
         self.is_control_and(process, |session, _| {
-            let Some(process_group) = pid_table.get_process_group(&pgid) else {
+            let Some(process_group) = pid_table.get_process_group_in(pgid, process.pid_namespace())
+            else {
                 return_errno_with_message!(
                     Errno::ESRCH,
                     "the process group to be foreground does not exist"

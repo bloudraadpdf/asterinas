@@ -4,6 +4,6 @@ use super::SyscallReturn;
 use crate::prelude::*;
 
 pub(super) fn sys_gettid(ctx: &Context) -> Result<SyscallReturn> {
-    let tid = ctx.posix_thread.tid();
+    let tid = ctx.posix_thread.namespace_tid();
     Ok(SyscallReturn::Return(tid as _))
 }

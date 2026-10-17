@@ -26,6 +26,8 @@ opt_flags =
     CLONE_VFORK |
     // Create a new mount namespace for the child
     CLONE_NEWNS |
+    // Create a new PID namespace for the child
+    CLONE_NEWPID |
     // Write child `TID` to parent's memory
     CLONE_PARENT_SETTID |
     // Allocate a `PID` file descriptor for the child

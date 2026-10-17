@@ -15,7 +15,10 @@ use crate::{
         },
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable},
+    process::{
+        PidNamespace,
+        signal::{PollHandle, Pollable},
+    },
 };
 
 /// Represents a filesystem configuration context.
@@ -259,7 +262,11 @@ impl FileLike for FsConfigFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             access_mode: AccessMode,
             status_flags: StatusFlags,
@@ -322,7 +329,11 @@ impl FileLike for DetachedMountFile {
         &self.common
     }
 
-    fn dump_proc_fdinfo(self: Arc<Self>, fd_flags: FdFlags) -> Box<dyn Display> {
+    fn dump_proc_fdinfo(
+        self: Arc<Self>,
+        fd_flags: FdFlags,
+        _namespace: &PidNamespace,
+    ) -> Box<dyn Display> {
         struct FdInfo {
             access_mode: AccessMode,
             status_flags: StatusFlags,

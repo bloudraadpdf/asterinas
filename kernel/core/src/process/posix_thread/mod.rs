@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use aster_rights::{ReadDupOp, ReadOp, ReadWriteOp};
 use aster_util::fixed_str::FixedCStr;
 use ostd::{
-    sync::{RoArc, RwMutexReadGuard, Waker},
+    sync::{Rcu, RoArc, RwMutexReadGuard, Waker},
     task::Task,
 };
 use spin::Once;
@@ -19,7 +19,7 @@ use crate::{
     fs::{file::file_table::FileTable, thread_info::ThreadFsInfo},
     prelude::*,
     process::{
-        ExitCode, Pid,
+        ExitCode, Pid, PidIdentity, PidNamespace,
         namespace::nsproxy::NsProxy,
         posix_thread::ptrace::TraceeStatus,
         signal::{PauseReason, PollHandle, sig_mask::SigMask},
@@ -53,7 +53,7 @@ pub struct PosixThread {
     task: Weak<Task>,
 
     // Mutable part
-    tid: AtomicU32,
+    identity: Rcu<Arc<PidIdentity>>,
 
     name: Mutex<ThreadName>,
 
@@ -119,15 +119,29 @@ impl PosixThread {
 
     /// Returns the thread id
     pub(crate) fn tid(&self) -> Tid {
-        self.tid.load(Ordering::Relaxed)
+        self.identity.read().get().global()
+    }
+
+    pub(crate) fn pid_identity(&self) -> Arc<PidIdentity> {
+        self.identity.read().get().clone()
+    }
+
+    pub(crate) fn tid_in(&self, namespace: &PidNamespace) -> Tid {
+        self.identity.read().get().in_namespace(namespace)
+    }
+
+    pub(crate) fn namespace_tid(&self) -> Tid {
+        let identity = self.identity.read();
+        let identity = identity.get();
+        identity.in_namespace(identity.namespace())
     }
 
     /// Sets the thread as the main thread by changing its thread ID.
     pub(super) fn set_main(&self, pid: Pid) {
         debug_assert_eq!(pid, self.process.upgrade().unwrap().pid());
-        debug_assert_ne!(pid, self.tid.load(Ordering::Relaxed));
+        debug_assert_ne!(pid, self.tid());
 
-        self.tid.store(pid, Ordering::Relaxed);
+        self.identity.update(self.process().pid_identity().clone());
     }
 
     pub(crate) fn thread_name(&self) -> &Mutex<ThreadName> {
@@ -259,6 +273,13 @@ impl PosixThread {
     /// Therefore, unless the caller can ensure that there are no permission issues,
     /// this method should be used to enqueue kernel signals or fault signals.
     pub(crate) fn enqueue_signal(&self, signal: Box<dyn Signal>) {
+        if self
+            .process
+            .upgrade()
+            .is_none_or(|process| !process.prepare_signal(signal.as_ref()))
+        {
+            return;
+        }
         self.sig_queues.enqueue(signal);
         self.wake_signalled_waker();
     }
@@ -407,29 +428,6 @@ pub(crate) fn derive_thread_name(exec_path: &str) -> ThreadName {
 
 /// The TID of the first POSIX thread (i.e., the main thread of the init process).
 pub(crate) const FIRST_POSIX_TID: Tid = 1;
-
-static POSIX_TID_ALLOCATOR: AtomicU32 = AtomicU32::new(FIRST_POSIX_TID);
-
-/// Allocates a new TID for the new POSIX thread.
-pub(crate) fn allocate_posix_tid() -> Tid {
-    let tid = POSIX_TID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-    if tid >= PID_MAX {
-        // When the kernel's next PID value reaches `PID_MAX`,
-        // it should wrap back to a minimum PID value.
-        // PIDs with a value of `PID_MAX` or larger should not be allocated.
-        // Reference: <https://docs.kernel.org/admin-guide/sysctl/kernel.html#pid-max>.
-        //
-        // FIXME: Currently, we cannot determine which PID is recycled,
-        // so we are unable to allocate smaller PIDs.
-        warn!("the allocated ID is greater than the maximum allowed PID");
-    }
-    tid
-}
-
-/// Returns the last allocated TID.
-pub(crate) fn last_tid() -> Tid {
-    POSIX_TID_ALLOCATOR.load(Ordering::Relaxed) - 1
-}
 
 /// The maximum allowed process ID.
 //

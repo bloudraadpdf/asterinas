@@ -169,7 +169,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 mask,
                 restore_sig_mask.map(RestoreSigMaskGuard::into_mask),
                 user_ctx,
-                signal.to_info(),
+                signal.to_info(ctx.process.pid_namespace()),
             ) {
                 debug!("Failed to handle user signal: {:?}", e);
                 // If signal handling fails, the process should be terminated with SIGSEGV.
@@ -181,7 +181,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 do_exit_group(TermStatus::Killed(SIGSEGV), ctx, user_ctx);
             }
         }
-        SigAction::Dfl if ctx.process.is_init_process() => {
+        SigAction::Dfl if !ctx.process.accepts_signal(signal.as_ref()) => {
             // From Linux man pages "kill(2)":
             // "The only signals that can be sent to process ID 1, the init process, are those for
             // which init has explicitly installed signal handlers."

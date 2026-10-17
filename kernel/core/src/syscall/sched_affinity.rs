@@ -19,7 +19,7 @@ pub(super) fn sys_sched_getaffinity(
 ) -> Result<SyscallReturn> {
     let cpu_set = match tid {
         0 => ctx.thread.atomic_cpu_affinity().load(Ordering::Relaxed),
-        _ => match pid_table::pid_table_mut().get_thread(tid) {
+        _ => match pid_table::pid_table_mut().get_thread_in(tid, ctx.process.pid_namespace()) {
             Some(thread) => thread.atomic_cpu_affinity().load(Ordering::Relaxed),
             None => return_errno_with_message!(Errno::ESRCH, "the target thread does not exist"),
         },
@@ -47,7 +47,7 @@ pub(super) fn sys_sched_setaffinity(
             .thread
             .atomic_cpu_affinity()
             .store(&user_cpu_set, Ordering::Relaxed),
-        _ => match pid_table::pid_table_mut().get_thread(tid) {
+        _ => match pid_table::pid_table_mut().get_thread_in(tid, ctx.process.pid_namespace()) {
             Some(thread) => {
                 thread
                     .atomic_cpu_affinity()

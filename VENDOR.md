@@ -109,3 +109,21 @@ native-policy probe reproduces all three accepted operations before the fix
 and verifies denial afterwards. It also checks setgid handling for another
 group and set-ID removal on an ownership change. These changes are already
 upstream and must not be submitted again.
+
+The PID namespace patch adds hierarchical thread and process identifiers,
+`CLONE_NEWPID`, `unshare` and `setns` support, and procfs mount scoping.
+Namespace init exit closes clone admission before it terminates and reaps
+members. Queued signals, Unix credentials, process groups and sessions retain
+identities until their users release them. Nested namespaces reuse sparse
+identifiers; root identifiers remain monotonic and reject exhaustion.
+The implementation adds no unsafe kernel code.
+
+The in-tree `pid_namespace` regression covers nested identifiers, procfs,
+threads, namespace selection, failed init creation, permission checks, signals,
+Unix credentials, descendant cleanup and concurrent clone/init exit. The same
+12 cases pass on Linux and on four-vCPU AMD64 Firecracker guests. Existing
+process, pidfd, signal, subreaper, exec, robust-mutex, clone and ptrace regressions
+also pass. These process boundaries apply to Linux and Asterinas guests;
+Unikraft retains its shared address space and VM boundary. This patch does not
+change TDX or AMD confidential-VM code or establish confidential-VM execution
+support.

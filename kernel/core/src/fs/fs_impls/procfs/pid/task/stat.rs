@@ -133,7 +133,7 @@ impl ProcFileOps for StatFileOps {
         //
         // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/array.c#L467-L681>
 
-        let pid = posix_thread.tid();
+        let pid = posix_thread.tid_in(&self.dir.namespace);
 
         let comm = posix_thread
             .thread_name()
@@ -152,9 +152,9 @@ impl ProcFileOps for StatFileOps {
                 SleepingState::StopByPtrace => 't',
             }
         };
-        let ppid = process.parent().pid();
-        let pgrp = process.pgid();
-        let session = process.sid();
+        let ppid = process.parent_pid_in(&self.dir.namespace);
+        let pgrp = process.pgid_in(&self.dir.namespace);
+        let session = process.sid_in(&self.dir.namespace);
 
         let (tty_nr, tpgid) = if let Some(terminal) = process.terminal() {
             (
@@ -162,7 +162,7 @@ impl ProcFileOps for StatFileOps {
                 terminal
                     .job_control()
                     .foreground()
-                    .map(|pgrp| pgrp.pgid() as i64)
+                    .map(|pgrp| pgrp.pgid_in(&self.dir.namespace) as i64)
                     .unwrap_or(-1),
             )
         } else {
