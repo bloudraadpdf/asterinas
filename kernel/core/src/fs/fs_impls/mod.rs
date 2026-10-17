@@ -5,7 +5,7 @@
 //! This module contains all the specific file system implementations supported by the kernel.
 
 pub(crate) mod cgroupfs;
-#[cfg(feature = "filesystems_extra")]
+#[cfg(feature = "configfs")]
 pub(crate) mod configfs;
 pub(crate) mod devpts;
 pub mod devtmpfs;
@@ -27,7 +27,7 @@ pub(super) fn init() {
     sysfs::init();
     procfs::init();
     cgroupfs::init();
-    #[cfg(feature = "filesystems_extra")]
+    #[cfg(feature = "configfs")]
     configfs::init();
     ramfs::init();
     tmpfs::init();
