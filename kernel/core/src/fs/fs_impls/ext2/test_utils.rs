@@ -147,6 +147,7 @@ impl BlockDevice for Ext2MemoryDisk {
 
     fn metadata(&self) -> BlockDeviceMeta {
         BlockDeviceMeta {
+            is_read_only: false,
             max_nr_segments_per_bio: usize::MAX,
             nr_sectors: self.segment.size() / SECTOR_SIZE,
         }

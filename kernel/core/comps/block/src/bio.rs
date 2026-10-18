@@ -181,6 +181,8 @@ impl Debug for Bio {
 /// The error type returned when enqueueing the `Bio`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BioEnqueueError {
+    /// The device is read-only.
+    ReadOnly,
     /// The request queue is full
     IsFull,
     /// Refuse to enqueue the bio
@@ -190,8 +192,13 @@ pub enum BioEnqueueError {
 }
 
 impl From<BioEnqueueError> for Error {
-    fn from(_error: BioEnqueueError) -> Self {
-        Error::NotEnoughResources
+    fn from(error: BioEnqueueError) -> Self {
+        match error {
+            BioEnqueueError::ReadOnly => Error::AccessDenied,
+            BioEnqueueError::IsFull | BioEnqueueError::Refused | BioEnqueueError::TooBig => {
+                Error::NotEnoughResources
+            }
+        }
     }
 }
 
