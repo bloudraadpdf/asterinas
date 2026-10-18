@@ -29,7 +29,8 @@ fn probe_from_kernel_cmdline() {
         return;
     };
 
-    for device in devices {
+    // The transport driver consumes its pending devices in reverse order.
+    for device in devices.iter().rev() {
         info!(
             "Probe MMIO command-line device: base={:#x}, size={:#x}, irq={}",
             device.base(),
