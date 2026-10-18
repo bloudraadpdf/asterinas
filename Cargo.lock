@@ -141,6 +141,7 @@ dependencies = [
  "aster-cmdline",
  "aster-console",
  "aster-device",
+ "aster-erofs",
  "aster-framebuffer",
  "aster-fuse",
  "aster-input",

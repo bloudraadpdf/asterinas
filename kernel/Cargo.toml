@@ -23,6 +23,7 @@ default = ["cvm_guest", "console_video", "storage_nvme", "filesystems_extra", "v
 console_video = ["aster-core/console_video", "dep:aster-drm", "dep:aster-simpledrm", "dep:aster-i8042"]
 storage_nvme = ["aster-core/storage_nvme"]
 configfs = ["aster-core/configfs"]
+fs_erofs = ["aster-core/fs_erofs"]
 filesystems_extra = ["aster-core/filesystems_extra"]
 virtio_devices = ["aster-core/virtio_devices"]
 virtio_block = ["aster-core/virtio_block"]

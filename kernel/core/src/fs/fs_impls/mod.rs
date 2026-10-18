@@ -9,6 +9,10 @@ pub(crate) mod cgroupfs;
 pub(crate) mod configfs;
 pub(crate) mod devpts;
 pub mod devtmpfs;
+#[cfg(feature = "fs_erofs")]
+mod disk;
+#[cfg(feature = "fs_erofs")]
+pub(crate) mod erofs;
 #[cfg(feature = "filesystems_extra")]
 pub(crate) mod exfat;
 #[cfg(feature = "filesystems_extra")]
@@ -37,6 +41,8 @@ pub(super) fn init() {
 
     #[cfg(feature = "filesystems_extra")]
     ext2::init();
+    #[cfg(feature = "fs_erofs")]
+    erofs::init();
     #[cfg(feature = "filesystems_extra")]
     exfat::init();
     #[cfg(feature = "filesystems_extra")]
