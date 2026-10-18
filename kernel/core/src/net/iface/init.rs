@@ -107,18 +107,12 @@ fn new_loopback() -> Arc<Iface> {
 
 #[cfg(feature = "virtio_net")]
 fn new_virtio() -> Option<Arc<Iface>> {
-    use aster_bigtcp::{
-        iface::EtherIface,
-        wire::{Ipv4Address, Ipv4Cidr},
-    };
-
-    const VIRTIO_ADDRESS: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
-    const VIRTIO_ADDRESS_PREFIX_LEN: u8 = 24; // mask: 255.255.255.0
-    const VIRTIO_GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
+    use aster_bigtcp::iface::EtherIface;
 
     let virtio_net = aster_network::get_device(VIRTIO_DEVICE_NAME)?;
 
     let ether_addr = virtio_net.lock().mac_addr();
+    let config = super::ip_config::boot_config();
 
     struct Wrapper(Arc<SpinLock<dyn AnyNetworkDevice, BottomHalfDisabled>>);
 
@@ -145,8 +139,8 @@ fn new_virtio() -> Option<Arc<Iface>> {
     Some(EtherIface::new(
         Wrapper(virtio_net),
         ether_addr,
-        Ipv4Cidr::new(VIRTIO_ADDRESS, VIRTIO_ADDRESS_PREFIX_LEN),
-        VIRTIO_GATEWAY,
+        config.address,
+        config.gateway,
         InterfaceName::from_str_truncated("eth0"),
         PollScheduler::new(),
         flags,
