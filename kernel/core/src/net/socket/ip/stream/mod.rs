@@ -508,7 +508,7 @@ impl Socket for StreamSocket {
         let options = self.options.read();
         let raw_option = options.raw();
 
-        state.borrow_result(|owned_state| {
+        let result = state.borrow_result(|owned_state| {
             let init_stream = match owned_state {
                 State::Init(init_stream) => init_stream,
                 State::Listen(listen_stream) => {
@@ -538,7 +538,19 @@ impl Socket for StreamSocket {
 
             self.pollee.invalidate();
             (State::Listen(listen_stream), Ok(()))
-        })
+        });
+        #[cfg(feature = "http_listen")]
+        let endpoint = match state.as_ref() {
+            State::Listen(listen_stream) if result.is_ok() => Some(listen_stream.local_endpoint()),
+            _ => None,
+        };
+        drop(options);
+        drop(state);
+        #[cfg(feature = "http_listen")]
+        if let Some(endpoint) = endpoint {
+            crate::device::misc::http_listen::on_listen(endpoint);
+        }
+        result
     }
 
     fn accept(&self, is_nonblocking: bool) -> Result<(Arc<dyn FileLike>, SocketAddr)> {

@@ -34,3 +34,8 @@ in `msg_flags`. Tokoloshe's HTTP launcher requires this property for its
 notification and release descriptors. The upstream Unix-stream regression
 checks both flag values. The consumer descriptor-handoff and release-pipe probe
 fails without the patch and passes on AMD64 Firecracker with it.
+
+The optional `http_listen` feature ports Unikraft's `/dev/http-listen` contract:
+root-only access, one two-byte network-order port request and a poll notification
+when an IPv4 TCP listener enters LISTEN on that port. Notification runs after
+socket locks are released.
