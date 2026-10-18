@@ -70,6 +70,7 @@ fdt.workspace = true
 unwinding = { workspace = true, features = ["fde-static"] }
 
 [features]
+log_max_level_info = ["log/max_level_info"]
 default = ["cvm_guest"]
 # The guest OS support for Confidential VMs (CVMs), e.g., Intel TDX
 cvm_guest = ["dep:tdx-guest"]

@@ -73,6 +73,9 @@
 //! to the OSTD logger.
 //! First-party code should use OSTD's macros directly.
 //!
+//! The `log_max_level_info` feature removes debug logging at compile time
+//! from both facades. Runtime log level changes cannot enable those messages.
+//!
 //! # Per-module prefix overrides
 //!
 //! A subsystem module can override the crate-level prefix

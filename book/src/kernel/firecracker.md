@@ -25,8 +25,9 @@ For a small guest RAM allocation, also enable `pvh_boot_only` and disable
 all default features:
 
 ```bash
-cargo osdk build --target-arch x86_64 --boot-method vmm-direct \
-    --features pvh_boot_only --no-default-features
+OSTD_TASK_STACK_SIZE_IN_PAGES=32 cargo osdk build \
+    --target-arch x86_64 --boot-method vmm-direct --profile release-lto \
+    --features pvh_boot_only,log_max_level_info --no-default-features
 ```
 
 This feature loads the kernel at 16 MiB and removes the Linux and Multiboot
@@ -40,6 +41,11 @@ with the frame allocator. Shared edge pages and pages that overlap retained
 boot strings stay reserved. Other boot configurations retain their archive
 reservation. `BootInfo::take_initramfs()` transfers the archive once; byte
 borrows cannot outlive its owner.
+
+The `release-lto` profile uses full LTO and release optimisation. The example
+reserves 128 KiB per task stack and retains its guard pages.
+`log_max_level_info` removes kernel debug messages at compile time and keeps
+informational messages, warnings and errors.
 
 The output kernel image is:
 
