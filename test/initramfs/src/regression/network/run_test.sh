@@ -36,6 +36,7 @@ sleep 0.2
 ./tcp_wildcard
 ./udp_broadcast
 ./udp_err
+./udp_wildcard
 ./unix_datagram_err
 ./unix_seqpacket_err
 ./unix_stream_err

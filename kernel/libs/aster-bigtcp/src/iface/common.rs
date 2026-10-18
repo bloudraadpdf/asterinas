@@ -223,11 +223,6 @@ impl<E: Ext> IfaceCommon<E> {
 }
 
 impl<E: Ext> IfaceCommon<E> {
-    pub(crate) fn register_udp_socket(&self, socket: Arc<UdpSocketBg<E>>) {
-        let mut sockets = self.sockets.lock();
-        sockets.insert_udp_socket(socket);
-    }
-
     pub(crate) fn remove_tcp_listener(&self, socket: &Arc<TcpListenerBg<E>>) {
         let mut sockets = self.sockets.lock();
         let removed = sockets.remove_listener(socket.listener_key());
@@ -369,18 +364,14 @@ impl<E: Ext> Drop for BoundPort<E> {
     }
 }
 
-/// A TCP port bound to an iface.
-pub struct BoundTcpPort<E: Ext>(BoundPort<E>);
-/// A UDP port bound to an iface.
-pub struct BoundUdpPort<E: Ext>(BoundPort<E>);
-
-impl<E: Ext> BoundTcpPort<E> {
+impl<E: Ext> BoundPort<E> {
     /// Reserves the same port on every supplied interface, or releases all provisional bindings.
     /// An ephemeral request searches for a port available on every interface.
-    pub fn bind_many(
+    fn bind_many(
         mut ifaces: Vec<Arc<dyn Iface<E>>>,
         endpoint: IpEndpoint,
         can_reuse: bool,
+        protocol: PortProtocol,
     ) -> Result<Vec<Self>, BindError> {
         if ifaces.is_empty() {
             return Err(BindError::Exhausted);
@@ -400,9 +391,9 @@ impl<E: Ext> BoundTcpPort<E> {
         let mut first_candidate = None;
         for _ in 0..attempts {
             let (port, reusable) =
-                tables[0].bind(BindPortConfig::new(endpoint, can_reuse), PortProtocol::Tcp)?;
+                tables[0].bind(BindPortConfig::new(endpoint, can_reuse), protocol)?;
             if first_candidate == Some(port) {
-                tables[0].release(endpoint.addr, port, reusable, PortProtocol::Tcp);
+                tables[0].release(endpoint.addr, port, reusable, protocol);
                 return Err(BindError::Exhausted);
             }
             first_candidate.get_or_insert(port);
@@ -410,7 +401,7 @@ impl<E: Ext> BoundTcpPort<E> {
             let mut reserved = 1;
             for table in &mut tables[1..] {
                 if table
-                    .bind(BindPortConfig::new(selected, can_reuse), PortProtocol::Tcp)
+                    .bind(BindPortConfig::new(selected, can_reuse), protocol)
                     .is_err()
                 {
                     break;
@@ -420,19 +411,17 @@ impl<E: Ext> BoundTcpPort<E> {
             if reserved == tables.len() {
                 return Ok(ifaces
                     .iter()
-                    .map(|iface| {
-                        Self(BoundPort {
-                            iface: iface.clone(),
-                            addr: endpoint.addr,
-                            port,
-                            protocol: PortProtocol::Tcp,
-                            can_reuse: AtomicBool::new(reusable),
-                        })
+                    .map(|iface| Self {
+                        iface: iface.clone(),
+                        addr: endpoint.addr,
+                        port,
+                        protocol,
+                        can_reuse: AtomicBool::new(reusable),
                     })
                     .collect());
             }
             for table in &mut tables[..reserved] {
-                table.release(endpoint.addr, port, reusable, PortProtocol::Tcp);
+                table.release(endpoint.addr, port, reusable, protocol);
             }
             if endpoint.port != 0 {
                 return Err(BindError::InUse);
@@ -442,18 +431,35 @@ impl<E: Ext> BoundTcpPort<E> {
     }
 }
 
-impl<E: Ext> Deref for BoundTcpPort<E> {
-    type Target = BoundPort<E>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+macro_rules! define_bound_port {
+    ($name:ident, $protocol:ident) => {
+        /// A transport port bound to one interface.
+        pub struct $name<E: Ext>(BoundPort<E>);
+
+        impl<E: Ext> $name<E> {
+            /// Reserves one common port on every interface, with atomic rollback on failure.
+            pub fn bind_many(
+                ifaces: Vec<Arc<dyn Iface<E>>>,
+                endpoint: IpEndpoint,
+                can_reuse: bool,
+            ) -> Result<Vec<Self>, BindError> {
+                BoundPort::bind_many(ifaces, endpoint, can_reuse, PortProtocol::$protocol)
+                    .map(|ports| ports.into_iter().map(Self).collect())
+            }
+        }
+
+        impl<E: Ext> Deref for $name<E> {
+            type Target = BoundPort<E>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+    };
 }
-impl<E: Ext> Deref for BoundUdpPort<E> {
-    type Target = BoundPort<E>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+
+define_bound_port!(BoundTcpPort, Tcp);
+define_bound_port!(BoundUdpPort, Udp);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct PortKey {

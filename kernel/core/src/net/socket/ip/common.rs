@@ -2,26 +2,34 @@
 
 use aster_bigtcp::{
     errors::BindError,
-    iface::BindPortConfig,
     wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address},
 };
 
 use crate::{
-    net::{iface::Iface, route, socket::util::check_port_privilege},
+    net::{
+        iface::{Iface, iter_all_ifaces},
+        route,
+        socket::util::check_port_privilege,
+    },
     prelude::*,
 };
 
-pub(super) fn resolve_bind_iface_and_config(
-    endpoint: &IpEndpoint,
-    can_reuse: bool,
-) -> Result<(Arc<Iface>, BindPortConfig)> {
+pub(super) fn resolve_bind_ifaces(endpoint: &IpEndpoint) -> Result<Vec<Arc<Iface>>> {
     check_port_privilege(endpoint.port)?;
-
-    let iface = route::lookup_local_iface(endpoint.addr)?;
-
-    let bind_port_config = BindPortConfig::new(*endpoint, can_reuse);
-
-    Ok((iface, bind_port_config))
+    if !endpoint.addr.is_unspecified() {
+        return Ok(vec![route::lookup_local_iface(endpoint.addr)?]);
+    }
+    let ifaces: Vec<_> = iter_all_ifaces()
+        .filter(|iface| match endpoint.addr {
+            IpAddress::Ipv4(_) => iface.ipv4_cidr().is_some(),
+            IpAddress::Ipv6(_) => iface.ipv6_cidr().is_some(),
+        })
+        .cloned()
+        .collect();
+    if ifaces.is_empty() {
+        return_errno_with_message!(Errno::EADDRNOTAVAIL, "no interface has this address family");
+    }
+    Ok(ifaces)
 }
 
 impl From<BindError> for Error {

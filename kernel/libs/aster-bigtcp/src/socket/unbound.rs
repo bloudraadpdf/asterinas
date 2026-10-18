@@ -21,10 +21,7 @@ pub(super) fn new_udp_socket() -> Box<RawUdpSocket> {
             vec![metadata; UDP_METADATA_LEN],
             vec![0u8; UDP_RECV_PAYLOAD_LEN],
         );
-        let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![metadata; UDP_METADATA_LEN],
-            vec![0u8; UDP_SEND_PAYLOAD_LEN],
-        );
+        let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![], vec![]);
         RawUdpSocket::new(rx_buffer, tx_buffer)
     };
     Box::new(raw_udp_socket)
@@ -49,4 +46,4 @@ pub const TCP_SEND_BUF_LEN: usize = 65536 * 2;
 // UDP socket buffer sizes:
 pub const UDP_SEND_PAYLOAD_LEN: usize = 65536;
 pub const UDP_RECV_PAYLOAD_LEN: usize = 65536;
-const UDP_METADATA_LEN: usize = 256;
+pub(super) const UDP_METADATA_LEN: usize = 256;

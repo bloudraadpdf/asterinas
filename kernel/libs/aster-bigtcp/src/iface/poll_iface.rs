@@ -340,7 +340,7 @@ impl<E: Ext> PendingConnSet<E> {
 }
 
 /// An extension trait for an interface context.
-pub(super) trait IsUnicast {
+pub(crate) trait IsUnicast {
     /// Returns whether the destination address is a unicast address of an interface.
     ///
     /// For example, if the interface is configured with the address `10.0.2.15/24`, this method

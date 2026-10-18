@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::{socket::UdpSocket, wire::IpEndpoint};
+use aster_bigtcp::{
+    socket::UdpSocket,
+    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address},
+};
 
 use super::{bound::BoundDatagram, observer::DatagramObserver};
 use crate::{
     events::IoEvents,
     net::{
         iface::BoundUdpPort,
-        socket::{
-            ip::common::{
-                get_ephemeral_endpoint, map_unspecified_to_localhost, resolve_bind_iface_and_config,
-            },
-            util::datagram_common,
-        },
+        socket::{ip::common::resolve_bind_ifaces, util::datagram_common},
     },
     prelude::*,
     process::signal::Pollee,
@@ -44,15 +42,15 @@ impl datagram_common::Unbound for UnboundDatagram {
         pollee: &Pollee,
         options: BindOptions,
     ) -> Result<Self::Bound> {
-        let bound_port = bind_port(endpoint, options.can_reuse)?;
+        let ports =
+            BoundUdpPort::bind_many(resolve_bind_ifaces(endpoint)?, *endpoint, options.can_reuse)?;
 
-        let bound_socket =
-            match UdpSocket::new_bind(bound_port, DatagramObserver::new(pollee.clone())) {
-                Ok(bound_socket) => bound_socket,
-                Err((_, err)) => {
-                    unreachable!("`new_bind` fails with {:?}, which should not happen", err)
-                }
-            };
+        let bound_socket = match UdpSocket::new_bind(ports, DatagramObserver::new(pollee.clone())) {
+            Ok(bound_socket) => bound_socket,
+            Err((_, err)) => {
+                unreachable!("`new_bind` fails with {:?}, which should not happen", err)
+            }
+        };
 
         Ok(BoundDatagram::new(bound_socket))
     }
@@ -63,8 +61,13 @@ impl datagram_common::Unbound for UnboundDatagram {
         pollee: &Pollee,
     ) -> Result<Self::Bound> {
         let endpoint = {
-            let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
-            get_ephemeral_endpoint(&remote_endpoint)?
+            IpEndpoint::new(
+                match remote_endpoint.addr {
+                    IpAddress::Ipv4(_) => Ipv4Address::UNSPECIFIED.into(),
+                    IpAddress::Ipv6(_) => Ipv6Address::UNSPECIFIED.into(),
+                },
+                0,
+            )
         };
         self.bind(&endpoint, pollee, BindOptions { can_reuse: false })
     }
@@ -72,9 +75,4 @@ impl datagram_common::Unbound for UnboundDatagram {
     fn check_io_events(&self) -> IoEvents {
         IoEvents::OUT
     }
-}
-
-fn bind_port(endpoint: &IpEndpoint, can_reuse: bool) -> Result<BoundUdpPort> {
-    let (iface, config) = resolve_bind_iface_and_config(endpoint, can_reuse)?;
-    Ok(iface.bind_udp(config)?)
 }
