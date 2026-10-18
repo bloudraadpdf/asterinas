@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 
 use align_ext::AlignExt;
 use aster_util::mem_obj_slice::Slice;
-use dma_pool::{DmaArenaPool, DmaBuffer};
+use dma_pool::{DmaArenaCache, DmaBuffer};
 use int_to_c_enum::TryFromInt;
 use io_util::{
     IoError,
@@ -503,21 +503,17 @@ impl BioSegmentInner {
 
 /// A BIO-specific wrapper around a shared DMA arena.
 //
-// TODO: Replace this wrapper with `DmaArenaPool` directly once the BIO
-// direction and block-oriented allocation API can be represented there.
+// TODO: Represent BIO direction and block-oriented allocation in the DMA cache API.
 struct BioSegmentPool {
-    arena_pool: Arc<DmaArenaPool<FromAndToDevice>>,
+    arena_pool: Arc<DmaArenaCache<FromAndToDevice>>,
     direction: BioDirection,
 }
 
 impl BioSegmentPool {
-    /// Creates a new pool given the bio direction. The total number of
-    /// managed blocks is currently set to `POOL_DEFAULT_NBLOCKS`.
-    ///
-    /// The new pool will be allocated and mapped for later allocation.
+    /// Creates an empty DMA cache with the existing per-direction capacity.
     fn new(direction: BioDirection) -> Self {
         Self {
-            arena_pool: DmaArenaPool::new(POOL_DEFAULT_NBLOCKS).unwrap(),
+            arena_pool: DmaArenaCache::new(POOL_DEFAULT_NBLOCKS, POOL_CHUNK_NBLOCKS).unwrap(),
             direction,
         }
     }
@@ -563,8 +559,10 @@ impl BioSegmentPool {
 static BIO_SEGMENT_RPOOL: Once<Arc<BioSegmentPool>> = Once::new();
 /// A pool of segments for write bio requests only.
 static BIO_SEGMENT_WPOOL: Once<Arc<BioSegmentPool>> = Once::new();
-/// The default number of blocks in each pool. (16MB each for now)
+/// The maximum number of cached blocks per direction (16 MiB).
 const POOL_DEFAULT_NBLOCKS: usize = 4096;
+/// The growth quantum for ordinary small BIO requests (256 KiB).
+const POOL_CHUNK_NBLOCKS: usize = 64;
 
 /// Initializes the bio segment pool.
 pub fn bio_segment_pool_init() {
