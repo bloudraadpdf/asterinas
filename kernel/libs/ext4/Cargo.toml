@@ -1,0 +1,11 @@
+[package]
+name = "aster-ext4"
+version = "0.1.0"
+edition.workspace = true
+license = "MPL-2.0 AND BSD-2-Clause AND RSA-MD"
+
+[dependencies]
+io-util.workspace = true
+
+[lints]
+workspace = true
