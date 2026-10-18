@@ -38,4 +38,9 @@ fails without the patch and passes on AMD64 Firecracker with it.
 The optional `http_listen` feature ports Unikraft's `/dev/http-listen` contract:
 root-only access, one two-byte network-order port request and a poll notification
 when an IPv4 TCP listener enters LISTEN on that port. Notification runs after
-socket locks are released.
+socket locks are released. The optional `privileged_vsock` feature requires
+`CAP_NET_ADMIN` in the initial user namespace before vsock socket creation.
+Separate application processes retain the kernel's normal credential checks.
+The AMD64 consumer probe checks notification delivery, wrong-port and invalid
+requests, unprivileged vsock denial, privilege escalation and access to the
+privileged process's descriptors. Kernel Clippy passes with both features.

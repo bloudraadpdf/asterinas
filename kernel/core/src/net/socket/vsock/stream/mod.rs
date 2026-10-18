@@ -43,6 +43,22 @@ enum State {
 
 impl VsockStreamSocket {
     pub(crate) fn new(is_nonblocking: bool) -> Result<Arc<Self>> {
+        #[cfg(feature = "privileged_vsock")]
+        {
+            use crate::{
+                process::{
+                    UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread,
+                },
+                security::lsm::hooks,
+            };
+            let thread = current_thread!();
+            let posix_thread = thread.as_posix_thread().unwrap();
+            hooks::on_capable(hooks::CapableContext::new(
+                UserNamespace::get_init_singleton().as_ref(),
+                posix_thread,
+                CapSet::NET_ADMIN,
+            ))?;
+        }
         Ok(Arc::new(Self {
             state: Mutex::new(Takeable::new(State::Init(InitStream::new()))),
             pollee: Pollee::new(),
