@@ -830,6 +830,7 @@ impl Debug for Mount {
 impl Drop for Mount {
     fn drop(&mut self) {
         self.clear_mountpoint();
+        self.root_dentry.prune_unused_children();
         // `upgrade` returns `None` for pseudo mounts (no namespace) and for
         // mounts whose namespace is itself being dropped (the `mounts` map
         // will be freed in a moment).
