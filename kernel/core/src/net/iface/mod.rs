@@ -2,6 +2,8 @@
 
 mod ext;
 mod init;
+#[cfg(feature = "virtio_net")]
+mod ip_config;
 mod poll;
 mod sched;
 

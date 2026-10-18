@@ -4,7 +4,7 @@ use int_to_c_enum::TryFromInt;
 
 use crate::{queue, transport::VirtioTransportError};
 
-#[cfg(feature = "devices")]
+#[cfg(feature = "block")]
 pub mod block;
 #[cfg(feature = "devices")]
 pub mod console;
@@ -13,7 +13,7 @@ pub mod entropy;
 pub mod filesystem;
 #[cfg(feature = "devices")]
 pub mod input;
-#[cfg(feature = "devices")]
+#[cfg(feature = "network")]
 pub mod network;
 pub mod socket;
 

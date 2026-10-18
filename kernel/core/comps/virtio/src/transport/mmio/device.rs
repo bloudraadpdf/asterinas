@@ -183,7 +183,7 @@ impl VirtioTransport for VirtioMmioTransport {
         )
     }
 
-    #[cfg(any(feature = "devices", feature = "pci"))]
+    #[cfg(any(feature = "block", feature = "devices", feature = "pci"))]
     fn num_queues(&self) -> u16 {
         // We use the field `queue_num_max` to get queue size.
         // If the queue is not exists, the field should be zero

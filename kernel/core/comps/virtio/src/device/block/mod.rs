@@ -31,7 +31,7 @@ bitflags! {
         const DISCARD       = 1 << 13;
         const WRITE_ZEROES  = 1 << 14;
 
-        const ALL_SUPPORTED = Self::BLK_SIZE.bits() | Self::FLUSH.bits();
+        const ALL_SUPPORTED = Self::RO.bits() | Self::BLK_SIZE.bits() | Self::FLUSH.bits();
     }
 }
 

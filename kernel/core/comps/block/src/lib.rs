@@ -101,6 +101,8 @@ pub trait BlockDevice: Send + Sync + Any + Debug {
 /// Metadata for a block device.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BlockDeviceMeta {
+    /// Whether the device rejects writes.
+    pub is_read_only: bool,
     /// The upper limit for the number of segments per bio.
     pub max_nr_segments_per_bio: usize,
     /// The total number of sectors of the block device.
