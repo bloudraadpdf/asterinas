@@ -149,12 +149,10 @@ impl<'a> Record<'a> {
 // -- Maximum log level --
 
 /// Compile-time maximum log level.
-// TODO: Add cargo features (e.g., `log_max_level_info`) to
-// set `STATIC_MAX_LEVEL` at compile time
-// so that log calls above the chosen level are eliminated entirely.
-// The same feature should activate the corresponding `log` crate feature
-// (e.g., `log/max_level_info`)
-// so that both OSTD macros and third-party `log::info!()` calls are filtered uniformly.
+#[cfg(feature = "log_max_level_info")]
+pub const STATIC_MAX_LEVEL: LevelFilter = LevelFilter::Info;
+/// Compile-time maximum log level.
+#[cfg(not(feature = "log_max_level_info"))]
 pub const STATIC_MAX_LEVEL: LevelFilter = LevelFilter::Debug;
 
 /// Run-time maximum log level.
@@ -190,4 +188,21 @@ pub fn set_max_level(mut filter: LevelFilter) {
 #[inline]
 pub fn max_level() -> LevelFilter {
     LevelFilter::from_u8(DYNAMIC_MAX_LEVEL.load(Ordering::Relaxed))
+}
+
+#[cfg(all(ktest, feature = "log_max_level_info"))]
+mod test {
+    use super::*;
+    use crate::prelude::ktest;
+
+    #[ktest]
+    fn compile_time_limit_caps_both_facades() {
+        assert_eq!(STATIC_MAX_LEVEL, LevelFilter::Info);
+        assert_eq!(::log::STATIC_MAX_LEVEL, ::log::LevelFilter::Info);
+        let previous = max_level();
+        set_max_level(LevelFilter::Debug);
+        assert_eq!(max_level(), LevelFilter::Info);
+        assert_eq!(::log::max_level(), ::log::LevelFilter::Info);
+        set_max_level(previous);
+    }
 }
