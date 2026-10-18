@@ -605,6 +605,16 @@ fn mark_unusable_ranges() {
         .skip_while(|r| !r.typ().is_physical())
         .take_while(|r| r.end() > super::min_paddr())
     {
+        #[cfg(feature = "pvh_boot_only")]
+        if let Some(archive) = crate::boot::initramfs::reserve_frames(region) {
+            for range in [region.base()..archive.start, archive.end..region.end()] {
+                if !range.is_empty() {
+                    let remaining = MemoryRegion::new(range.start, range.len(), region.typ());
+                    mark_ranges!(remaining, UnusableMemoryMeta);
+                }
+            }
+            continue;
+        }
         match region.typ() {
             MemoryRegionType::BadMemory => mark_ranges!(region, UnusableMemoryMeta),
             MemoryRegionType::Unknown => mark_ranges!(region, ReservedMemoryMeta),

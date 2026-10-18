@@ -276,20 +276,20 @@ impl ToEarlyBootInfo for MultibootLegacyInfo {
         // SAFETY:
         // 1. The bootloader name is safe to read because of the contract with the Multiboot
         //    loader.
-        // 2. We reserve the bootloader-name region in `memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the bootloader-name region in `memory_regions`, so it will live as an immutable
+        //    reference for `'static`.
         unsafe { parse_as_cstr(self.boot_loader_name) }.unwrap_or("Unknown Multiboot Loader")
     }
 
     fn kernel_commandline(&self) -> Option<&'static str> {
         // SAFETY:
         // 1. The command line is safe to read because of the contract with the Multiboot loader.
-        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an immutable
+        //    reference for `'static`.
         unsafe { parse_as_cstr(self.cmdline) }
     }
 
-    fn initramfs(&self) -> Option<&'static [u8]> {
+    fn initramfs(&self) -> Option<&[u8]> {
         // FIXME: We think all modules are initramfs, can this cause problems?
         if self.mods_count == 0 {
             return None;
@@ -305,8 +305,8 @@ impl ToEarlyBootInfo for MultibootLegacyInfo {
 
         // SAFETY:
         // 1. The initramfs is safe to read because of the contract with the loader.
-        // 2. We reserve the initramfs region in `memory_regions`, so it will live as an immutable
-        //    reference for `'static`.
+        // 2. We reserve the initramfs region in `memory_regions`, so the bytes remain
+        //    valid during boot information parsing.
         Some(unsafe { core::slice::from_raw_parts(ptr, len) })
     }
 
@@ -331,7 +331,7 @@ impl ToEarlyBootInfo for MultibootLegacyInfo {
 
     fn memory_regions(
         &self,
-        initramfs: Option<&'static [u8]>,
+        initramfs: Option<&[u8]>,
         kernel_cmdline: Option<&'static str>,
         framebuffer_arg: Option<BootloaderFramebufferArg>,
     ) -> MemoryRegionArray {

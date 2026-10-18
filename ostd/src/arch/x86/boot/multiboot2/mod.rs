@@ -53,8 +53,8 @@ impl ToEarlyBootInfo for BootInformation<'_> {
 
         // SAFETY:
         // 1. The bootloader name is safe to read because of the contract with the loader.
-        // 2. We reserve the bootloader-name region in `memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the bootloader-name region in `memory_regions`, so it will live as an immutable
+        //    reference for `'static`.
         unsafe { make_str_vaddr_static(name) }
     }
 
@@ -63,20 +63,20 @@ impl ToEarlyBootInfo for BootInformation<'_> {
 
         // SAFETY:
         // 1. The command line is safe to read because of the contract with the loader.
-        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an immutable
+        //    reference for `'static`.
         Some(unsafe { make_str_vaddr_static(cmdline) })
     }
 
-    fn initramfs(&self) -> Option<&'static [u8]> {
+    fn initramfs(&self) -> Option<&[u8]> {
         let module_tag = self.module_tags().next()?;
 
         let initramfs_ptr = paddr_to_vaddr(module_tag.start_address() as usize);
         let initramfs_len = module_tag.module_size() as usize;
         // SAFETY:
         // 1. The initramfs is safe to read because of the contract with the loader.
-        // 2. We reserve the initramfs region in `memory_regions`, so it will live as an immutable
-        //    reference for `'static`.
+        // 2. We reserve the initramfs region in `memory_regions`, so the bytes remain
+        //    valid during boot information parsing.
         let initramfs =
             unsafe { core::slice::from_raw_parts(initramfs_ptr as *const u8, initramfs_len) };
 
@@ -110,7 +110,7 @@ impl ToEarlyBootInfo for BootInformation<'_> {
 
     fn memory_regions(
         &self,
-        initramfs: Option<&'static [u8]>,
+        initramfs: Option<&[u8]>,
         kernel_cmdline: Option<&'static str>,
         framebuffer_arg: Option<BootloaderFramebufferArg>,
     ) -> MemoryRegionArray {
