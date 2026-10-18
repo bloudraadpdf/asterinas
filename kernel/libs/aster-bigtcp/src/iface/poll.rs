@@ -236,7 +236,7 @@ impl<E: Ext> PollContext<'_, E> {
         // Process packets that request to create new connections second.
         if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
             let listener_key = ListenerKey::new(ip_repr.dst_addr(), tcp_repr.dst_port);
-            if let Some(listener) = self.sockets.lookup_listener(&listener_key) {
+            if let Some(listener) = self.sockets.lookup_incoming_listener(&listener_key) {
                 let (processed, new_tcp_conn) =
                     listener.process(&mut self.iface, ip_repr, tcp_repr, payload.clone());
 

@@ -23,7 +23,7 @@ use super::{
     Iface, InterfaceName,
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
-    port::BindPortConfig,
+    port::{BindPortConfig, addresses_overlap},
     time::get_network_timestamp,
 };
 use crate::{
@@ -374,6 +374,74 @@ pub struct BoundTcpPort<E: Ext>(BoundPort<E>);
 /// A UDP port bound to an iface.
 pub struct BoundUdpPort<E: Ext>(BoundPort<E>);
 
+impl<E: Ext> BoundTcpPort<E> {
+    /// Reserves the same port on every supplied interface, or releases all provisional bindings.
+    /// An ephemeral request searches for a port available on every interface.
+    pub fn bind_many(
+        mut ifaces: Vec<Arc<dyn Iface<E>>>,
+        endpoint: IpEndpoint,
+        can_reuse: bool,
+    ) -> Result<Vec<Self>, BindError> {
+        if ifaces.is_empty() {
+            return Err(BindError::Exhausted);
+        }
+        ifaces.sort_unstable_by_key(|iface| iface.index());
+        ifaces.dedup_by_key(|iface| iface.index());
+        // Interface indices define the lock order for multi-interface reservations.
+        let mut tables: Vec<_> = ifaces
+            .iter()
+            .map(|iface| iface.common().used_ports.lock())
+            .collect();
+        let attempts = if endpoint.port == 0 {
+            usize::from(IP_LOCAL_PORT_END - IP_LOCAL_PORT_START) + 1
+        } else {
+            1
+        };
+        let mut first_candidate = None;
+        for _ in 0..attempts {
+            let (port, reusable) =
+                tables[0].bind(BindPortConfig::new(endpoint, can_reuse), PortProtocol::Tcp)?;
+            if first_candidate == Some(port) {
+                tables[0].release(endpoint.addr, port, reusable, PortProtocol::Tcp);
+                return Err(BindError::Exhausted);
+            }
+            first_candidate.get_or_insert(port);
+            let selected = IpEndpoint::new(endpoint.addr, port);
+            let mut reserved = 1;
+            for table in &mut tables[1..] {
+                if table
+                    .bind(BindPortConfig::new(selected, can_reuse), PortProtocol::Tcp)
+                    .is_err()
+                {
+                    break;
+                }
+                reserved += 1;
+            }
+            if reserved == tables.len() {
+                return Ok(ifaces
+                    .iter()
+                    .map(|iface| {
+                        Self(BoundPort {
+                            iface: iface.clone(),
+                            addr: endpoint.addr,
+                            port,
+                            protocol: PortProtocol::Tcp,
+                            can_reuse: AtomicBool::new(reusable),
+                        })
+                    })
+                    .collect());
+            }
+            for table in &mut tables[..reserved] {
+                table.release(endpoint.addr, port, reusable, PortProtocol::Tcp);
+            }
+            if endpoint.port != 0 {
+                return Err(BindError::InUse);
+            }
+        }
+        Err(BindError::Exhausted)
+    }
+}
+
 impl<E: Ext> Deref for BoundTcpPort<E> {
     type Target = BoundPort<E>;
     fn deref(&self) -> &Self::Target {
@@ -452,6 +520,17 @@ impl PortTable {
             port,
             protocol,
         };
+        if !config.is_backlog()
+            && self.used_ports.iter().any(|(bound, state)| {
+                bound.port == port
+                    && bound.protocol == protocol
+                    && bound.addr != addr
+                    && addresses_overlap(IpAddress::Ipv6(bound.addr.0), IpAddress::Ipv6(addr.0))
+                    && !(config_can_reuse && state.can_reuse())
+            })
+        {
+            return Err(BindError::InUse);
+        }
         let entry = self.used_ports.entry(key);
         match entry {
             Entry::Occupied(mut occupied) => {
@@ -511,7 +590,11 @@ impl PortTable {
         let mut port = start_port;
         loop {
             key.port = port;
-            if !self.used_ports.contains_key(&key) {
+            if !self.used_ports.keys().any(|bound| {
+                bound.port == key.port
+                    && bound.protocol == protocol
+                    && addresses_overlap(IpAddress::Ipv6(bound.addr.0), IpAddress::Ipv6(addr.0))
+            }) {
                 self.next_ephemeral_port = next_ephemeral_port_after(port);
                 return Some(port);
             }

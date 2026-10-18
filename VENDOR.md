@@ -85,6 +85,17 @@ the original request header in errors. Unsupported link mutations still fail.
 The consumer verifies the preconfigured loopback state through `RTM_GETLINK`;
 Linux continues to initialise its loopback interface through `RTM_NEWLINK`.
 
+TCP wildcard binds reserve a common port across configured interfaces
+in the selected address family.
+Listeners share a backlog and retain the complete binding until connect
+selects an interface or the socket closes.
+Accepted sockets retain the packet's local address.
+Wildcard and specific binds conflict on overlapping ports.
+Failed connects retain their original bindings.
+The consumer checks multiple interfaces, implicit binds, port conflicts
+and 32 bind races on one and four guest CPUs.
+UDP binding keeps its previous interface selection.
+
 The optional AMD64 `pvh_boot_only` feature loads the kernel at 16 MiB and
 removes Linux and Multiboot entry points and headers. Builds without this
 feature keep the Linux entry addresses. OSDK reads the linked ELF headers,
