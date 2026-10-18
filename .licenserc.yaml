@@ -16,6 +16,7 @@ header:
     paths-ignore:
       # These directories are licensed under licenses other than MPL-2.0.
       - 'kernel/libs/comp-sys/cargo-component'
+      - 'kernel/libs/erofs/src/compression.rs'
     license:
       content: |
         SPDX-License-Identifier: MPL-2.0
@@ -26,6 +27,17 @@ header:
         extensions:
           - ".S"
         comment_style_id: SlashAsterisk
+
+  - paths:
+      - 'kernel/libs/erofs/src/compression.rs'
+    license:
+      content: |
+        SPDX-License-Identifier: MIT
+
+  - paths:
+    license:
+      content: |
+        SPDX-License-Identifier: BSD-2-Clause AND RSA-MD
 
   # Files under cargo-component are licensed under Apache-2.0 or MIT license.
   - paths:
