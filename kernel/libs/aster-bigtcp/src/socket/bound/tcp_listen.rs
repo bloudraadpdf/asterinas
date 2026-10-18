@@ -36,14 +36,17 @@ pub(super) struct TcpBacklog<E: Ext> {
 
 /// States needed by [`TcpListenerBg`].
 pub struct TcpListenerInner<E: Ext> {
-    pub(super) backlog: SpinLock<TcpBacklog<E>, BottomHalfDisabled>,
+    pub(super) backlog: Arc<SpinLock<TcpBacklog<E>, BottomHalfDisabled>>,
     listener_key: ListenerKey,
 }
 
 impl<E: Ext> TcpListenerInner<E> {
-    fn new(backlog: TcpBacklog<E>, listener_key: ListenerKey) -> Self {
+    fn new(
+        backlog: Arc<SpinLock<TcpBacklog<E>, BottomHalfDisabled>>,
+        listener_key: ListenerKey,
+    ) -> Self {
         Self {
-            backlog: SpinLock::new(backlog),
+            backlog,
             listener_key,
         }
     }
@@ -85,37 +88,11 @@ impl<E: Ext> TcpListener<E> {
             return Err((bound, ListenError::AddressInUse));
         }
 
-        let socket = {
-            let mut socket = new_tcp_socket();
-
-            option.apply(&mut socket);
-
-            let addr = match local_endpoint.addr {
-                IpAddress::Ipv4(address) if address.is_unspecified() => None,
-                IpAddress::Ipv6(address) if address.is_unspecified() => None,
-                address => Some(address),
-            };
-            let endpoint = IpListenEndpoint {
-                addr,
-                port: local_endpoint.port,
-            };
-            if let Err(err) = socket.listen(endpoint) {
-                return Err((bound, err.into()));
-            }
-
-            socket
+        let backlog = match Self::new_backlog(local_endpoint, max_conn, option) {
+            Ok(backlog) => backlog,
+            Err(err) => return Err((bound, err)),
         };
-
-        let inner = {
-            let backlog = TcpBacklog {
-                socket,
-                max_conn,
-                connecting: BTreeMap::new(),
-                connected: Vec::new(),
-            };
-
-            TcpListenerInner::new(backlog, listener_key)
-        };
+        let inner = TcpListenerInner::new(backlog, listener_key);
 
         let listener = Self::new(bound, inner);
         listener.init_observer(observer);
@@ -123,6 +100,84 @@ impl<E: Ext> TcpListener<E> {
         debug_assert!(res.is_ok());
 
         Ok(listener)
+    }
+
+    fn new_backlog(
+        local_endpoint: IpEndpoint,
+        max_conn: usize,
+        option: &RawTcpOption,
+    ) -> Result<Arc<SpinLock<TcpBacklog<E>, BottomHalfDisabled>>, ListenError> {
+        let mut socket = new_tcp_socket();
+        option.apply(&mut socket);
+        let addr = match local_endpoint.addr {
+            IpAddress::Ipv4(address) if address.is_unspecified() => None,
+            IpAddress::Ipv6(address) if address.is_unspecified() => None,
+            address => Some(address),
+        };
+        socket.listen(IpListenEndpoint {
+            addr,
+            port: local_endpoint.port,
+        })?;
+        Ok(Arc::new(SpinLock::new(TcpBacklog {
+            socket,
+            max_conn,
+            connecting: BTreeMap::new(),
+            connected: Vec::new(),
+        })))
+    }
+
+    /// Listens on multiple interfaces with one shared backlog and socket option set.
+    /// All bindings must use the same endpoint on distinct interfaces.
+    /// Failure returns every binding without publishing a listener.
+    pub fn new_listen_many(
+        mut bounds: Vec<BoundTcpPort<E>>,
+        max_conn: usize,
+        option: &RawTcpOption,
+        observer: E::TcpEventObserver,
+    ) -> Result<Vec<Self>, (Vec<BoundTcpPort<E>>, ListenError)>
+    where
+        E::TcpEventObserver: Clone,
+    {
+        let Some(first) = bounds.first() else {
+            return Err((bounds, ListenError::Unaddressable));
+        };
+        let endpoint = first.endpoint();
+        if bounds.iter().any(|bound| bound.endpoint() != endpoint) {
+            return Err((bounds, ListenError::Unaddressable));
+        }
+        bounds.sort_unstable_by_key(|bound| bound.iface().index());
+        if bounds
+            .windows(2)
+            .any(|pair| pair[0].iface().index() == pair[1].iface().index())
+        {
+            return Err((bounds, ListenError::InvalidState));
+        }
+        let backlog = match Self::new_backlog(endpoint, max_conn, option) {
+            Ok(backlog) => backlog,
+            Err(err) => return Err((bounds, err)),
+        };
+        let ifaces: Vec<_> = bounds.iter().map(|bound| bound.iface().clone()).collect();
+        // Match the port reservation lock order. No listener is visible until every check passes.
+        let mut tables: Vec<_> = ifaces
+            .iter()
+            .map(|iface| iface.common().sockets())
+            .collect();
+        let key = ListenerKey::new(endpoint.addr, endpoint.port);
+        if tables.iter().any(|table| table.has_listener_conflict(&key)) {
+            return Err((bounds, ListenError::AddressInUse));
+        }
+        let listeners = bounds
+            .into_iter()
+            .zip(tables.iter_mut())
+            .map(|(bound, table)| {
+                let listener = Self::new(bound, TcpListenerInner::new(backlog.clone(), key));
+                listener.init_observer(observer.clone());
+                let result = table.insert_listener(listener.inner().clone());
+                debug_assert!(result.is_ok());
+                listener
+            })
+            .collect();
+        Ok(listeners)
     }
 
     /// Accepts a TCP connection.
@@ -176,8 +231,10 @@ impl<E: Ext> TcpListener<E> {
 
         // The lock on `connecting`/`connected` cannot be locked after locking `self`, otherwise we
         // might get a deadlock due to inconsistent lock order problems.
-        connecting.values().for_each(|socket| socket.reset());
-        connected.iter().for_each(|socket| socket.reset());
+        for socket in connecting.values().chain(connected.iter()) {
+            socket.0.inner.lock().listener = None;
+            socket.reset();
+        }
     }
 }
 

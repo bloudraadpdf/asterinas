@@ -25,6 +25,11 @@ pub trait Inner<E: Ext> {
     type BoundPort: Deref<Target = BoundPort<E>>;
     type Observer: SocketEventObserver;
 
+    /// Returns the socket endpoint, which can differ from its reservation after `connect`.
+    fn local_endpoint(&self, bound: &Self::BoundPort) -> IpEndpoint {
+        bound.endpoint()
+    }
+
     /// Called by [`Socket::drop`].
     fn on_drop(this: &Arc<SocketBg<Self, E>>)
     where
@@ -94,7 +99,7 @@ impl<T: Inner<E>, E: Ext> Socket<T, E> {
     }
 
     pub fn local_endpoint(&self) -> IpEndpoint {
-        self.0.bound.endpoint()
+        self.0.inner.local_endpoint(&self.0.bound)
     }
 
     pub fn iface(&self) -> &Arc<dyn Iface<E>> {

@@ -83,6 +83,10 @@ impl ConnectionKey {
         self.hash
     }
 
+    pub(crate) const fn local_endpoint(&self) -> IpEndpoint {
+        IpEndpoint::new(self.local_addr, self.local_port)
+    }
+
     pub(crate) const fn remote_endpoint(&self) -> IpEndpoint {
         IpEndpoint::new(self.remote_addr, self.remote_port)
     }

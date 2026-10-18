@@ -23,3 +23,6 @@ pub(crate) use poll_iface::{PollKey, PollableIfaceMut};
 pub use port::BindPortConfig;
 pub(crate) use port::addresses_overlap;
 pub use sched::ScheduleNextPoll;
+
+#[cfg(ktest)]
+mod tests;
