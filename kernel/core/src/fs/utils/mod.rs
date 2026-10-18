@@ -13,6 +13,12 @@ use crate::{
     thread::Thread,
 };
 
+#[cfg(any(feature = "fs_erofs", feature = "fs_ext4"))]
+pub(in crate::fs) mod block_io;
+
+#[cfg(any(feature = "fs_erofs", feature = "fs_ext4"))]
+pub(in crate::fs) mod device_inode;
+
 mod dirent_visitor;
 mod direntry_vec;
 mod endpoint;

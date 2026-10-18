@@ -49,8 +49,12 @@ use crate::prelude::*;
 
 /// Filesystem types supported for the root filesystem.
 pub(crate) static SUPPORTED_ROOTFS_TYPES: &[&dyn DynFsType] = &[
+    #[cfg(feature = "fs_ext4")]
+    &super::fs_impls::ext4::EXT4_TYPE,
     #[cfg(feature = "filesystems_extra")]
     &ext2::EXT2_TYPE,
+    #[cfg(feature = "fs_erofs")]
+    &super::fs_impls::erofs::EROFS_TYPE,
 ];
 
 /// Mounts and switches to the root filesystem configured by the kernel command line.
@@ -108,14 +112,21 @@ fn open_rootfs_from_candidates(
     fs_flags: FsFlags,
 ) -> Result<FsAndRoot> {
     let mut fs_creation_ctx = FsCreationCtx::from_block_device(device, fs_flags, None);
+    let mut unsupported = None;
     for rootfs_type in rootfs_types {
         match rootfs_type.get_or_create(&mut fs_creation_ctx) {
             Ok(fs_and_root) => return Ok(fs_and_root),
             Err(err) if err.error() == Errno::EINVAL => continue,
+            Err(err) if err.error() == Errno::EOPNOTSUPP => {
+                unsupported.get_or_insert(err);
+            }
             Err(err) => return Err(err),
         }
     }
 
+    if let Some(error) = unsupported {
+        return Err(error);
+    }
     return_errno_with_message!(Errno::ENODEV, "no root filesystem type could mount root")
 }
 

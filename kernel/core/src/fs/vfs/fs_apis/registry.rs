@@ -8,7 +8,12 @@ use aster_systree::{
 };
 use spin::Once;
 
-#[cfg(any(feature = "filesystems_extra", ktest))]
+#[cfg(any(
+    feature = "filesystems_extra",
+    feature = "fs_erofs",
+    feature = "fs_ext4",
+    ktest
+))]
 use crate::fs::vfs::path::{AT_FDCWD, EmptyPathStr, FsPath};
 use crate::{
     fs::{
@@ -34,6 +39,11 @@ pub(crate) trait FsType: Send + Sync + 'static {
 
     /// Gets the properties of this FS type.
     fn properties(&self) -> FsProperties;
+
+    /// Validates a mount request before reusing or creating a filesystem.
+    fn validate(&self, _ctx: &FsCreationCtx) -> Result<()> {
+        Ok(())
+    }
 
     /// Creates an instance of this FS type.
     fn create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>>;
@@ -90,6 +100,7 @@ impl<T: FsType> DynFsType for T {
     }
 
     fn get_or_create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<FsAndRoot> {
+        self.validate(fs_creation_ctx)?;
         if let Some((key, cache)) = self.obtain_key_and_cache(fs_creation_ctx) {
             cache.get_or_create(key, fs_creation_ctx.flags(), || {
                 self.create(fs_creation_ctx)
@@ -105,16 +116,31 @@ impl<T: FsType> DynFsType for T {
 ///
 /// This context is used to identify and create a file system instance.
 pub(crate) struct FsCreationCtx<'a> {
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     source: Option<&'a str>,
     flags: FsFlags,
     args: Option<&'a str>,
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     block_device: BlockDeviceResolution<'a>,
     lifetime: core::marker::PhantomData<&'a ()>,
 }
 
-#[cfg(any(feature = "filesystems_extra", ktest))]
+#[cfg(any(
+    feature = "filesystems_extra",
+    feature = "fs_erofs",
+    feature = "fs_ext4",
+    ktest
+))]
 enum BlockDeviceResolution<'a> {
     Pending(&'a Context<'a>),
     Resolved(Arc<dyn BlockDevice>),
@@ -129,11 +155,21 @@ impl<'a> FsCreationCtx<'a> {
         _task_ctx: &'a Context<'a>,
     ) -> Self {
         Self {
-            #[cfg(any(feature = "filesystems_extra", ktest))]
+            #[cfg(any(
+                feature = "filesystems_extra",
+                feature = "fs_erofs",
+                feature = "fs_ext4",
+                ktest
+            ))]
             source: _source,
             flags,
             args: _args,
-            #[cfg(any(feature = "filesystems_extra", ktest))]
+            #[cfg(any(
+                feature = "filesystems_extra",
+                feature = "fs_erofs",
+                feature = "fs_ext4",
+                ktest
+            ))]
             block_device: BlockDeviceResolution::Pending(_task_ctx),
             lifetime: core::marker::PhantomData,
         }
@@ -146,18 +182,33 @@ impl<'a> FsCreationCtx<'a> {
         _args: Option<&'a str>,
     ) -> Self {
         Self {
-            #[cfg(any(feature = "filesystems_extra", ktest))]
+            #[cfg(any(
+                feature = "filesystems_extra",
+                feature = "fs_erofs",
+                feature = "fs_ext4",
+                ktest
+            ))]
             source: None,
             flags,
             args: _args,
-            #[cfg(any(feature = "filesystems_extra", ktest))]
+            #[cfg(any(
+                feature = "filesystems_extra",
+                feature = "fs_erofs",
+                feature = "fs_ext4",
+                ktest
+            ))]
             block_device: BlockDeviceResolution::Resolved(_block_device),
             lifetime: core::marker::PhantomData,
         }
     }
 
     /// Returns the user-supplied mount source.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(in crate::fs) fn source(&self) -> Option<&str> {
         self.source
     }
@@ -182,7 +233,12 @@ impl<'a> FsCreationCtx<'a> {
     }
 
     /// Resolves the mount source into a block device.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(in crate::fs) fn resolve_block_device(&mut self) -> Result<&Arc<dyn BlockDevice>> {
         if self.block_device().is_none() {
             self.do_resolve_block_device()?;
@@ -191,7 +247,12 @@ impl<'a> FsCreationCtx<'a> {
         Ok(self.block_device().unwrap())
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     fn block_device(&self) -> Option<&Arc<dyn BlockDevice>> {
         match &self.block_device {
             BlockDeviceResolution::Pending(_) => None,
@@ -199,7 +260,12 @@ impl<'a> FsCreationCtx<'a> {
         }
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     fn do_resolve_block_device(&mut self) -> Result<()> {
         let task_ctx = match &self.block_device {
             BlockDeviceResolution::Pending(task_ctx) => *task_ctx,
@@ -349,7 +415,12 @@ impl WeakFsAndRoot {
 
 impl<K: Eq + Ord + Clone + Send + Sync + 'static> FsCache<K> {
     /// Creates an empty cache.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(in crate::fs) const fn new() -> Self {
         Self {
             entries: Mutex::new(BTreeMap::new()),
@@ -369,12 +440,10 @@ impl<K: Eq + Ord + Clone + Send + Sync + 'static> FsCache<K> {
         match entries.entry(key) {
             Entry::Occupied(mut entry) => {
                 if let Some(fs_and_root) = entry.get_mut().upgrade() {
-                    let extant_readonly = fs_and_root.fs.flags().contains(FsFlags::RDONLY);
-                    let requested_readonly = required_flags.contains(FsFlags::RDONLY);
-                    if extant_readonly != requested_readonly {
+                    if fs_and_root.fs.flags() != required_flags {
                         return_errno_with_message!(
                             Errno::EBUSY,
-                            "the read-only flag of the extant file system does not match"
+                            "the flags of the extant file system do not match"
                         );
                     }
                     return Ok(fs_and_root);

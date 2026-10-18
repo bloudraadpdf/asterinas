@@ -6,6 +6,8 @@ edition.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+aster-erofs = { workspace = true, optional = true }
+aster-ext4 = { workspace = true, optional = true }
 align_ext.workspace = true
 aster-bigtcp.workspace = true
 aster-block.workspace = true
@@ -81,7 +83,9 @@ default = ["cvm_guest", "console_video", "storage_nvme", "filesystems_extra", "v
 console_video = ["dep:aster-framebuffer", "dep:aster-input"]
 storage_nvme = ["dep:aster-nvme"]
 configfs = []
-filesystems_extra = ["configfs", "dep:aster-fuse", "virtio_devices"]
+fs_erofs = ["dep:aster-erofs"]
+fs_ext4 = ["dep:aster-ext4"]
+filesystems_extra = ["fs_erofs", "fs_ext4", "configfs", "dep:aster-fuse", "virtio_devices"]
 virtio_devices = ["virtio_block", "virtio_net", "aster-virtio/devices"]
 virtio_block = ["aster-virtio/block"]
 virtio_net = ["aster-virtio/network"]

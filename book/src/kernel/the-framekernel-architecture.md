@@ -79,3 +79,33 @@ Using this framework as a foundation,
 we have developed the Asterinas Kernel;
 this framework also enables others to create their own framekernels,
 with different goals and tradeoffs.
+
+## Filesystem parsing
+
+The `aster-erofs` library parses EROFS images in safe Rust. Its byte input
+interface comes from `io-util`. The kernel VFS adapter supplies block I/O, inode
+identity, permissions and demand paging. Filesystem parsing adds no unsafe API
+to OSTD. The reader can also run native tests without a booted kernel.
+
+The `aster-ext4` library uses the same I/O boundary for checked metadata,
+extent trees, allocation and JBD2 transactions. Native tests exercise its
+disk format and recovery independently of the kernel VFS. Its VFS adapter
+owns one checked read-only or writable session per mount, inode identities,
+page-cache writeback and namespace operations. The independent `fs_ext4` and
+`fs_erofs` features share block I/O and registration without enabling the
+full filesystem bundle.
+
+Ext4 writeback clamps the final page to the inode size. Unlinked inodes remain
+allocated while open references exist; final release reclaims them without
+writing discarded cached data. Write/flush failures retain the recovery marker
+and remain observable through sync. Metadata times that cannot be represented
+by the kernel are rejected. Remounting with different flags requires unmounting
+first. Direct I/O, preallocation, hole punching and rename exchange are not
+implemented. Append-only file writes and mappings of immutable or append-only
+files are rejected. The library retains its on-disk format and resource limits.
+
+Block BIOs retain the existing 16 MiB cache capacity per direction while mapping
+DMA arenas on demand. The cache grows in 256 KiB chunks for small requests and
+can map a complete 16 MiB request. Active arenas keep their DMA mappings alive;
+subsequent allocations reclaim excess idle arenas outside the cache lock. DMA
+mapping and CVM protection remain in OSTD's existing DMA APIs.

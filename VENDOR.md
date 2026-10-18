@@ -149,3 +149,20 @@ The OSDK image installer writes an independent boot ELF and replaces its output
 atomically. QEMU's ELF-header change can no longer modify a hard-linked compiler
 artifact. This also handles an output left as a hard link by an earlier build.
 The regression fails before the change and passes afterwards for both cases.
+
+The `fs_erofs` and `fs_ext4` features connect checked filesystem libraries
+and block I/O to the VFS.
+EROFS supplies immutable flat, inline and LZ4-compressed reads.
+The ext4 adapter supplies writable inodes, page caching,
+metadata checksums, journal recovery and retained writeback errors.
+Open unlinked inodes remain live until their last reference closes.
+Unsupported disk features fail mount admission.
+
+The storage regression covers 1, 2 and 4 KiB ext4 blocks.
+Linux filesystem checks validate the written volumes.
+Tokoloshe binds boot, snapshot and clone results to each tested revision.
+The library READMEs describe supported formats and limits:
+[`aster-erofs`](kernel/libs/erofs/README.md)
+and [`aster-ext4`](kernel/libs/ext4/README.md).
+The EROFS compact-index port retains its MIT notice.
+The ext4 directory-hash port retains the BSD and RSA MD4 notices.

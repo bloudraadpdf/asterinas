@@ -26,7 +26,12 @@ impl InodeType {
         *self == InodeType::Dir
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(crate) fn is_device(&self) -> bool {
         *self == InodeType::BlockDevice || *self == InodeType::CharDevice
     }
@@ -48,7 +53,12 @@ impl InodeType {
             .map_err(|_| Error::with_message(Errno::EINVAL, "invalid file type"))
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(crate) fn device_type(&self) -> Option<DeviceType> {
         match self {
             InodeType::BlockDevice => Some(DeviceType::Block),
