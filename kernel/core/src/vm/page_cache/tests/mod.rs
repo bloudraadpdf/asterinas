@@ -15,6 +15,7 @@ use super::{PageCache, PageCacheBackend, Vmo, VmoCommitError, VmoMapMode};
 use crate::{prelude::*, thread::kernel_thread::ThreadOptions};
 
 mod utils;
+mod writeback;
 
 /// Creates a page cache with `num_pages` backend pages for test scenarios.
 fn new_backend_page_cache(backend: &Arc<MockPageCacheBackend>, num_pages: usize) -> PageCache {
