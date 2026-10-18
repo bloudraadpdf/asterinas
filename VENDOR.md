@@ -78,3 +78,8 @@ Vsock stream sockets apply `SO_RCVTIMEO` to accept and reads, and
 `MSG_DONTWAIT` bypasses blocking waits. The consumer checks option values,
 accept and read expiry, inheritance and nonblocking reads before exchanging
 bytes with the host.
+
+Route netlink replies identify the recipient in their outer header and keep
+the original request header in errors. Unsupported link mutations still fail.
+The consumer verifies the preconfigured loopback state through `RTM_GETLINK`;
+Linux continues to initialise its loopback interface through `RTM_NEWLINK`.

@@ -62,7 +62,7 @@ impl datagram_common::Bound for BoundNetlinkRoute {
         let rtnl_kernel = get_netlink_route_kernel();
 
         loop {
-            let mut segment = match RtnlSegment::read_from(reader) {
+            let segment = match RtnlSegment::read_from(reader) {
                 Ok(ContinueRead::Parsed(seg)) => seg,
                 Ok(ContinueRead::Skipped) => continue,
                 // There is at least a valid segment header, so we can create an error segment to
@@ -80,14 +80,6 @@ impl datagram_common::Bound for BoundNetlinkRoute {
                 // the header is corrupted. These errors are not recoverable, so we abort the loop.
                 Err(_) => break,
             };
-
-            // The header's PID should be the sender's port ID.
-            // However, the sender can also leave it unspecified.
-            // In such cases, we will manually set the PID to the sender's port ID.
-            let header = segment.header_mut();
-            if header.pid == 0 {
-                header.pid = local_port;
-            }
 
             rtnl_kernel.handle_request(&segment, local_port);
         }

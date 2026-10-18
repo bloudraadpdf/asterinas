@@ -69,11 +69,14 @@ impl NetlinkRouteKernelSocket {
             Vec::new()
         };
 
-        for segments in [response_segments, done_segments] {
+        for mut segments in [response_segments, done_segments] {
             if segments.is_empty() {
                 continue;
             }
 
+            for segment in &mut segments {
+                segment.header_mut().pid = dst_port;
+            }
             let response = RtnlMessage::new(segments);
             debug!("netlink route response: {:?}", response);
 
@@ -81,7 +84,8 @@ impl NetlinkRouteKernelSocket {
         }
     }
 
-    pub(super) fn report_error(&self, err_segment: ErrorSegment, dst_port: PortNum) {
+    pub(super) fn report_error(&self, mut err_segment: ErrorSegment, dst_port: PortNum) {
+        err_segment.header_mut().pid = dst_port;
         let response = RtnlMessage::new(vec![RtnlSegment::Error(err_segment)]);
 
         debug!("netlink route error: {:?}", response);
