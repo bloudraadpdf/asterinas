@@ -297,8 +297,24 @@ impl<E: Ext> PollContext<'_, E> {
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
     ) -> bool {
-        let mut processed = false;
         let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
+
+        if is_unicast {
+            return self
+                .sockets
+                .udp_socket_iter()
+                .filter_map(|socket| {
+                    socket
+                        .match_score(self.iface.context(), ip_repr, udp_repr)
+                        .map(|score| (score, socket))
+                })
+                .max_by_key(|(score, _)| *score)
+                .is_some_and(|(_, socket)| {
+                    socket.process(self.iface.context_mut(), ip_repr, udp_repr, udp_payload)
+                });
+        }
+
+        let mut processed = false;
 
         for socket in self.sockets.udp_socket_iter() {
             if !socket.can_process(udp_repr.dst_port) {
@@ -311,9 +327,6 @@ impl<E: Ext> PollContext<'_, E> {
                 udp_repr,
                 udp_payload.clone(),
             );
-            if processed && is_unicast {
-                break;
-            }
         }
 
         processed
@@ -486,8 +499,6 @@ impl<E: Ext> PollContext<'_, E> {
                 break;
             };
 
-            // We set `did_something` even if no packets are actually generated. This is because a
-            // timer can expire, but no packets are actually generated.
             did_something = true;
 
             let mut deferred = None;
@@ -572,11 +583,7 @@ impl<E: Ext> PollContext<'_, E> {
                 continue;
             }
 
-            // We set `did_something` even if no packets are actually generated. This is because a
-            // timer can expire, but no packets are actually generated.
             did_something = true;
-
-            let mut deferred = None;
 
             let (cx, pending) = self.iface.inner_mut();
             socket.dispatch(cx, |cx, ip_repr, udp_repr, udp_payload| {
@@ -591,22 +598,8 @@ impl<E: Ext> PollContext<'_, E> {
                     }
                 }
 
-                if !socket.can_process(udp_repr.dst_port) {
-                    // TODO: Generate the ICMP message here once we're able to handle incoming ICMP
-                    // messages.
-                    let _ = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
-                    return;
-                }
-
-                // We cannot call `process_udp` now because it may cause deadlocks. We will copy
-                // the payload and call `process_udp` after releasing the socket lock.
-                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec()));
+                let _ = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
             });
-
-            if let Some((ip_repr, udp_repr, payload)) = deferred {
-                let _ =
-                    self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()));
-            }
 
             if tx_packet.is_some() {
                 break;

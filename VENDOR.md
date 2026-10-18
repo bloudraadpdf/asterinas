@@ -94,7 +94,12 @@ Wildcard and specific binds conflict on overlapping ports.
 Failed connects retain their original bindings.
 The consumer checks multiple interfaces, implicit binds, port conflicts
 and 32 bind races on one and four guest CPUs.
-UDP binding keeps its previous interface selection.
+IPv4 UDP bindings share one receive queue and global transmit limits
+across their configured interfaces.
+Routing selects the source interface for each message.
+Connected sockets filter new packets without discarding queued data.
+Close releases all interface registrations and queued packets.
+IPv6 UDP syscalls remain unsupported.
 
 The optional AMD64 `pvh_boot_only` feature loads the kernel at 16 MiB and
 removes Linux and Multiboot entry points and headers. Builds without this
@@ -174,3 +179,9 @@ to requests for the local interface.
 This permits an immediate first UDP response.
 Invalid senders, foreign targets and off-link senders remain excluded.
 Kernel regressions check validation and immediate resolution.
+
+The multi-interface network checks cover fourteen native programs
+and eighteen packet-library tests.
+The external host exchanges TCP and UDP bytes through `virtio-net`.
+Tokoloshe checks both root formats, ext4 scratch and snapshot clones
+with the same receive capacities and confidential-guest features.

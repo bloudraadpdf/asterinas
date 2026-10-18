@@ -9,7 +9,11 @@ use crate::{
     events::IoEvents,
     net::{
         iface::{BoundUdpPort, Iface, UdpSocket},
-        socket::util::{RecvFlags, RecvOutput, SendFlags, datagram_common},
+        route,
+        socket::{
+            ip::common::get_ephemeral_endpoint,
+            util::{RecvFlags, RecvOutput, SendFlags, datagram_common},
+        },
     },
     prelude::*,
     util::{MultiRead, MultiWrite},
@@ -28,12 +32,17 @@ impl BoundDatagram {
         }
     }
 
-    pub(super) fn iface(&self) -> &Arc<Iface> {
-        self.bound_socket.iface()
+    pub(super) fn iface(&self, remote: &IpEndpoint) -> Result<Arc<Iface>> {
+        let first = self.bound_socket.bound_ports().next().unwrap();
+        if first.addr().is_unspecified() {
+            route::lookup_iface(remote.addr)
+        } else {
+            Ok(first.iface().clone())
+        }
     }
 
-    pub(super) fn bound_port(&self) -> &BoundUdpPort {
-        self.bound_socket.bound_port()
+    pub(super) fn bound_ports(&self) -> impl Iterator<Item = &BoundUdpPort> {
+        self.bound_socket.bound_ports()
     }
 }
 
@@ -48,8 +57,19 @@ impl datagram_common::Bound for BoundDatagram {
         self.remote_endpoint.as_ref()
     }
 
-    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) {
-        self.remote_endpoint = Some(*endpoint)
+    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) -> Result<()> {
+        let local = self.bound_socket.local_endpoint();
+        let source = if local.addr.is_unspecified() {
+            get_ephemeral_endpoint(endpoint)?.addr
+        } else {
+            route::lookup_iface(endpoint.addr)?;
+            local.addr
+        };
+        self.bound_socket.connect(*endpoint, source).map_err(|_| {
+            Error::with_message(Errno::EAFNOSUPPORT, "the address families do not match")
+        })?;
+        self.remote_endpoint = Some(*endpoint);
+        Ok(())
     }
 
     fn try_recv(
@@ -89,21 +109,19 @@ impl datagram_common::Bound for BoundDatagram {
         remote: &Self::Endpoint,
         _flags: SendFlags,
     ) -> Result<usize> {
-        let result = self
-            .bound_socket
-            .send(reader.sum_lens(), *remote, |socket_buffer| {
-                // FIXME: If copy failed, we should not send any packet.
-                // But current smoltcp API seems not to support this behavior.
-                reader
-                    .read(&mut VmWriter::from(socket_buffer))
-                    .inspect_err(|e| {
-                        warn!("unexpected UDP packet {e:#?} will be sent");
-                    })
-                    .map_err(Into::into)
-            });
+        let size = reader.sum_lens();
+        if size > UdpSocket::max_payload_len(remote.addr) {
+            return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
+        }
+        let iface = self.iface(remote)?;
+        let mut payload = vec![0; size].into_boxed_slice();
+        reader
+            .read(&mut VmWriter::from(payload.as_mut()))
+            .map_err(Error::from)?;
+        let result = self.bound_socket.send(&iface, *remote, payload);
 
         match result {
-            Ok(inner) => inner,
+            Ok(()) => Ok(size),
             Err(SendError::TooLarge) => {
                 return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
             }
@@ -117,18 +135,13 @@ impl datagram_common::Bound for BoundDatagram {
     }
 
     fn check_io_events(&self) -> IoEvents {
-        self.bound_socket.raw_with(|socket| {
-            let mut events = IoEvents::empty();
-
-            if socket.can_recv() {
-                events |= IoEvents::IN;
-            }
-
-            if socket.can_send() {
-                events |= IoEvents::OUT;
-            }
-
-            events
-        })
+        let mut events = IoEvents::empty();
+        if self.bound_socket.can_recv() {
+            events |= IoEvents::IN;
+        }
+        if self.bound_socket.can_send() {
+            events |= IoEvents::OUT;
+        }
+        events
     }
 }

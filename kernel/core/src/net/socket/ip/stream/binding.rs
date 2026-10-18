@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::{
-    iface::BindPortConfig,
-    wire::{IpAddress, IpEndpoint},
-};
+use aster_bigtcp::wire::{IpAddress, IpEndpoint};
 
 use crate::{
-    net::{
-        iface::{BoundTcpPort, iter_all_ifaces},
-        route,
-        socket::util::check_port_privilege,
-    },
+    net::{iface::BoundTcpPort, route, socket::ip::common::resolve_bind_ifaces},
     prelude::*,
 };
 
@@ -25,29 +18,7 @@ impl TcpBinding {
     }
 
     pub(super) fn bind(endpoint: &IpEndpoint, can_reuse: bool) -> Result<Self> {
-        check_port_privilege(endpoint.port)?;
-        let unspecified = match endpoint.addr {
-            IpAddress::Ipv4(address) => address.is_unspecified(),
-            IpAddress::Ipv6(address) => address.is_unspecified(),
-        };
-        if !unspecified {
-            let iface = route::lookup_local_iface(endpoint.addr)?;
-            let first = iface.bind_tcp(BindPortConfig::new(*endpoint, can_reuse))?;
-            return Ok(Self::new(first, Vec::new()));
-        }
-        let ifaces: Vec<_> = iter_all_ifaces()
-            .filter(|iface| match endpoint.addr {
-                IpAddress::Ipv4(_) => iface.ipv4_cidr().is_some(),
-                IpAddress::Ipv6(_) => iface.ipv6_cidr().is_some(),
-            })
-            .cloned()
-            .collect();
-        if ifaces.is_empty() {
-            return_errno_with_message!(
-                Errno::EADDRNOTAVAIL,
-                "no interface has this address family"
-            );
-        }
+        let ifaces = resolve_bind_ifaces(endpoint)?;
         let mut ports = BoundTcpPort::bind_many(ifaces, *endpoint, can_reuse)?;
         let first = ports.remove(0);
         Ok(Self::new(first, ports))

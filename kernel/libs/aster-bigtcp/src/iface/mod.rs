@@ -19,7 +19,7 @@ pub use common::{BoundPort, BoundTcpPort, BoundUdpPort, InterfaceFlags, Interfac
 pub use iface::Iface;
 pub(crate) use packet_slice::PacketSlice;
 pub use phy::{EtherIface, IpIface};
-pub(crate) use poll_iface::{PollKey, PollableIfaceMut};
+pub(crate) use poll_iface::{IsUnicast, PollKey, PollableIfaceMut};
 pub use port::BindPortConfig;
 pub(crate) use port::addresses_overlap;
 pub use sched::ScheduleNextPoll;

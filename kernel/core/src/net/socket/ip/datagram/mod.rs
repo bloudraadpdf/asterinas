@@ -111,7 +111,7 @@ impl DatagramSocket {
             },
             |bound_datagram, remote_endpoint| {
                 let sent_bytes = bound_datagram.try_send(reader, remote_endpoint, flags)?;
-                let iface_to_poll = bound_datagram.iface().clone();
+                let iface_to_poll = bound_datagram.iface(remote_endpoint)?;
                 Ok((sent_bytes, iface_to_poll))
             },
         )?;
@@ -291,18 +291,23 @@ impl Socket for DatagramSocket {
             Ok(need_iface_poll) => need_iface_poll,
         };
 
-        let iface_to_poll = need_iface_poll
+        let ifaces_to_poll = need_iface_poll
             .then(|| match &*inner {
                 Inner::Unbound(_) => None,
-                Inner::Bound(bound_datagram) => Some(bound_datagram.iface().clone()),
+                Inner::Bound(bound_datagram) => Some(
+                    bound_datagram
+                        .bound_ports()
+                        .map(|port| port.iface().clone())
+                        .collect::<Vec<_>>(),
+                ),
             })
             .flatten();
 
         drop(inner);
         drop(options);
 
-        if let Some(iface) = iface_to_poll {
-            iface.poll();
+        if let Some(ifaces) = ifaces_to_poll {
+            ifaces.iter().for_each(|iface| iface.poll());
         }
 
         Ok(())
@@ -333,7 +338,9 @@ impl SetSocketLevelOption for (&Inner<UnboundDatagram, BoundDatagram>, &SocketTi
             return;
         };
 
-        bound.bound_port().set_can_reuse(reuse_addr);
+        bound
+            .bound_ports()
+            .for_each(|port| port.set_can_reuse(reuse_addr));
     }
 
     fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
