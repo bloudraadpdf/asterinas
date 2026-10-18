@@ -142,6 +142,7 @@ dependencies = [
  "aster-console",
  "aster-device",
  "aster-erofs",
+ "aster-ext4",
  "aster-framebuffer",
  "aster-fuse",
  "aster-input",

@@ -1,7 +1,9 @@
 # Checked ext4 I/O
 
-`aster-ext4` parses ext4 metadata in safe Rust without an OSTD dependency.
-The crate is under development. It is not yet a writable kernel filesystem.
+`aster-ext4` parses and updates ext4 metadata in safe Rust
+without an OSTD dependency.
+The kernel's `fs_ext4` feature connects write sessions to the VFS.
+The filesystem remains under development.
 
 The reader supports 1, 2 and 4 KiB blocks, 64-bit descriptors, metadata
 checksums, checksum seeds, extent trees and legacy indirect blocks. Unknown
@@ -30,7 +32,9 @@ allocation scans, orphan retention and each owned transaction.
 Mutation and recovery tests cover 1, 2 and 4 KiB blocks. A clean journal-free
 volume can be written and closed; an unclean one requires external recovery.
 Non-extent allocation/reclamation, extended HTree depth (`large_dir`),
-preallocation/hole punching and VFS integration remain pending. Unsupported
+and preallocation/hole punching remain unsupported.
+The VFS adapter supplies inode identity, page caching,
+mount admission and writeback error retention. Unsupported
 recovery retains the volume's recovery flags.
 
 The directory hash port derives from lwext4's BSD-licensed `ext4_hash.c`.

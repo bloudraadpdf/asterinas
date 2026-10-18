@@ -163,7 +163,12 @@ pub(crate) struct PageCache(Arc<Vmo>);
 impl PageCache {
     /// Creates a page cache with a backend and the specified initial capacity
     /// in bytes.
-    #[cfg(any(feature = "filesystems_extra", feature = "fs_erofs", ktest))]
+    #[cfg(any(
+        feature = "filesystems_extra",
+        feature = "fs_erofs",
+        feature = "fs_ext4",
+        ktest
+    ))]
     pub(crate) fn new_with_backend(
         size: usize,
         backend: Weak<dyn PageCacheBackend>,
@@ -299,7 +304,7 @@ impl PageCache {
     ///
     /// If the given range exceeds the current size of the page cache, only the pages within
     /// the valid range will be flushed.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     pub(crate) fn flush_range(&self, range: Range<usize>) -> Result<()> {
         let Some(vmo) = self.0.as_backed_vmo() else {
             return Ok(());
@@ -407,7 +412,7 @@ pub(crate) trait PageCacheBackend: Sync + Send {
     //
     // TODO: Revise this behavior once file truncation and page writeback can
     // happen concurrently.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn write_page_async(
         &self,
         idx: usize,
@@ -419,7 +424,7 @@ pub(crate) trait PageCacheBackend: Sync + Send {
     ///
     /// Backends that can process several pages in one request should override
     /// this method. The default implementation submits each page separately.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn write_pages_async(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         for (idx, locked_page) in pages.into_indexed() {
             self.write_page_async(idx, locked_page, io_batch)?;
@@ -458,7 +463,7 @@ impl Iterator for PageRun<'_> {
 }
 
 impl<'a> PageRun<'a> {
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     pub(super) fn new<I>(start_idx: usize, pages: &'a mut I) -> Self
     where
         I: ExactSizeIterator<Item = LockedCachePage>,
@@ -652,7 +657,7 @@ pub(crate) trait BlockAsPageCacheBackend: Sync + Send {
     ///
     /// Implementations should fail with `EINVAL` for an out-of-bounds `idx`.
     /// See also [`PageCacheBackend::write_page_async`].
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn submit_write_bio(
         &self,
         idx: usize,
@@ -668,7 +673,7 @@ pub(crate) trait BlockAsPageCacheBackend: Sync + Send {
     ///
     /// Implementations should fail with `EINVAL` for an out-of-bounds `idx`.
     /// See also [`PageCacheBackend::write_page_async`].
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn submit_write_page_run(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         for (idx, locked_page) in pages.into_indexed() {
             let rollback_page = locked_page.clone();
@@ -700,7 +705,7 @@ impl<T: BlockAsPageCacheBackend> PageCacheBackend for T {
         self.submit_read_page_run(pages, io_batch)
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn write_page_async(
         &self,
         idx: usize,
@@ -722,7 +727,7 @@ impl<T: BlockAsPageCacheBackend> PageCacheBackend for T {
         res
     }
 
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     fn write_pages_async(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         self.submit_write_page_run(pages, io_batch)
     }
@@ -746,14 +751,14 @@ fn prepare_read_page(locked_page: LockedCachePage) -> (BioSegment, BioCompleteFn
     (bio_segment, complete_fn)
 }
 
-#[cfg(any(feature = "filesystems_extra", ktest))]
+#[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
 fn prepare_write_page(locked_page: LockedCachePage) -> (BioSegment, BioCompleteFn) {
     let (bio_segment, page) = prepare_write_page_segment(locked_page);
     let complete_fn = Box::new(move |status| complete_write_page(&page, status));
     (bio_segment, complete_fn)
 }
 
-#[cfg(any(feature = "filesystems_extra", ktest))]
+#[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
 fn prepare_write_page_segment(locked_page: LockedCachePage) -> (BioSegment, CachePage) {
     locked_page.wait_until_finish_writing_back();
 
@@ -769,7 +774,7 @@ fn prepare_write_page_segment(locked_page: LockedCachePage) -> (BioSegment, Cach
     (bio_segment, page)
 }
 
-#[cfg(any(feature = "filesystems_extra", ktest))]
+#[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
 fn complete_write_page(page: &CachePage, status: BioStatus) {
     page.clear_writing_back();
     if status != BioStatus::Complete {

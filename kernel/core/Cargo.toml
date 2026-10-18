@@ -7,6 +7,7 @@ edition.workspace = true
 
 [dependencies]
 aster-erofs = { workspace = true, optional = true }
+aster-ext4 = { workspace = true, optional = true }
 align_ext.workspace = true
 aster-bigtcp.workspace = true
 aster-block.workspace = true
@@ -83,7 +84,8 @@ console_video = ["dep:aster-framebuffer", "dep:aster-input"]
 storage_nvme = ["dep:aster-nvme"]
 configfs = []
 fs_erofs = ["dep:aster-erofs"]
-filesystems_extra = ["fs_erofs", "configfs", "dep:aster-fuse", "virtio_devices"]
+fs_ext4 = ["dep:aster-ext4"]
+filesystems_extra = ["fs_erofs", "fs_ext4", "configfs", "dep:aster-fuse", "virtio_devices"]
 virtio_devices = ["virtio_block", "virtio_net", "aster-virtio/devices"]
 virtio_block = ["aster-virtio/block"]
 virtio_net = ["aster-virtio/network"]

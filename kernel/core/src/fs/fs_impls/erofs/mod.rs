@@ -301,10 +301,7 @@ impl Inode for ErofsInode {
         access: AccessMode,
         flags: StatusFlags,
     ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
-        if let Some(pipe) = &self.pipe {
-            return Some(pipe.open_named(access, flags));
-        }
-        crate::fs::utils::device_inode::open(self)
+        crate::fs::utils::device_inode::open(self, self.pipe.as_ref(), access, flags)
     }
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         let fs = self.fs.upgrade().unwrap();
