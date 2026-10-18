@@ -34,6 +34,13 @@ entry points and headers. OSDK rejects Linux and GRUB image packaging for this
 kernel. Builds without `pvh_boot_only` keep the Linux entry points at `0x8001000` and `0x8001200`.
 The guest must still have enough RAM for its kernel, archive and application.
 
+In `pvh_boot_only` builds, OSTD owns the boot archive until the kernel has
+unpacked it. Dropping that owner clears and registers its full physical pages
+with the frame allocator. Shared edge pages and pages that overlap retained
+boot strings stay reserved. Other boot configurations retain their archive
+reservation. `BootInfo::take_initramfs()` transfers the archive once; byte
+borrows cannot outlive its owner.
+
 The output kernel image is:
 
 ```text

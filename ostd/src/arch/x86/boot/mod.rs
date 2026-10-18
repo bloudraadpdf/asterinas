@@ -57,7 +57,7 @@ trait ToEarlyBootInfo {
     fn kernel_commandline(&self) -> Option<&'static str>;
 
     /// Returns the initramfs bytes, if provided.
-    fn initramfs(&self) -> Option<&'static [u8]>;
+    fn initramfs(&self) -> Option<&[u8]>;
 
     /// Returns the ACPI information provided by the bootloader.
     fn acpi_arg(&self) -> BootloaderAcpiArg;
@@ -69,7 +69,7 @@ trait ToEarlyBootInfo {
     /// regions, and resolves the overlaps.
     fn memory_regions(
         &self,
-        initramfs: Option<&'static [u8]>,
+        initramfs: Option<&[u8]>,
         kernel_cmdline: Option<&'static str>,
         framebuffer_arg: Option<BootloaderFramebufferArg>,
     ) -> MemoryRegionArray;
@@ -83,7 +83,10 @@ trait ToEarlyBootInfo {
         EarlyBootInfo {
             bootloader_name: self.bootloader_name(),
             kernel_cmdline: kernel_cmdline.unwrap_or(""),
-            initramfs,
+            initramfs: initramfs.map(|bytes| {
+                let region = MemoryRegion::module(bytes);
+                region.base()..region.end()
+            }),
             acpi_arg: self.acpi_arg(),
             framebuffer_arg,
             memory_regions: self.memory_regions(initramfs, kernel_cmdline, framebuffer_arg),
@@ -96,7 +99,7 @@ trait ToEarlyBootInfo {
 fn finish_memory_regions(
     mut regions: MemoryRegionArray,
     framebuffer_arg: Option<BootloaderFramebufferArg>,
-    initramfs: Option<&'static [u8]>,
+    initramfs: Option<&[u8]>,
     kernel_cmdline: Option<&'static str>,
 ) -> MemoryRegionArray {
     // Add the framebuffer region since some loaders do not specify it.

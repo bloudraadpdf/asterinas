@@ -86,8 +86,8 @@ impl ToEarlyBootInfo for BootParams {
         let cmdline_len = self.hdr.cmdline_size as usize;
         // SAFETY:
         // 1. The command line is safe to read because of the contract with the loader.
-        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the command-line region in `finish_memory_regions`, so it will live as an immutable
+        //    reference for `'static`.
         let cmdline = unsafe { core::slice::from_raw_parts(cmdline_ptr as *const u8, cmdline_len) };
 
         // Now, unfortunately, there are silent errors because the serial is not up.
@@ -97,7 +97,7 @@ impl ToEarlyBootInfo for BootParams {
             .ok()
     }
 
-    fn initramfs(&self) -> Option<&'static [u8]> {
+    fn initramfs(&self) -> Option<&[u8]> {
         if self.ext_ramdisk_image != 0 || self.ext_ramdisk_size != 0 {
             // See the explanation in `kernel_commandline`.
             return None;
@@ -111,8 +111,8 @@ impl ToEarlyBootInfo for BootParams {
         let initramfs_len = self.hdr.ramdisk_size as usize;
         // SAFETY:
         // 1. The initramfs is safe to read because of the contract with the loader.
-        // 2. We reserve the initramfs region in `memory_regions`, so it will live as an immutable
-        //    reference for `'static`.
+        // 2. We reserve the initramfs region in `memory_regions`, so the bytes remain
+        //    valid during boot information parsing.
         let initramfs =
             unsafe { core::slice::from_raw_parts(initramfs_ptr as *const u8, initramfs_len) };
 
@@ -151,7 +151,7 @@ impl ToEarlyBootInfo for BootParams {
 
     fn memory_regions(
         &self,
-        initramfs: Option<&'static [u8]>,
+        initramfs: Option<&[u8]>,
         kernel_cmdline: Option<&'static str>,
         framebuffer_arg: Option<BootloaderFramebufferArg>,
     ) -> MemoryRegionArray {

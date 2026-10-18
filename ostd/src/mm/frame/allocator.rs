@@ -181,7 +181,7 @@ unsafe extern "Rust" {
     static __GLOBAL_FRAME_ALLOCATOR_REF: &'static dyn GlobalFrameAllocator;
 }
 
-pub(super) fn get_global_frame_allocator() -> &'static dyn GlobalFrameAllocator {
+pub(crate) fn get_global_frame_allocator() -> &'static dyn GlobalFrameAllocator {
     // SAFETY: The global frame allocator is set up correctly with the
     // `global_frame_allocator` attribute. If they use safe code only, the
     // up-call is safe.

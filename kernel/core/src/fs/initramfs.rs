@@ -46,7 +46,7 @@ use crate::{
 ///
 /// Returns successfully without changing the filesystem when no initramfs was supplied.
 pub(crate) fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
-    let Some(initramfs_buf) = boot_info().initramfs else {
+    let Some(initramfs_buf) = boot_info().take_initramfs() else {
         return Ok(());
     };
 
@@ -55,13 +55,16 @@ pub(crate) fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> 
         &[0x1F, 0x8B, _, _] => {
             println!("[kernel] unpacking initramfs.cpio.gz to rootfs ...");
             unpack_to_rootfs(
-                CpioDecoder::new(GzipReader::new(initramfs_buf)),
+                CpioDecoder::new(GzipReader::new(&initramfs_buf)),
                 path_resolver,
             )?;
         }
         _ => {
             println!("[kernel] unpacking initramfs.cpio to rootfs ...");
-            unpack_to_rootfs(CpioDecoder::new(Cursor::new(initramfs_buf)), path_resolver)?;
+            unpack_to_rootfs(
+                CpioDecoder::new(Cursor::new(&*initramfs_buf)),
+                path_resolver,
+            )?;
         }
     };
 

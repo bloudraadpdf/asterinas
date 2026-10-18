@@ -188,7 +188,7 @@ impl ToEarlyBootInfo for HvmStartInfoV0 {
         cmdline.to_str().ok()
     }
 
-    fn initramfs(&self) -> Option<&'static [u8]> {
+    fn initramfs(&self) -> Option<&[u8]> {
         // The PVH protocol does not tag module kinds, so the first module is
         // treated as the initramfs by convention.
         let module = self.modules().first()?;
@@ -199,8 +199,8 @@ impl ToEarlyBootInfo for HvmStartInfoV0 {
 
         // SAFETY:
         // 1. The initramfs is safe to read because of the contract with the loader.
-        // 2. We reserve the initramfs region in `memory_regions`, so it will live as an
-        //    immutable reference for `'static`.
+        // 2. We reserve the initramfs region in `memory_regions`, so the bytes remain
+        //    valid during boot information parsing.
         Some(unsafe {
             core::slice::from_raw_parts(
                 paddr_to_vaddr(module.paddr as Paddr) as *const u8,
@@ -228,7 +228,7 @@ impl ToEarlyBootInfo for HvmStartInfoV0 {
 
     fn memory_regions(
         &self,
-        initramfs: Option<&'static [u8]>,
+        initramfs: Option<&[u8]>,
         kernel_cmdline: Option<&'static str>,
         framebuffer_arg: Option<BootloaderFramebufferArg>,
     ) -> MemoryRegionArray {

@@ -15,6 +15,7 @@
     expect(dead_code)
 )]
 
+pub(crate) mod initramfs;
 pub mod memory_region;
 pub mod smp;
 
@@ -23,10 +24,11 @@ use alloc::{
     vec::Vec,
 };
 
+pub use initramfs::InitRamfs;
 use memory_region::{MemoryRegion, MemoryRegionArray};
 use spin::Once;
 
-use crate::log::LevelFilter;
+use crate::{log::LevelFilter, sync::SpinLock};
 
 /// The boot information provided by the bootloader.
 pub struct BootInfo {
@@ -34,12 +36,18 @@ pub struct BootInfo {
     pub bootloader_name: String,
     /// The kernel command line arguments.
     pub kernel_cmdline: String,
-    /// The initial ramfs raw bytes.
-    pub initramfs: Option<&'static [u8]>,
+    initramfs: SpinLock<Option<InitRamfs>>,
     /// The framebuffer arguments.
     pub framebuffer_arg: Option<BootloaderFramebufferArg>,
     /// The memory regions provided by the bootloader.
     pub memory_regions: Vec<MemoryRegion>,
+}
+
+impl BootInfo {
+    /// Takes the boot archive, returning its reclaimable pages when the owner is dropped.
+    pub fn take_initramfs(&self) -> Option<InitRamfs> {
+        self.initramfs.disable_irq().lock().take()
+    }
 }
 
 /// Gets the boot information.
@@ -96,7 +104,7 @@ pub struct BootloaderFramebufferArg {
 pub(crate) struct EarlyBootInfo {
     pub(crate) bootloader_name: &'static str,
     pub(crate) kernel_cmdline: &'static str,
-    pub(crate) initramfs: Option<&'static [u8]>,
+    pub(crate) initramfs: Option<core::ops::Range<crate::mm::Paddr>>,
     pub(crate) acpi_arg: BootloaderAcpiArg,
     pub(crate) framebuffer_arg: Option<BootloaderFramebufferArg>,
     pub(crate) memory_regions: MemoryRegionArray,
@@ -115,7 +123,7 @@ pub(crate) fn init_after_heap() {
     INFO.call_once(|| BootInfo {
         bootloader_name: boot_time_info.bootloader_name.to_string(),
         kernel_cmdline: boot_time_info.kernel_cmdline.to_string(),
-        initramfs: boot_time_info.initramfs,
+        initramfs: SpinLock::new(boot_time_info.initramfs.clone().map(InitRamfs::new)),
         framebuffer_arg: boot_time_info.framebuffer_arg,
         memory_regions: boot_time_info.memory_regions.to_vec(),
     });
