@@ -140,3 +140,9 @@ The OSDK image installer writes an independent boot ELF and replaces its output
 atomically. QEMU's ELF-header change can no longer modify a hard-linked compiler
 artifact. This also handles an output left as a hard link by an earlier build.
 The regression fails before the change and passes afterwards for both cases.
+
+The optional `fs_erofs` feature connects checked EROFS parsing and block I/O
+to the VFS. It supplies immutable flat, inline and LZ4-compressed reads.
+Mount admission validates flags before filesystem reuse. The library README
+describes supported formats and limits. Consumer disk-root tests cover
+boot, snapshot and clone reads. The compact-index port retains its MIT notice.

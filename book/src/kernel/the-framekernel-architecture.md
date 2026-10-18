@@ -79,3 +79,10 @@ Using this framework as a foundation,
 we have developed the Asterinas Kernel;
 this framework also enables others to create their own framekernels,
 with different goals and tradeoffs.
+
+## Filesystem parsing
+
+The `aster-erofs` library parses EROFS images in safe Rust. Its byte input
+interface comes from `io-util`. The kernel VFS adapter supplies block I/O, inode
+identity, permissions and demand paging. Filesystem parsing adds no unsafe API
+to OSTD. The reader can also run native tests without a booted kernel.

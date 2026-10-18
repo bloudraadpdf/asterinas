@@ -163,7 +163,7 @@ pub(crate) struct PageCache(Arc<Vmo>);
 impl PageCache {
     /// Creates a page cache with a backend and the specified initial capacity
     /// in bytes.
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_erofs", ktest))]
     pub(crate) fn new_with_backend(
         size: usize,
         backend: Weak<dyn PageCacheBackend>,
