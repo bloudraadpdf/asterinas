@@ -118,11 +118,15 @@ impl BlockDevice {
 
 impl aster_block::BlockDevice for BlockDevice {
     fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError> {
+        if self.device.features.contains(BlockFeatures::RO) && bio.type_() == BioType::Write {
+            return Err(BioEnqueueError::ReadOnly);
+        }
         self.queue.enqueue(bio)
     }
 
     fn metadata(&self) -> BlockDeviceMeta {
         BlockDeviceMeta {
+            is_read_only: self.device.features.contains(BlockFeatures::RO),
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
             nr_sectors: self.device.config_manager.capacity_sectors(),
         }

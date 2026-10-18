@@ -125,6 +125,7 @@ impl aster_block::BlockDevice for NvmeBlockDevice {
         let sectors = self.device.namespace.nsze;
 
         BlockDeviceMeta {
+            is_read_only: false,
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
             nr_sectors: sectors as usize,
         }

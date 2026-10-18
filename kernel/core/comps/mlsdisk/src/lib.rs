@@ -197,6 +197,7 @@ mod test {
 
         fn metadata(&self) -> BlockDeviceMeta {
             BlockDeviceMeta {
+                is_read_only: false,
                 max_nr_segments_per_bio: usize::MAX,
                 nr_sectors: self.blocks.size() / SECTOR_SIZE,
             }

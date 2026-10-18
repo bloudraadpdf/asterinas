@@ -222,6 +222,7 @@ impl From<(Error, usize)> for Error {
 impl From<aster_block::bio::BioEnqueueError> for Error {
     fn from(error: aster_block::bio::BioEnqueueError) -> Self {
         match error {
+            aster_block::bio::BioEnqueueError::ReadOnly => Error::new(Errno::EROFS),
             aster_block::bio::BioEnqueueError::IsFull => {
                 Error::with_message(Errno::EBUSY, "The request queue is full")
             }
