@@ -989,15 +989,30 @@ impl<'a> BackedVmo<'a> {
         // Therefore, we can release the reverse-mapping lock now.
         drop(locked_rmap);
 
-        let mut io_batch = IoBatch::with_capacity(locked_dirty_pages.len());
-        for locked_page_run in locked_dirty_pages
+        struct PendingWrites(Vec<(usize, super::LockedCachePage)>);
+        impl Drop for PendingWrites {
+            fn drop(&mut self) {
+                for (_, page) in &self.0 {
+                    page.restore_unsubmitted_write();
+                }
+            }
+        }
+        let mut pending = PendingWrites(locked_dirty_pages);
+        let mut io_batch = IoBatch::with_capacity(pending.0.len());
+        for locked_page_run in pending
+            .0
             .chunk_by_mut(|(page_idx, _), (next_page_idx, _)| page_idx + 1 == *next_page_idx)
         {
             // Single page in one run.
             if locked_page_run.len() == 1 {
                 let (idx, locked_page) = &mut locked_page_run[0];
-                self.backend
-                    .write_page_async(*idx, locked_page.detach(), &mut io_batch)?;
+                if let Err(error) =
+                    self.backend
+                        .write_page_async(*idx, locked_page.detach(), &mut io_batch)
+                {
+                    let _ = io_batch.wait_all();
+                    return Err(error);
+                }
                 continue;
             }
 

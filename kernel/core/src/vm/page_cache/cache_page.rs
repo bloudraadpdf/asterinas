@@ -349,6 +349,13 @@ impl LockedCachePage<CachePage> {
         page
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
+    pub(super) fn restore_unsubmitted_write(&self) {
+        if self.page.is_some() {
+            self.set_dirty();
+        }
+    }
+
     /// Transfers ownership of the locked page to a new guard.
     ///
     /// This method leaves this guard inert so it will not unlock the page when dropped.
