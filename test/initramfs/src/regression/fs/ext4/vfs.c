@@ -162,6 +162,52 @@ int main(int argc, char **argv)
 	assert(close(fd) == 0);
 	assert(unlink("/tmp/ext4-vfs/fifo") == 0);
 	assert(rmdir("/tmp/ext4-vfs/dir") == 0);
+	int server = socket(AF_UNIX, SOCK_DGRAM, 0);
+	int client = socket(AF_UNIX, SOCK_DGRAM, 0);
+	assert(server >= 0 && client >= 0);
+	struct sockaddr_un address = { .sun_family = AF_UNIX };
+	strcpy(address.sun_path, "/tmp/ext4-vfs/socket");
+	int barrier[2];
+	assert(pipe(barrier) == 0);
+	pid_t binders[2];
+	for (unsigned i = 0; i < 2; ++i) {
+		binders[i] = fork();
+		assert(binders[i] >= 0);
+		if (binders[i] == 0) {
+			assert(close(barrier[1]) == 0);
+			char go;
+			assert(read(barrier[0], &go, 1) == 1);
+			if (i == 1)
+				strcpy(address.sun_path,
+				       "/tmp/ext4-vfs/socket-other");
+			int result = bind(server, (struct sockaddr *)&address,
+					  sizeof(address));
+			_exit(result == 0 ? 10 : errno == EINVAL ? 20 : 30);
+		}
+	}
+	assert(close(barrier[0]) == 0 && write(barrier[1], "xx", 2) == 2 &&
+	       close(barrier[1]) == 0);
+	int results[2];
+	for (unsigned i = 0; i < 2; ++i) {
+		int result;
+		assert(waitpid(binders[i], &result, 0) == binders[i] &&
+		       WIFEXITED(result));
+		results[i] = WEXITSTATUS(result);
+	}
+	assert((results[0] == 10 && results[1] == 20) ||
+	       (results[0] == 20 && results[1] == 10));
+	if (results[1] == 10)
+		strcpy(address.sun_path, "/tmp/ext4-vfs/socket-other");
+	const char *unused = results[0] == 10 ? "/tmp/ext4-vfs/socket-other" :
+						"/tmp/ext4-vfs/socket";
+	errno = 0;
+	assert(lstat(unused, &status) == -1 && errno == ENOENT);
+	assert(sendto(client, "unix", 4, 0, (struct sockaddr *)&address,
+		      sizeof(address)) == 4);
+	assert(recv(server, bytes, sizeof(bytes), 0) == 4 &&
+	       !memcmp(bytes, "unix", 4));
+	assert(unlink(address.sun_path) == 0 && close(client) == 0 &&
+	       close(server) == 0);
 	assert(mknod("/tmp/ext4-vfs/null", S_IFCHR | 0600, makedev(1, 3)) == 0);
 	int device = open("/tmp/ext4-vfs/null", O_RDWR);
 	assert(device >= 0 && write(device, "x", 1) == 1 &&
