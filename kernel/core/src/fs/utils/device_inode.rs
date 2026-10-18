@@ -1,14 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Opening filesystem device nodes through the registered guest drivers.
+//! Opening filesystem pipes and registered device nodes.
 
 use crate::{
     device,
-    fs::{file::PerOpenFileOps, vfs::inode::Inode},
+    fs::{
+        file::{AccessMode, PerOpenFileOps, StatusFlags},
+        pipe::Pipe,
+        vfs::inode::Inode,
+    },
     prelude::*,
 };
 
-pub(in crate::fs) fn open(inode: &dyn Inode) -> Option<Result<Box<dyn PerOpenFileOps>>> {
+pub(in crate::fs) fn open(
+    inode: &dyn Inode,
+    pipe: Option<&Pipe>,
+    access: AccessMode,
+    flags: StatusFlags,
+) -> Option<Result<Box<dyn PerOpenFileOps>>> {
+    if let Some(pipe) = pipe {
+        return Some(pipe.open_named(access, flags));
+    }
     let type_ = inode.type_().device_type()?;
     Some(inode.metadata().and_then(|metadata| {
         metadata

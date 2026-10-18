@@ -49,6 +49,8 @@ use crate::prelude::*;
 
 /// Filesystem types supported for the root filesystem.
 pub(crate) static SUPPORTED_ROOTFS_TYPES: &[&dyn DynFsType] = &[
+    #[cfg(feature = "fs_ext4")]
+    &super::fs_impls::ext4::EXT4_TYPE,
     #[cfg(feature = "filesystems_extra")]
     &ext2::EXT2_TYPE,
     #[cfg(feature = "fs_erofs")]

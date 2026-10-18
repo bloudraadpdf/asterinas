@@ -9,7 +9,7 @@ pub(crate) mod cgroupfs;
 pub(crate) mod configfs;
 pub(crate) mod devpts;
 pub mod devtmpfs;
-#[cfg(feature = "fs_erofs")]
+#[cfg(any(feature = "fs_erofs", feature = "fs_ext4"))]
 mod disk;
 #[cfg(feature = "fs_erofs")]
 pub(crate) mod erofs;
@@ -17,6 +17,8 @@ pub(crate) mod erofs;
 pub(crate) mod exfat;
 #[cfg(feature = "filesystems_extra")]
 pub(crate) mod ext2;
+#[cfg(feature = "fs_ext4")]
+pub(crate) mod ext4;
 #[cfg(feature = "filesystems_extra")]
 pub(crate) mod overlayfs;
 pub(crate) mod procfs;
@@ -43,6 +45,8 @@ pub(super) fn init() {
     ext2::init();
     #[cfg(feature = "fs_erofs")]
     erofs::init();
+    #[cfg(feature = "fs_ext4")]
+    ext4::init();
     #[cfg(feature = "filesystems_extra")]
     exfat::init();
     #[cfg(feature = "filesystems_extra")]

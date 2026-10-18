@@ -24,6 +24,7 @@ console_video = ["aster-core/console_video", "dep:aster-drm", "dep:aster-simpled
 storage_nvme = ["aster-core/storage_nvme"]
 configfs = ["aster-core/configfs"]
 fs_erofs = ["aster-core/fs_erofs"]
+fs_ext4 = ["aster-core/fs_ext4"]
 filesystems_extra = ["aster-core/filesystems_extra"]
 virtio_devices = ["aster-core/virtio_devices"]
 virtio_block = ["aster-core/virtio_block"]
