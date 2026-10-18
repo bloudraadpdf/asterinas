@@ -68,6 +68,23 @@ mod private {
             }
         }
 
+        fn wait_for_connect(
+            &self,
+            timeout: Option<Duration>,
+            try_op: impl FnMut() -> Result<()>,
+        ) -> Result<()>
+        where
+            Self: Sized,
+        {
+            self.wait_events(IoEvents::OUT, timeout.as_ref(), try_op)
+                .map_err(|err| match err.error() {
+                    Errno::ETIME => {
+                        Error::with_message(Errno::EINPROGRESS, "the socket timeout expired")
+                    }
+                    _ => err,
+                })
+        }
+
         /// Handles commands specific to its protocol or socket type.
         fn protocol_ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
             return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown");

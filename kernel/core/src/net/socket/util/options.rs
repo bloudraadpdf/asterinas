@@ -114,6 +114,13 @@ impl SocketOptionSet {
         option: &mut dyn SocketOption,
         socket: &dyn GetSocketLevelOption,
     ) -> Result<()> {
+        if socket
+            .socket_timeouts()
+            .unwrap_or(&SocketTimeouts::new())
+            .get_option(option)
+        {
+            return Ok(());
+        }
         sock_option_mut!(match option {
             socket_reuse_addr @ ReuseAddr => {
                 let reuse_addr = self.reuse_addr();
@@ -145,12 +152,6 @@ impl SocketOptionSet {
             socket_linger @ Linger => {
                 let linger = self.linger();
                 socket_linger.set(linger);
-            }
-            socket_recv_timeout @ RecvTimeout => {
-                socket_recv_timeout.set(SocketTimeout::new(socket.recv_timeout()));
-            }
-            socket_send_timeout @ SendTimeout => {
-                socket_send_timeout.set(SocketTimeout::new(socket.send_timeout()));
             }
             socket_reuse_port @ ReusePort => {
                 let reuse_port = self.reuse_port();
@@ -197,6 +198,13 @@ impl SocketOptionSet {
         option: &dyn SocketOption,
         socket: &dyn SetSocketLevelOption,
     ) -> Result<NeedIfacePoll> {
+        if socket
+            .socket_timeouts()
+            .unwrap_or(&SocketTimeouts::new())
+            .set_option(option)
+        {
+            return Ok(NeedIfacePoll::FALSE);
+        }
         sock_option_ref!(match option {
             socket_reuse_addr @ ReuseAddr => {
                 let reuse_addr = socket_reuse_addr.get().unwrap();
@@ -236,14 +244,6 @@ impl SocketOptionSet {
             socket_linger @ Linger => {
                 let linger = socket_linger.get().unwrap();
                 self.set_linger(*linger);
-            }
-            socket_recv_timeout @ RecvTimeout => {
-                let recv_timeout = socket_recv_timeout.get().unwrap();
-                socket.set_recv_timeout(recv_timeout.duration());
-            }
-            socket_send_timeout @ SendTimeout => {
-                let send_timeout = socket_send_timeout.get().unwrap();
-                socket.set_send_timeout(send_timeout.duration());
             }
             socket_reuse_port @ ReusePort => {
                 let reuse_port = socket_reuse_port.get().unwrap();
@@ -337,6 +337,32 @@ impl SocketTimeouts {
         Self::default()
     }
 
+    pub(crate) fn get_option(&self, option: &mut dyn SocketOption) -> bool {
+        sock_option_mut!(match option {
+            socket_recv_timeout @ RecvTimeout => {
+                socket_recv_timeout.set(SocketTimeout::new(self.recv_timeout()));
+            }
+            socket_send_timeout @ SendTimeout => {
+                socket_send_timeout.set(SocketTimeout::new(self.send_timeout()));
+            }
+            _ => return false,
+        });
+        true
+    }
+
+    pub(crate) fn set_option(&self, option: &dyn SocketOption) -> bool {
+        sock_option_ref!(match option {
+            socket_recv_timeout @ RecvTimeout => {
+                self.set_recv_timeout(socket_recv_timeout.get().unwrap().duration());
+            }
+            socket_send_timeout @ SendTimeout => {
+                self.set_send_timeout(socket_send_timeout.get().unwrap().duration());
+            }
+            _ => return false,
+        });
+        true
+    }
+
     pub(crate) fn set_recv_timeout(&self, recv_timeout: Option<Duration>) {
         self.recv_timeout.store(recv_timeout.unwrap_or_default());
     }
@@ -391,18 +417,6 @@ pub(in crate::net) trait GetSocketLevelOption {
     fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
         None
     }
-
-    /// Returns the receive timeout.
-    fn recv_timeout(&self) -> Option<Duration> {
-        self.socket_timeouts()
-            .and_then(SocketTimeouts::recv_timeout)
-    }
-
-    /// Returns the send timeout.
-    fn send_timeout(&self) -> Option<Duration> {
-        self.socket_timeouts()
-            .and_then(SocketTimeouts::send_timeout)
-    }
 }
 
 /// A trait used for setting socket level options on actual sockets.
@@ -420,19 +434,5 @@ pub(in crate::net) trait SetSocketLevelOption {
     /// Returns timeout values for blocking socket operations.
     fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
         None
-    }
-
-    /// Sets the receive timeout.
-    fn set_recv_timeout(&self, recv_timeout: Option<Duration>) {
-        if let Some(timeouts) = self.socket_timeouts() {
-            timeouts.set_recv_timeout(recv_timeout);
-        }
-    }
-
-    /// Sets the send timeout.
-    fn set_send_timeout(&self, send_timeout: Option<Duration>) {
-        if let Some(timeouts) = self.socket_timeouts() {
-            timeouts.set_send_timeout(send_timeout);
-        }
     }
 }

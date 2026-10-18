@@ -492,14 +492,7 @@ impl Socket for StreamSocket {
             return result;
         }
 
-        let send_timeout = self.timeouts.send_timeout();
-        self.wait_events(IoEvents::OUT, send_timeout.as_ref(), || {
-            self.check_connect()
-        })
-        .map_err(|err| match err.error() {
-            Errno::ETIME => Error::with_message(Errno::EINPROGRESS, "the socket timeout expired"),
-            _ => err,
-        })
+        self.wait_for_connect(self.timeouts.send_timeout(), || self.check_connect())
     }
 
     fn listen(&self, backlog: usize) -> Result<()> {

@@ -72,3 +72,9 @@ The consumer ABI probe fails with `ENOSYS` before this patch and passes under
 Firecracker with it. Checks include forward and backward changes, fractional
 seconds, vDSO reads, monotonic clocks, rejected inputs and unprivileged denial.
 See the [Linux time-setting contract](https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/heads/master/kernel/time/timekeeping.c).
+
+Vsock stream sockets apply `SO_RCVTIMEO` to accept and reads, and
+`SO_SNDTIMEO` to connect and writes. Accepted sockets inherit both timeouts.
+`MSG_DONTWAIT` bypasses blocking waits. The consumer checks option values,
+accept and read expiry, inheritance and nonblocking reads before exchanging
+bytes with the host.

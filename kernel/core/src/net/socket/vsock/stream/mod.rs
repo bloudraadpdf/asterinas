@@ -18,7 +18,10 @@ use crate::{
         Socket, new_socket_common,
         options::{Error as SocketError, SocketOption, macros::sock_option_mut},
         private::SocketPrivate,
-        util::{MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr},
+        util::{
+            MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr,
+            options::SocketTimeouts,
+        },
         vsock::addr::{UNSPECIFIED_VSOCK_ADDR, VsockSocketAddr},
     },
     prelude::*,
@@ -32,6 +35,7 @@ pub(crate) struct VsockStreamSocket {
     // (e.g., `super::transport`) rather than in this module.
     pollee: Pollee,
     common: FileCommon,
+    timeouts: SocketTimeouts,
 }
 
 enum State {
@@ -63,6 +67,7 @@ impl VsockStreamSocket {
             state: Mutex::new(Takeable::new(State::Init(InitStream::new()))),
             pollee: Pollee::new(),
             common: new_socket_common(is_nonblocking),
+            timeouts: SocketTimeouts::new(),
         }))
     }
 
@@ -163,6 +168,7 @@ impl VsockStreamSocket {
             state: Mutex::new(Takeable::new(State::Connected(connected))),
             pollee,
             common: new_socket_common(is_nonblocking),
+            timeouts: self.timeouts.clone(),
         });
 
         Ok((accepted, peer_addr))
@@ -274,7 +280,7 @@ impl Socket for VsockStreamSocket {
         // FIXME: Linux cancels pending packets and aborts the connection if a blocking `connect()`
         // is interrupted by a signal. Here, we follow the behavior of IP sockets by continuing to
         // establish the connection in the background.
-        self.wait_events(IoEvents::OUT, None, || self.check_connect())
+        self.wait_for_connect(self.timeouts.send_timeout(), || self.check_connect())
     }
 
     fn listen(&self, backlog: usize) -> Result<()> {
@@ -308,7 +314,9 @@ impl Socket for VsockStreamSocket {
     }
 
     fn accept(&self, is_nonblocking: bool) -> Result<(Arc<dyn FileLike>, SocketAddr)> {
-        self.block_on(IoEvents::IN, None, || self.try_accept(is_nonblocking))
+        self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+            self.try_accept(is_nonblocking)
+        })
     }
 
     fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
@@ -348,9 +356,17 @@ impl Socket for VsockStreamSocket {
         Ok(connected_stream.remote_addr().into())
     }
 
-    // TODO: Support setting socket options
+    fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
+        if self.timeouts.set_option(option) {
+            return Ok(());
+        }
+        return_errno_with_message!(Errno::EOPNOTSUPP, "unknown vsock socket option");
+    }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
+        if self.timeouts.get_option(option) {
+            return Ok(());
+        }
         sock_option_mut!(match option {
             socket_errors @ SocketError => {
                 socket_errors.set(self.test_and_clear_error());
@@ -406,7 +422,12 @@ impl Socket for VsockStreamSocket {
             warn!("sending control message is not supported");
         }
 
-        self.block_on(IoEvents::OUT, None, || self.try_send(reader, flags))
+        if flags.contains(SendFlags::MSG_DONTWAIT) {
+            return self.try_send(reader, flags);
+        }
+        self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
+            self.try_send(reader, flags)
+        })
 
         // TODO: Trigger `SIGPIPE` if the error code is `EPIPE` and `MSG_NOSIGNAL` is not specified
     }
@@ -421,7 +442,13 @@ impl Socket for VsockStreamSocket {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let received_bytes = self.block_on(IoEvents::IN, None, || self.try_recv(writer, flags))?;
+        let received_bytes = if flags.contains(RecvFlags::MSG_DONTWAIT) {
+            self.try_recv(writer, flags)?
+        } else {
+            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+                self.try_recv(writer, flags)
+            })?
+        };
 
         // TODO: Receive control message
         let message_header = MessageHeader::new(None, Vec::new());
