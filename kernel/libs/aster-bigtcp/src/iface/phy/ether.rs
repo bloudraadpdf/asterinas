@@ -185,6 +185,12 @@ impl<D, E: Ext> EtherIface<D, E> {
                     return None;
                 }
 
+                if iface_cx.in_same_network(&IpAddress::Ipv4(*source_protocol_addr)) {
+                    self.arp_table
+                        .lock()
+                        .insert(*source_protocol_addr, *source_hardware_addr);
+                }
+
                 Some(ArpRepr::EthernetIpv4 {
                     operation: ArpOperation::Reply,
                     source_hardware_addr: self.ether_addr,
@@ -256,5 +262,107 @@ impl<D, E: Ext> EtherIface<D, E> {
         let packet = packet.to_builder_at_layer::<TransportLayer>().build();
         let packet = arp::emit(packet, arp_repr);
         Some(ether::emit(packet, &ether_repr))
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+    use crate::{
+        device::{DeviceCapabilities, Medium},
+        iface::tests::{NoScheduler, TestExt},
+    };
+
+    fn iface() -> EtherIface<(), TestExt> {
+        let ether_addr = EthernetAddress([2, 0, 0, 0, 0, 1]);
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.medium = Medium::Ethernet;
+        capabilities.max_transmission_unit = 1500;
+        let mut interface = new_interface(
+            Config::new(wire::HardwareAddress::Ethernet(ether_addr)),
+            capabilities,
+            get_network_timestamp(),
+        );
+        interface.update_ip_addrs(|addresses| {
+            addresses
+                .push(Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24).into())
+                .unwrap();
+        });
+        EtherIface {
+            driver: (),
+            common: IfaceCommon::new(
+                InterfaceName::from_str_truncated("arp-test"),
+                InterfaceType::ETHER,
+                InterfaceFlags::UP | InterfaceFlags::BROADCAST,
+                interface,
+                NoScheduler,
+            ),
+            ether_addr,
+            arp_table: SpinLock::new(BTreeMap::new()),
+        }
+    }
+
+    fn request(
+        source_hardware_addr: EthernetAddress,
+        source_protocol_addr: Ipv4Address,
+        target_protocol_addr: Ipv4Address,
+    ) -> ArpRepr {
+        ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Request,
+            source_hardware_addr,
+            source_protocol_addr,
+            target_hardware_addr: EthernetAddress::BROADCAST,
+            target_protocol_addr,
+        }
+    }
+
+    #[ktest]
+    fn arp_request_learns_a_valid_local_sender_before_the_first_reply() {
+        let iface = iface();
+        let peer_mac = EthernetAddress([2, 0, 0, 0, 0, 2]);
+        let peer_ip = Ipv4Address::new(192, 0, 2, 2);
+        let packet = request(peer_mac, peer_ip, Ipv4Address::new(192, 0, 2, 1));
+        let mut interface = iface.common.interface();
+        assert!(
+            iface
+                .process_arp(&packet, interface.context_mut())
+                .is_some()
+        );
+        assert_eq!(iface.arp_table.lock().get(&peer_ip), Some(&peer_mac));
+        assert!(
+            iface
+                .resolve_ether_or_generate_arp(peer_ip.into(), interface.context_mut())
+                .is_ok()
+        );
+    }
+
+    #[ktest]
+    fn arp_requests_do_not_learn_invalid_foreign_or_off_link_senders() {
+        let iface = iface();
+        let peer_mac = EthernetAddress([2, 0, 0, 0, 0, 2]);
+        let peer_ip = Ipv4Address::new(192, 0, 2, 2);
+        let local_ip = Ipv4Address::new(192, 0, 2, 1);
+        let packets = [
+            request(EthernetAddress::BROADCAST, peer_ip, local_ip),
+            request(peer_mac, Ipv4Address::BROADCAST, local_ip),
+            request(peer_mac, peer_ip, Ipv4Address::new(192, 0, 2, 3)),
+        ];
+        let mut interface = iface.common.interface();
+        for packet in packets {
+            assert!(
+                iface
+                    .process_arp(&packet, interface.context_mut())
+                    .is_none()
+            );
+        }
+        let off_link = request(peer_mac, Ipv4Address::new(198, 51, 100, 2), local_ip);
+        assert!(
+            iface
+                .process_arp(&off_link, interface.context_mut())
+                .is_some()
+        );
+        assert!(iface.arp_table.lock().is_empty());
     }
 }

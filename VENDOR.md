@@ -168,3 +168,9 @@ The library READMEs describe supported formats and limits:
 and [`aster-ext4`](kernel/libs/ext4/README.md).
 The EROFS compact-index port retains its MIT notice.
 The ext4 directory-hash port retains the BSD and RSA MD4 notices.
+
+The ARP receiver learns validated on-link senders before it replies
+to requests for the local interface.
+This permits an immediate first UDP response.
+Invalid senders, foreign targets and off-link senders remain excluded.
+Kernel regressions check validation and immediate resolution.
