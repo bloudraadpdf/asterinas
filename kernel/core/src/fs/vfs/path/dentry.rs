@@ -5,8 +5,11 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use ostd::sync::{RwMutexUpgradeableGuard, RwMutexWriteGuard};
+
+#[cfg(ktest)]
+mod tests;
 
 use super::{RenameMode, is_dot, is_dot_or_dotdot, is_dotdot};
 use crate::{
@@ -259,6 +262,42 @@ impl Dentry {
             mount_count: AtomicU32::new(0),
             this: weak_self.clone(),
         })
+    }
+
+    /// Reclaims unused cached children without invalidating live paths.
+    pub(super) fn prune_unused_children(self: &Arc<Self>) {
+        let mut pending = vec![(self.clone(), false)];
+        let mut visited = HashSet::new();
+        while let Some((dentry, finish)) = pending.pop() {
+            let Some(state) = &dentry.dir_state else {
+                continue;
+            };
+            if !finish {
+                if !visited.insert(Arc::as_ptr(&dentry) as usize) {
+                    continue;
+                }
+                let directories: Vec<_> = state
+                    .children
+                    .read()
+                    .entries
+                    .values()
+                    .filter_map(|entry| match entry {
+                        CachedDentry::Positive { dentry } if dentry.type_ == InodeType::Dir => {
+                            Some(dentry.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                pending.push((dentry.clone(), true));
+                pending.extend(directories.into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let unused: Vec<_> = state.children.write().entries.extract_if(|_, entry| {
+                matches!(entry, CachedDentry::Positive { dentry } if Arc::strong_count(dentry) == 1)
+            }).collect();
+            // Inode destruction can perform blocking writeback, so release the cache lock first.
+            drop(unused);
+        }
     }
 
     pub(super) fn is_pseudo(&self) -> bool {
