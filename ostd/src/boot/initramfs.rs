@@ -169,12 +169,14 @@ mod test {
             Some(2 * page..4 * page)
         );
         assert_eq!(reclaimable_range(&(page + 1..2 * page), &region, &[]), None);
+        let shared = 3 * page..3 * page + 1;
         assert_eq!(
-            reclaimable_range(&archive, &region, &[3 * page..3 * page + 1]),
+            reclaimable_range(&archive, &region, core::slice::from_ref(&shared)),
             None
         );
+        let edge = page..page + 1;
         assert_eq!(
-            reclaimable_range(&archive, &region, &[page..page + 1]),
+            reclaimable_range(&archive, &region, core::slice::from_ref(&edge)),
             Some(2 * page..4 * page)
         );
     }
