@@ -48,6 +48,7 @@ use crate::{
     util::{MultiRead, MultiWrite, ioctl::RawIoctl, net::SockType},
 };
 
+mod binding;
 mod connected;
 mod connecting;
 mod init;
@@ -330,7 +331,9 @@ impl StreamSocket {
             return_errno_with_message!(Errno::EINVAL, "the socket is not listening");
         };
 
+        let mut iface_to_poll = None;
         let accepted = listen_stream.try_accept().map(|connected_stream| {
+            iface_to_poll = Some(connected_stream.iface().clone());
             let remote_endpoint = connected_stream.remote_endpoint();
             let listener_options = self.options.read();
             let accepted_socket = Self::new_accepted(
@@ -342,11 +345,11 @@ impl StreamSocket {
             );
             (accepted_socket as _, remote_endpoint.into())
         });
-        let iface_to_poll = listen_stream.iface().clone();
-
         drop(state);
         self.pollee.invalidate();
-        iface_to_poll.poll();
+        if let Some(iface) = iface_to_poll {
+            iface.poll();
+        }
 
         accepted
     }
@@ -519,6 +522,8 @@ impl Socket for StreamSocket {
             };
 
             let listen_stream = match init_stream.listen(
+                self.family,
+                options.socket.reuse_addr(),
                 backlog,
                 &raw_option,
                 StreamObserver::new(self.pollee.clone()),
@@ -947,12 +952,14 @@ impl State {
         let bound_port = match self {
             State::Init(init_stream) => {
                 if let Some(bound_port) = init_stream.bound_port() {
-                    bound_port
-                } else {
-                    return;
+                    bound_port.set_can_reuse(reuse_addr);
                 }
+                return;
             }
-            State::Connecting(connecting_stream) => connecting_stream.bound_port(),
+            State::Connecting(connecting_stream) => {
+                connecting_stream.set_reuse_addr(reuse_addr);
+                return;
+            }
             State::Connected(connected_stream) => connected_stream.bound_port(),
             // Setting a listening address as reusable has no effect,
             // since no other sockets can bind to a listening port.
@@ -1018,9 +1025,7 @@ impl Drop for StreamSocket {
             State::Connecting(connecting_stream) => connecting_stream.into_connection(),
             State::Connected(connected_stream) => connected_stream.into_connection(),
             State::Listen(listen_stream) => {
-                let listener = listen_stream.into_listener();
-                listener.close();
-                listener.iface().poll();
+                listen_stream.close();
                 return;
             }
         };

@@ -6,31 +6,31 @@ use aster_bigtcp::{
     wire::IpEndpoint,
 };
 
-use super::{connected::ConnectedStream, observer::StreamObserver};
+use super::{binding::TcpBinding, connected::ConnectedStream, observer::StreamObserver};
 use crate::{
     events::IoEvents,
-    net::iface::{BoundTcpPort, Iface, TcpListener},
+    net::iface::{Iface, TcpListener},
     prelude::*,
 };
 
 pub(super) struct ListenStream {
-    tcp_listener: TcpListener,
+    tcp_listeners: Vec<TcpListener>,
 }
 
 impl ListenStream {
     pub(super) fn new(
-        bound_port: BoundTcpPort,
+        bound_port: TcpBinding,
         backlog: usize,
         option: &RawTcpOption,
         observer: StreamObserver,
-    ) -> Result<Self, (BoundTcpPort, Error)> {
+    ) -> Result<Self, (TcpBinding, Error)> {
         const SOMAXCONN: usize = 4096;
         let max_conn = SOMAXCONN.min(backlog);
 
-        match TcpListener::new_listen(bound_port, max_conn, option, observer) {
-            Ok(tcp_listener) => Ok(Self { tcp_listener }),
+        match TcpListener::new_listen_many(bound_port.into_ports(), max_conn, option, observer) {
+            Ok(tcp_listeners) => Ok(Self { tcp_listeners }),
             Err((bound_port, ListenError::AddressInUse)) => Err((
-                bound_port,
+                TcpBinding::from_ports(bound_port),
                 Error::with_message(Errno::EADDRINUSE, "listener key conflicts"),
             )),
             Err((_, err)) => {
@@ -40,7 +40,7 @@ impl ListenStream {
     }
 
     pub(super) fn try_accept(&self) -> Result<ConnectedStream> {
-        let (new_conn, remote_endpoint) = self.tcp_listener.accept().ok_or_else(|| {
+        let (new_conn, remote_endpoint) = self.tcp_listeners[0].accept().ok_or_else(|| {
             Error::with_message(Errno::EAGAIN, "no pending connection is available")
         })?;
 
@@ -48,15 +48,15 @@ impl ListenStream {
     }
 
     pub(super) fn local_endpoint(&self) -> IpEndpoint {
-        self.tcp_listener.local_endpoint()
+        self.tcp_listeners[0].local_endpoint()
     }
 
     pub(super) fn iface(&self) -> &Arc<Iface> {
-        self.tcp_listener.iface()
+        self.tcp_listeners[0].iface()
     }
 
     pub(super) fn check_io_events(&self) -> IoEvents {
-        let can_accept = self.tcp_listener.can_accept();
+        let can_accept = self.tcp_listeners[0].can_accept();
 
         // If network packets come in simultaneously, the socket state may change in the middle.
         // However, the current pollee implementation should be able to handle this race condition.
@@ -71,10 +71,15 @@ impl ListenStream {
         &self,
         set_option: impl FnOnce(&dyn RawTcpSetOption) -> R,
     ) -> R {
-        set_option(&self.tcp_listener)
+        set_option(&self.tcp_listeners[0])
     }
 
-    pub(super) fn into_listener(self) -> TcpListener {
-        self.tcp_listener
+    pub(super) fn close(self) {
+        for listener in &self.tcp_listeners {
+            listener.close();
+        }
+        for listener in &self.tcp_listeners {
+            listener.iface().poll();
+        }
     }
 }
