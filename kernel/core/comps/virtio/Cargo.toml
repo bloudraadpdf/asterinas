@@ -43,7 +43,9 @@ fdt-util.workspace = true
 
 [features]
 default = ["devices", "pci"]
-devices = ["dep:aster-block", "dep:aster-console", "dep:aster-fuse", "dep:aster-input"]
+devices = ["block", "network", "dep:aster-console", "dep:aster-fuse", "dep:aster-input"]
+block = ["dep:aster-block"]
+network = []
 pci = ["dep:aster-pci"]
 all = ["cvm_guest", "devices", "pci"]
 cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest"]

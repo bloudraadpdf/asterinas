@@ -63,7 +63,7 @@ pub(crate) trait VirtioTransport: Sync + Send + Debug {
     // ====================Virtqueue related APIs====================
 
     /// Get the total number of queues
-    #[cfg(any(feature = "devices", feature = "pci"))]
+    #[cfg(any(feature = "block", feature = "devices", feature = "pci"))]
     fn num_queues(&self) -> u16;
 
     /// Set virtqueue information. Some transport may set other necessary information such as MSI-X vector in PCI transport.

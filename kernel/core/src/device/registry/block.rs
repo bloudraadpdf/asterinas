@@ -5,12 +5,12 @@ use alloc::borrow::ToOwned;
 use aster_block::{BLOCK_SIZE, BlockDevice, SECTOR_SIZE, bio::BioStatus};
 #[cfg(feature = "storage_nvme")]
 use aster_nvme::NvmeBlockDevice;
-#[cfg(feature = "virtio_devices")]
+#[cfg(feature = "virtio_block")]
 use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
 use device_id::DeviceId;
 use ostd::mm::VmIo;
 
-#[cfg(any(feature = "virtio_devices", feature = "storage_nvme"))]
+#[cfg(any(feature = "virtio_block", feature = "storage_nvme"))]
 use crate::thread::kernel_thread::ThreadOptions;
 use crate::{
     context::current_userspace,
@@ -28,13 +28,13 @@ use crate::{
 };
 
 pub(super) fn init_in_first_kthread() {
-    #[cfg(any(feature = "virtio_devices", feature = "storage_nvme"))]
+    #[cfg(any(feature = "virtio_block", feature = "storage_nvme"))]
     for device in aster_block::collect_all() {
         if device.is_partition() {
             continue;
         }
 
-        #[cfg(feature = "virtio_devices")]
+        #[cfg(feature = "virtio_block")]
         if device.downcast_ref::<VirtIoBlockDevice>().is_some() {
             let device = device.clone();
             ThreadOptions::new(move || {
@@ -82,6 +82,8 @@ mod ioctl_defs {
     };
 
     // Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/linux/fs.h>
+
+    pub(super) type BlkRoGet = ioc!(BLKROGET, 0x12, 94, NoData);
 
     /// Returns the device size in bytes.
     pub(super) type BlkGetSize64 = ioc!(BLKGETSIZE64, 0x12, 114, OutData<u64>);
@@ -176,6 +178,9 @@ impl FileOps for OpenBlockFile {
         reader: &mut VmReader,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
+        if self.0.metadata().is_read_only {
+            return_errno!(Errno::EROFS);
+        }
         let total = reader.remain();
         if total == 0 {
             return Ok(0);
@@ -226,6 +231,11 @@ impl PerOpenFileOps for OpenBlockFile {
         use ioctl_defs::*;
 
         dispatch_ioctl!(match raw_ioctl {
+            _cmd @ BlkRoGet => {
+                current_userspace!()
+                    .write_val(raw_ioctl.arg(), &i32::from(self.0.metadata().is_read_only))?;
+                Ok(0)
+            }
             _cmd @ BlkGetSectorSize => {
                 // TODO: Query the per-device logical block size once block device metadata
                 // exposes it. For now, report the effective minimum I/O granularity enforced

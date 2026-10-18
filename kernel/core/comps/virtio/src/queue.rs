@@ -54,7 +54,7 @@ pub(crate) struct VirtQueue {
     /// The last-served used ring index.
     last_used_idx: u16,
     /// Whether the callback of this queue is enabled.
-    #[cfg(feature = "devices")]
+    #[cfg(feature = "network")]
     is_callback_enabled: bool,
 }
 
@@ -247,7 +247,7 @@ impl VirtQueue {
             free_head: Some(0),
             avail_idx: 0,
             last_used_idx: 0,
-            #[cfg(feature = "devices")]
+            #[cfg(feature = "network")]
             is_callback_enabled: true,
         })
     }
@@ -526,7 +526,7 @@ impl VirtQueue {
     /// Disables registered callbacks.
     ///
     /// That is to say, the queue won't generate interrupts after calling this method.
-    #[cfg(feature = "devices")]
+    #[cfg(feature = "network")]
     pub(crate) fn disable_callback(&mut self) {
         if !self.is_callback_enabled {
             return;
@@ -544,7 +544,7 @@ impl VirtQueue {
     /// Enables registered callbacks.
     ///
     /// The queue will generate interrupts if any event comes after calling this method.
-    #[cfg(feature = "devices")]
+    #[cfg(feature = "network")]
     pub(crate) fn enable_callback(&mut self) {
         if self.is_callback_enabled {
             return;

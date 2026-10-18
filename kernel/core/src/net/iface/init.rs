@@ -6,7 +6,7 @@ use aster_bigtcp::{
     device::{AnyNetworkDevice, WithDevice},
     iface::{InterfaceFlags, InterfaceName, InterfaceType},
 };
-#[cfg(feature = "virtio_devices")]
+#[cfg(feature = "virtio_net")]
 use aster_softirq::BottomHalfDisabled;
 use spin::Once;
 
@@ -15,7 +15,7 @@ use crate::{net::iface::sched::PollScheduler, prelude::*};
 
 static IFACES: Once<Vec<Arc<Iface>>> = Once::new();
 
-#[cfg(feature = "virtio_devices")]
+#[cfg(feature = "virtio_net")]
 fn virtio_iface() -> Option<&'static Arc<Iface>> {
     IFACES.get().unwrap().get(1)
 }
@@ -25,14 +25,14 @@ pub(in crate::net) fn iter_all_ifaces() -> Iter<'static, Arc<Iface>> {
 }
 
 // TODO: Support multiple network devices and avoid the hardcoded device name.
-#[cfg(feature = "virtio_devices")]
+#[cfg(feature = "virtio_net")]
 const VIRTIO_DEVICE_NAME: &str = aster_virtio::device::network::DEVICE_NAME;
 
 pub(in crate::net) fn init() {
     IFACES.call_once(|| {
         let ifaces = vec![new_loopback()];
 
-        #[cfg(feature = "virtio_devices")]
+        #[cfg(feature = "virtio_net")]
         let ifaces = {
             let mut ifaces = ifaces;
 
@@ -48,7 +48,7 @@ pub(in crate::net) fn init() {
         ifaces
     });
 
-    #[cfg(feature = "virtio_devices")]
+    #[cfg(feature = "virtio_net")]
     if let Some(iface_virtio) = virtio_iface() {
         let callback = || iface_virtio.poll();
         aster_network::register_recv_callback(VIRTIO_DEVICE_NAME, callback);
@@ -105,7 +105,7 @@ fn new_loopback() -> Arc<Iface> {
     ) as Arc<Iface>
 }
 
-#[cfg(feature = "virtio_devices")]
+#[cfg(feature = "virtio_net")]
 fn new_virtio() -> Option<Arc<Iface>> {
     use aster_bigtcp::{
         iface::EtherIface,

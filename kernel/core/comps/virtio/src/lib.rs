@@ -12,19 +12,22 @@ extern crate ostd_pod;
 use alloc::boxed::Box;
 use core::hint::spin_loop;
 
-#[cfg(feature = "devices")]
+#[cfg(feature = "block")]
 use aster_block::MajorIdOwner;
 use bitflags::bitflags;
 use component::{ComponentInitError, init_component};
+#[cfg(feature = "block")]
+use device::block::device::BlockDevice;
+#[cfg(feature = "network")]
+use device::network::device::NetworkDevice;
 use device::{VirtioDeviceType, entropy::device::EntropyDevice, socket::device::SocketDevice};
 #[cfg(feature = "devices")]
 use device::{
-    block::device::BlockDevice, console::device::ConsoleDevice,
-    filesystem::device::FileSystemDevice, input::device::InputDevice,
-    network::device::NetworkDevice,
+    console::device::ConsoleDevice, filesystem::device::FileSystemDevice,
+    input::device::InputDevice,
 };
 use ostd::{error, warn};
-#[cfg(feature = "devices")]
+#[cfg(feature = "block")]
 use spin::Once;
 #[cfg(feature = "pci")]
 use transport::pci::VIRTIO_PCI_DRIVER;
@@ -41,24 +44,24 @@ macro_rules! __log_prefix {
 
 pub mod device;
 mod dma_buf;
-#[cfg(feature = "devices")]
+#[cfg(feature = "block")]
 mod id_alloc;
 mod queue;
 mod transport;
 
-#[cfg(feature = "devices")]
+#[cfg(feature = "block")]
 static VIRTIO_BLOCK_MAJOR_ID: Once<MajorIdOwner> = Once::new();
 
 #[init_component]
 fn virtio_component_init() -> Result<(), ComponentInitError> {
-    #[cfg(feature = "devices")]
+    #[cfg(feature = "block")]
     VIRTIO_BLOCK_MAJOR_ID.call_once(|| aster_block::allocate_major().unwrap());
 
     // Find all devices and register them to the corresponding crate
     transport::init();
 
     device::entropy::init();
-    #[cfg(feature = "devices")]
+    #[cfg(feature = "network")]
     device::network::init();
     device::socket::init();
 
@@ -111,14 +114,14 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
         let device_transport = DeviceTransport::new(transport);
 
         let res = match device_type {
-            #[cfg(feature = "devices")]
+            #[cfg(feature = "block")]
             VirtioDeviceType::Block => BlockDevice::init(device_transport),
             #[cfg(feature = "devices")]
             VirtioDeviceType::Console => ConsoleDevice::init(device_transport),
             VirtioDeviceType::Entropy => EntropyDevice::init(device_transport),
             #[cfg(feature = "devices")]
             VirtioDeviceType::Input => InputDevice::init(device_transport),
-            #[cfg(feature = "devices")]
+            #[cfg(feature = "network")]
             VirtioDeviceType::Network => NetworkDevice::init(device_transport),
             VirtioDeviceType::Socket => SocketDevice::init(device_transport),
             #[cfg(feature = "devices")]
@@ -154,9 +157,9 @@ fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
     let mask = ((1u64 << 24) - 1) | (((1u64 << 24) - 1) << 50);
     let device_specified_features = features & mask;
     let device_support_features = match transport.device_type() {
-        #[cfg(feature = "devices")]
+        #[cfg(feature = "network")]
         VirtioDeviceType::Network => NetworkDevice::negotiate_features(device_specified_features),
-        #[cfg(feature = "devices")]
+        #[cfg(feature = "block")]
         VirtioDeviceType::Block => BlockDevice::negotiate_features(device_specified_features),
         #[cfg(feature = "devices")]
         VirtioDeviceType::Input => InputDevice::negotiate_features(device_specified_features),
