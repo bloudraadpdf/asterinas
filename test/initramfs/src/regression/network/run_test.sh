@@ -34,6 +34,7 @@ sleep 0.2
 ./tcp_reuseaddr
 ./tcp_wrapped_buffer_io
 ./tcp_wildcard
+./ip_port_privilege
 ./udp_broadcast
 ./udp_err
 ./udp_wildcard

@@ -185,3 +185,8 @@ and eighteen packet-library tests.
 The external host exchanges TCP and UDP bytes through `virtio-net`.
 Tokoloshe checks both root formats, ext4 scratch and snapshot clones
 with the same receive capacities and confidential-guest features.
+
+Port zero requests unprivileged ephemeral allocation.
+Ports 1 through 1023 retain the `CAP_NET_BIND_SERVICE` check.
+The regression clears all capability sets before explicit binds
+and implicit clients, and covers IPv4 TCP/UDP and IPv6 TCP.
