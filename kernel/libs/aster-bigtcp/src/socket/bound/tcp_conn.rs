@@ -257,6 +257,10 @@ impl<E: Ext> Inner<E> for TcpConnectionInner<E> {
     type BoundPort = BoundTcpPort<E>;
     type Observer = E::TcpEventObserver;
 
+    fn local_endpoint(&self, _bound: &Self::BoundPort) -> IpEndpoint {
+        self.connection_key.local_endpoint()
+    }
+
     fn on_drop(this: &Arc<SocketBg<Self, E>>) {
         debug_assert!(
             {
@@ -305,18 +309,7 @@ impl<E: Ext> TcpConnection<E> {
 
         // A TCP socket can initially be bound to a broadcast address; however, when connecting
         // later, its address will fall back to a unicast address.
-        let connection_key = {
-            bound.ensure_unicast(&interface);
-            let local_endpoint = bound.endpoint();
-            ConnectionKey::from((local_endpoint, remote_endpoint))
-        };
-
-        // Lock order: `interface` -> `sockets`
-        let mut sockets = iface.common().sockets();
-
-        if sockets.lookup_connection(&connection_key).is_some() {
-            return Err((bound, ConnectError::AddressInUse));
-        }
+        bound.ensure_unicast(&interface);
 
         let socket = {
             let mut socket = new_tcp_socket();
@@ -330,6 +323,14 @@ impl<E: Ext> TcpConnection<E> {
 
             socket
         };
+
+        let connection_key =
+            ConnectionKey::from((socket.local_endpoint().unwrap(), remote_endpoint));
+        // Lock order: `interface` -> `sockets`.
+        let mut sockets = iface.common().sockets();
+        if sockets.lookup_connection(&connection_key).is_some() {
+            return Err((bound, ConnectError::AddressInUse));
+        }
 
         let connection =
             Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak));

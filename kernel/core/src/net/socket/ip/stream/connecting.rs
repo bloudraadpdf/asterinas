@@ -6,7 +6,9 @@ use aster_bigtcp::{
     wire::IpEndpoint,
 };
 
-use super::{connected::ConnectedStream, init::InitStream, observer::StreamObserver};
+use super::{
+    binding::TcpBinding, connected::ConnectedStream, init::InitStream, observer::StreamObserver,
+};
 use crate::{
     events::IoEvents,
     net::iface::{BoundTcpPort, Iface, TcpConnection},
@@ -16,6 +18,7 @@ use crate::{
 pub(super) struct ConnectingStream {
     tcp_conn: TcpConnection,
     remote_endpoint: IpEndpoint,
+    other_ports: Vec<BoundTcpPort>,
 }
 
 pub(super) enum ConnResult {
@@ -27,33 +30,27 @@ pub(super) enum ConnResult {
 impl ConnectingStream {
     pub(super) fn new(
         bound_port: BoundTcpPort,
+        other_ports: Vec<BoundTcpPort>,
         remote_endpoint: IpEndpoint,
         option: &RawTcpOption,
         observer: StreamObserver,
-    ) -> Result<Self, (Error, BoundTcpPort)> {
+    ) -> Result<Self, (Error, TcpBinding)> {
         let tcp_conn =
             match TcpConnection::new_connect(bound_port, remote_endpoint, option, observer) {
                 Ok(tcp_conn) => tcp_conn,
                 Err((bound_port, ConnectError::AddressInUse)) => {
                     return Err((
                         Error::with_message(Errno::EADDRNOTAVAIL, "connection key conflicts"),
-                        bound_port,
+                        TcpBinding::new(bound_port, other_ports),
                     ));
                 }
                 Err((bound_port, _)) => {
-                    // The only reason this method might go to this branch is because
-                    // we're trying to connect to an unspecified address (i.e. 0.0.0.0).
-                    // We currently have no support for binding to,
-                    // listening on, or connecting to the unspecified address.
-                    //
-                    // We assume the remote will just refuse to connect,
-                    // so we return `ECONNREFUSED`.
                     return Err((
                         Error::with_message(
                             Errno::ECONNREFUSED,
-                            "connecting to an unspecified address is not supported",
+                            "the connection endpoint is not available",
                         ),
-                        bound_port,
+                        TcpBinding::new(bound_port, other_ports),
                     ));
                 }
             };
@@ -61,6 +58,7 @@ impl ConnectingStream {
         Ok(Self {
             tcp_conn,
             remote_endpoint,
+            other_ports,
         })
     }
 
@@ -84,7 +82,10 @@ impl ConnectingStream {
             )),
             ConnectState::Refused => {
                 let bound_port = self.tcp_conn.into_bound_port().unwrap();
-                ConnResult::Refused(InitStream::new_refused(bound_port))
+                ConnResult::Refused(InitStream::new_refused(TcpBinding::new(
+                    bound_port,
+                    self.other_ports,
+                )))
             }
         }
     }
@@ -103,6 +104,13 @@ impl ConnectingStream {
 
     pub(super) fn bound_port(&self) -> &BoundTcpPort {
         self.tcp_conn.bound_port()
+    }
+
+    pub(super) fn set_reuse_addr(&self, value: bool) {
+        self.bound_port().set_can_reuse(value);
+        self.other_ports
+            .iter()
+            .for_each(|port| port.set_can_reuse(value));
     }
 
     pub(super) fn check_io_events(&self) -> IoEvents {
