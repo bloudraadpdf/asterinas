@@ -26,10 +26,12 @@ use ostd::{
 
 mod arena;
 mod buffer;
+mod cache;
 
 pub use self::{
     arena::{DmaArena, DmaArenaPool},
     buffer::DmaBuffer,
+    cache::DmaArenaCache,
 };
 
 /// `DmaPool` is responsible for allocating small streaming DMA segments
