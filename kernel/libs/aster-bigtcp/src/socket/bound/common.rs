@@ -16,11 +16,10 @@ use crate::{
 
 pub struct Socket<T: Inner<E>, E: Ext>(pub(super) Takeable<Arc<SocketBg<T, E>>>);
 
-/// [`TcpConnectionInner`], [`TcpListenerInner`], or [`UdpSocketInner`].
+/// [`TcpConnectionInner`] or [`TcpListenerInner`].
 ///
 /// [`TcpConnectionInner`]: super::tcp_conn::TcpConnectionInner
 /// [`TcpListenerInner`]: super::tcp_listen::TcpListenerInner
-/// [`UdpSocketInner`]: super::udp::UdpSocketInner
 pub trait Inner<E: Ext> {
     type BoundPort: Deref<Target = BoundPort<E>>;
     type Observer: SocketEventObserver;
@@ -37,7 +36,7 @@ pub trait Inner<E: Ext> {
         Self: Sized;
 }
 
-/// Common states shared by [`TcpConnectionBg`], [`TcpListenerBg`], and [`UdpSocketBg`].
+/// Common states shared by [`TcpConnectionBg`] and [`TcpListenerBg`].
 ///
 /// In the type name, `Bg` means "background". Its meaning is described below:
 /// - A foreground socket (e.g., [`TcpConnection`]) handles system calls from the user program.
@@ -45,7 +44,6 @@ pub trait Inner<E: Ext> {
 ///
 /// [`TcpConnectionBg`]: super::tcp_conn::TcpConnectionBg
 /// [`TcpListenerBg`]: super::tcp_listen::TcpListenerBg
-/// [`UdpSocketBg`]: super::udp::UdpSocketBg
 /// [`TcpConnection`]: super::tcp_conn::TcpConnection
 pub struct SocketBg<T: Inner<E>, E: Ext> {
     pub(super) bound: T::BoundPort,

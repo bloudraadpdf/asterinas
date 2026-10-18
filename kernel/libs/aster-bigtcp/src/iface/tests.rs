@@ -211,3 +211,211 @@ fn multi_iface_close_releases_pending_connections_on_every_interface() {
         );
     }
 }
+
+mod udp {
+    use alloc::{boxed::Box, vec};
+
+    use super::*;
+    use crate::{
+        errors::udp::{RecvError, SendError},
+        iface::BoundUdpPort,
+        socket::{ReceiveBehavior, UdpSocket},
+    };
+
+    fn socket(ifaces: &[Arc<dyn Iface<TestExt>>]) -> UdpSocket<TestExt> {
+        let ports = BoundUdpPort::bind_many(ifaces.to_vec(), any(0), false).unwrap();
+        UdpSocket::new_bind(ports, ()).unwrap_or_else(|_| panic!("UDP bind failed"))
+    }
+
+    fn destination(socket: &UdpSocket<TestExt>, iface: &Arc<dyn Iface<TestExt>>) -> IpEndpoint {
+        IpEndpoint::new(
+            iface.ipv4_cidr().unwrap().address().into(),
+            socket.local_endpoint().port,
+        )
+    }
+
+    fn payload(size: usize, byte: u8) -> Box<[u8]> {
+        vec![byte; size].into_boxed_slice()
+    }
+
+    #[ktest]
+    fn udp_common_port_rolls_back_without_conflicting_with_tcp() {
+        let ifaces = ifaces();
+        let blocked = ifaces[1]
+            .bind_udp(BindPortConfig::new(any(32768), false))
+            .unwrap();
+        assert!(matches!(
+            BoundUdpPort::bind_many(ifaces.clone(), any(32768), false),
+            Err(BindError::InUse)
+        ));
+        let available = ifaces[0]
+            .bind_udp(BindPortConfig::new(any(32768), false))
+            .unwrap();
+        let tcp = BoundTcpPort::bind_many(ifaces.clone(), any(32768), false).unwrap();
+        let ports = BoundUdpPort::bind_many(ifaces.clone(), any(0), false).unwrap();
+        assert_ne!(ports[0].port(), 32768);
+        assert_eq!(ports[0].port(), ports[1].port());
+        drop((blocked, available, ports, tcp));
+        drop(BoundUdpPort::bind_many(ifaces, any(32768), false).unwrap());
+    }
+
+    #[ktest]
+    fn udp_payload_capacity_is_shared_without_blocking_another_interface() {
+        let ifaces = ifaces();
+        let sender = socket(&ifaces);
+        let receiver = socket(&ifaces);
+        for (index, iface) in ifaces.iter().enumerate() {
+            sender
+                .send(
+                    iface,
+                    destination(&receiver, iface),
+                    payload(32768, index as u8),
+                )
+                .unwrap();
+        }
+        assert!(!sender.can_send());
+        assert_eq!(
+            sender.send(
+                &ifaces[0],
+                destination(&receiver, &ifaces[0]),
+                payload(1, 9)
+            ),
+            Err(SendError::BufferFull)
+        );
+        ifaces[1].poll();
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, meta| {
+                assert_eq!(data.len(), 32768);
+                assert!(data.iter().all(|byte| *byte == 1));
+                assert_eq!(meta.endpoint, destination(&sender, &ifaces[1]));
+            })
+            .unwrap();
+        assert!(sender.can_send());
+        assert!(matches!(
+            receiver.recv(ReceiveBehavior::Peek, |_, _| ()),
+            Err(RecvError::Exhausted)
+        ));
+        ifaces[0].poll();
+        receiver
+            .recv(ReceiveBehavior::Peek, |data, _| {
+                assert!(data.iter().all(|byte| *byte == 0))
+            })
+            .unwrap();
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, _| {
+                assert_eq!(data.len(), 32768)
+            })
+            .unwrap();
+    }
+
+    #[ktest]
+    fn udp_empty_datagrams_share_one_packet_limit_and_release_ports_on_close() {
+        let ifaces = ifaces();
+        let socket = socket(&ifaces);
+        let port = socket.local_endpoint().port;
+        for index in 0..256 {
+            let iface = &ifaces[index % ifaces.len()];
+            socket
+                .send(iface, destination(&socket, iface), payload(0, 0))
+                .unwrap();
+        }
+        assert!(!socket.can_send());
+        assert_eq!(
+            socket.send(&ifaces[0], destination(&socket, &ifaces[0]), payload(0, 0)),
+            Err(SendError::BufferFull)
+        );
+        ifaces[0].poll();
+        assert!(socket.can_send());
+        for _ in 0..128 {
+            socket
+                .recv(ReceiveBehavior::Recv, |data, _| assert!(data.is_empty()))
+                .unwrap();
+        }
+        assert!(!socket.can_recv());
+        drop(socket);
+        ifaces[1].poll();
+        drop(BoundUdpPort::bind_many(ifaces, any(port), false).unwrap());
+    }
+
+    #[ktest]
+    fn udp_connect_filters_new_packets_and_keeps_the_existing_receive_queue() {
+        let ifaces = ifaces();
+        let receiver = socket(&ifaces);
+        let peer = socket(&ifaces);
+        let other = socket(&ifaces);
+        let target = destination(&receiver, &ifaces[0]);
+        other.send(&ifaces[0], target, payload(1, 0)).unwrap();
+        ifaces[0].poll();
+        let remote = destination(&peer, &ifaces[0]);
+        receiver.connect(remote, target.addr).unwrap();
+        assert_eq!(receiver.local_endpoint().addr, target.addr);
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, _| assert_eq!(data, &[0]))
+            .unwrap();
+        other.send(&ifaces[0], target, payload(1, 1)).unwrap();
+        peer.send(
+            &ifaces[1],
+            destination(&receiver, &ifaces[1]),
+            payload(1, 2),
+        )
+        .unwrap();
+        peer.send(&ifaces[0], target, payload(1, 3)).unwrap();
+        ifaces.iter().for_each(|iface| iface.poll());
+        receiver
+            .recv(ReceiveBehavior::Peek, |data, meta| {
+                assert_eq!(data, &[3]);
+                assert_eq!(meta.endpoint, remote);
+            })
+            .unwrap();
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, _| assert_eq!(data, &[3]))
+            .unwrap();
+        assert!(!receiver.can_recv());
+    }
+
+    #[ktest]
+    fn udp_reuse_prefers_connected_then_specific_then_the_latest_binding() {
+        let ifaces = ifaces();
+        let first_ports = BoundUdpPort::bind_many(ifaces.clone(), any(0), true).unwrap();
+        let endpoint = first_ports[0].endpoint();
+        let first =
+            UdpSocket::new_bind(first_ports, ()).unwrap_or_else(|_| panic!("first bind failed"));
+        let bind = || {
+            UdpSocket::new_bind(
+                BoundUdpPort::bind_many(ifaces.clone(), endpoint, true).unwrap(),
+                (),
+            )
+            .unwrap_or_else(|_| panic!("reusable bind failed"))
+        };
+        let second = bind();
+        let third = bind();
+        drop(first);
+        let peer = socket(&ifaces);
+        let target = destination(&second, &ifaces[0]);
+        peer.send(&ifaces[0], target, payload(1, 1)).unwrap();
+        ifaces[0].poll();
+        assert!(third.can_recv());
+        assert!(!second.can_recv());
+        third.recv(ReceiveBehavior::Recv, |_, _| ()).unwrap();
+        let specific_port = ifaces[0]
+            .bind_udp(BindPortConfig::new(target, true))
+            .unwrap();
+        let specific = UdpSocket::new_bind(vec![specific_port], ())
+            .unwrap_or_else(|_| panic!("specific bind failed"));
+        peer.send(&ifaces[0], target, payload(1, 2)).unwrap();
+        ifaces[0].poll();
+        assert!(specific.can_recv());
+        assert!(!third.can_recv());
+        specific.recv(ReceiveBehavior::Recv, |_, _| ()).unwrap();
+        second
+            .connect(destination(&peer, &ifaces[0]), target.addr)
+            .unwrap();
+        peer.send(&ifaces[0], target, payload(1, 3)).unwrap();
+        ifaces[0].poll();
+        assert!(second.can_recv());
+        assert!(!specific.can_recv());
+        second
+            .recv(ReceiveBehavior::Recv, |data, _| assert_eq!(data, &[3]))
+            .unwrap();
+    }
+}
