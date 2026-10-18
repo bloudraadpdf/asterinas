@@ -17,8 +17,8 @@ use crate::{
     wire::{IpEndpoint, Ipv4Address, Ipv4Cidr},
 };
 
-struct TestExt;
-struct NoScheduler;
+pub(super) struct TestExt;
+pub(super) struct NoScheduler;
 struct TestDevice(SpinLock<Loopback, BottomHalfDisabled>);
 
 impl Ext for TestExt {
