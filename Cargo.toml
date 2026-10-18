@@ -57,6 +57,7 @@ members = [
     "kernel/libs/device-id",
     "kernel/libs/dma-pool",
     "kernel/libs/erofs",
+    "kernel/libs/ext4",
     "kernel/libs/fdt-util",
     "kernel/libs/io-util",
     "kernel/libs/jhash",
@@ -153,6 +154,7 @@ edition = "2024"
 
 [workspace.dependencies]
 aster-erofs = { path = "kernel/libs/erofs" }
+aster-ext4 = { path = "kernel/libs/ext4" }
 ostd = { path = "ostd", version = "0.19.0" }
 
 # Crates under ostd/libs
