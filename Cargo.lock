@@ -231,6 +231,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aster-erofs"
+version = "0.1.0"
+dependencies = [
+ "io-util",
+]
+
+[[package]]
 name = "aster-framebuffer"
 version = "0.1.0"
 dependencies = [
