@@ -181,12 +181,12 @@ impl ElfHeaders {
             .unwrap()
     }
 
-    /// Finds the last loadable segment and returns its virtual address bounds.
+    /// Finds the initialized data range of the last loadable segment.
     pub(super) fn find_last_vaddr_bound(&self) -> Option<Range<Vaddr>> {
         self.loadable_phdrs
             .iter()
             .max_by_key(|phdr| phdr.virt_range().end)
-            .map(|phdr| phdr.virt_range().clone())
+            .map(|phdr| phdr.virt_range().start..phdr.virt_range().start + phdr.file_range().len())
     }
 }
 

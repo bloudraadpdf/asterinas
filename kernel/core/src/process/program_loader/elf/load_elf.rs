@@ -89,11 +89,8 @@ pub(crate) fn load_elf_to_vmar(
         execfn,
         elf_headers.stack_perms(),
     )?;
-    vmar.process_vm().map_and_init_heap(
-        vmar,
-        elf_mapped_info.data_range.len(),
-        elf_mapped_info.heap_base,
-    )?;
+    vmar.process_vm()
+        .init_heap(elf_mapped_info.data_range.len(), elf_mapped_info.heap_base)?;
 
     let user_stack_top = vmar.process_vm().init_stack().user_stack_top();
     Ok(ElfLoadInfo {
