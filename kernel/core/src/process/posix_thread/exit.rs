@@ -142,7 +142,7 @@ pub(in crate::process) fn sigkill_other_threads(current_task: &Task, task_set: &
 }
 
 /// Writes zero to `clear_child_tid` and performs a futex wake.
-fn wake_clear_ctid(thread_local: &ThreadLocal) {
+pub(in crate::process) fn wake_clear_ctid(thread_local: &ThreadLocal) {
     let clear_ctid = thread_local.clear_child_tid().get();
 
     if clear_ctid == 0 {
