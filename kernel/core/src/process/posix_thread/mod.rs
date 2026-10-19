@@ -40,8 +40,8 @@ mod robust_list;
 mod thread_local;
 
 pub(crate) use builder::PosixThreadBuilder;
-pub(super) use exit::sigkill_other_threads;
 pub(crate) use exit::{do_exit, do_exit_group};
+pub(super) use exit::{sigkill_other_threads, wake_clear_ctid};
 pub(crate) use personality::Personality;
 pub use posix_thread_ext::AsPosixThread;
 pub(crate) use robust_list::RobustListHead;

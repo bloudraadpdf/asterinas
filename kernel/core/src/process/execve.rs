@@ -244,6 +244,9 @@ fn do_execve_no_return(
     // while holding the process VMAR lock.
     // This prevents race conditions when checking access permissions while opening
     // `/proc/[pid]/mem` or `/proc/[pid]/maps`.
+    if ctx.user_space().vmar().has_multiple_handles() {
+        super::posix_thread::wake_clear_ctid(thread_local);
+    }
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
     apply_exec_cred(process, &ctx.credentials_mut(), exec_cred)?;
     drop(vmar_guard);
