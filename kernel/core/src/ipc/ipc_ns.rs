@@ -3,29 +3,23 @@
 //! Defines the IPC namespace abstraction.
 //!
 //! An IPC namespace isolates System V IPC resources from other namespaces.
-//! It currently manages semaphore sets only, while message queues and shared
-//! memory remain to be added.
-//!
-//! Each namespace stores its semaphore sets in a per-namespace map keyed by
-//! IPC key and uses a dedicated ID allocator to assign semaphore identifiers.
+//! Semaphore sets, message queues and shared segments share key, ID and
+//! permission handling.
 
-use aster_rights::ReadOp;
 use spin::Once;
 
 use super::{
-    IPC_PRIVATE, IpcFlags, IpcId, IpcKey,
-    ipc_ids::IpcIds,
-    semaphore::system_v::{
-        PermissionMode,
-        sem_set::{SEMMNI, SemaphoreSet},
-    },
+    IpcAccess, IpcFlags, IpcId, IpcKey, IpcPerm,
+    ipc_ids::{IpcIds, IpcRemoval},
+    message::{MSGMNI, MessageQueue},
+    semaphore::system_v::sem_set::{SEMMNI, SemaphoreSet},
+    shared_memory::{PendingAttachment, SHMALL, SHMMAX, SHMMNI, SharedSegment, ShmidDs},
 };
 use crate::{
     fs::pseudofs::{NsCommonOps, NsType, StashedDentry},
     prelude::*,
-    process::{
-        Credentials, UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread,
-    },
+    process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread},
+    util::quota::Quota,
 };
 
 /// The IPC namespace.
@@ -36,10 +30,13 @@ use crate::{
 /// of IPC resources and identifier allocator.
 ///
 /// Lock ordering:
-/// `sem_ids` -> `SemaphoreSet::inner`.
+/// ID tables -> object state -> semaphore undo state.
 pub(crate) struct IpcNamespace {
     /// Semaphore sets within this namespace.
-    sem_ids: IpcIds<SemaphoreSet>,
+    sem_ids: IpcIds<Arc<SemaphoreSet>>,
+    message_ids: IpcIds<Arc<MessageQueue>>,
+    shared_ids: IpcIds<Arc<SharedSegment>>,
+    shared_pages: Arc<Quota>,
     /// Owner user namespace.
     owner: Arc<UserNamespace>,
     /// Stashed dentry for nsfs.
@@ -58,16 +55,14 @@ impl IpcNamespace {
     }
 
     fn new(owner: Arc<UserNamespace>) -> Arc<Self> {
-        const MAX_SEM_ID: IpcId = {
-            assert!(SEMMNI <= u32::MAX as usize);
-            IpcId::new(SEMMNI as u32)
-        };
-
-        let sem_ids = IpcIds::new(MAX_SEM_ID);
+        let sem_ids = IpcIds::new(SEMMNI);
         let stashed_dentry = StashedDentry::new();
 
         Arc::new(Self {
             sem_ids,
+            message_ids: IpcIds::new(MSGMNI),
+            shared_ids: IpcIds::new(SHMMNI),
+            shared_pages: Quota::new(SHMALL),
             owner,
             stashed_dentry,
         })
@@ -85,28 +80,154 @@ impl IpcNamespace {
         Ok(Self::new(owner))
     }
 
+    pub(crate) fn get_or_create_shared_segment(
+        &self,
+        key: IpcKey,
+        size: usize,
+        flags: IpcFlags,
+        mode: u16,
+        ctx: &Context,
+    ) -> Result<IpcId> {
+        let validate = if size == 0 || size > SHMMAX {
+            Err(Error::new(Errno::EINVAL))
+        } else {
+            Ok(())
+        };
+        self.shared_ids.get_or_create(
+            key,
+            flags,
+            validate,
+            |id| {
+                Ok(Arc::new(SharedSegment::new(
+                    id,
+                    key,
+                    size,
+                    mode,
+                    &self.shared_pages,
+                    ctx,
+                )?))
+            },
+            |segment| segment.check_lookup(size, mode, ctx, &self.owner),
+        )
+    }
+
+    pub(crate) fn reserve_shm(
+        self: &Arc<Self>,
+        id: IpcId,
+        flags: u32,
+        ctx: &Context,
+    ) -> Result<PendingAttachment> {
+        self.shared_ids
+            .with(id, |segment| segment.reserve(self, flags, ctx, &self.owner))?
+    }
+
+    pub(crate) fn shared_status(&self, id: IpcId, ctx: &Context) -> Result<ShmidDs> {
+        self.shared_ids
+            .with(id, |segment| segment.status(ctx, &self.owner))?
+    }
+
+    pub(crate) fn set_shared_status(
+        &self,
+        id: IpcId,
+        input: &ShmidDs,
+        ctx: &Context,
+    ) -> Result<()> {
+        self.shared_ids
+            .update(id, |segment| segment.set_status(input, ctx, &self.owner))?
+    }
+
+    pub(crate) fn remove_shared_segment(&self, id: IpcId, ctx: &Context) -> Result<()> {
+        self.shared_ids.remove(id, |segment| {
+            Ok(if segment.mark_removed(ctx, &self.owner)? {
+                IpcRemoval::Destroy
+            } else {
+                IpcRemoval::Unname
+            })
+        })
+    }
+
+    pub(super) fn finalize_shm(&self, id: IpcId, expected: &Arc<SharedSegment>) {
+        let _ = self.shared_ids.remove(id, |segment| {
+            Ok(
+                if Arc::ptr_eq(segment, expected) && segment.ready_to_destroy() {
+                    IpcRemoval::Destroy
+                } else {
+                    IpcRemoval::Keep
+                },
+            )
+        });
+    }
+
+    pub(crate) fn get_or_create_message_queue(
+        &self,
+        key: IpcKey,
+        flags: IpcFlags,
+        mode: u16,
+        ctx: &Context,
+    ) -> Result<IpcId> {
+        self.message_ids.get_or_create(
+            key,
+            flags,
+            Ok(()),
+            |_| {
+                Ok(Arc::new(MessageQueue::new(
+                    key,
+                    mode,
+                    self.owner.clone(),
+                    ctx,
+                )))
+            },
+            |queue| queue.check_lookup(mode, ctx),
+        )
+    }
+
+    pub(crate) fn message_queue(&self, id: IpcId) -> Result<Arc<MessageQueue>> {
+        Ok(self.message_ids.with(id, Arc::clone)?)
+    }
+
+    pub(crate) fn remove_message_queue(&self, id: IpcId, ctx: &Context) -> Result<()> {
+        self.message_ids.remove(id, |queue| {
+            queue.remove(ctx)?;
+            Ok(IpcRemoval::Destroy)
+        })
+    }
+
     /// Calls `op` with the semaphore set identified by `semid`.
     pub(crate) fn with_sem_set<T, F>(
         &self,
         semid: IpcId,
-        required_perm: PermissionMode,
+        required_perm: IpcAccess,
+        ctx: &Context,
         op: F,
     ) -> Result<T>
     where
-        F: FnOnce(&SemaphoreSet) -> Result<T>,
+        F: FnOnce(&Arc<SemaphoreSet>) -> Result<T>,
     {
         self.sem_ids.with(semid, |sem_set| {
-            Self::validate_sem_set(sem_set, required_perm)?;
+            sem_set
+                .permission()
+                .check_access(required_perm, ctx, &self.owner)?;
             op(sem_set)
         })?
     }
 
-    /// Removes the semaphore set identified by `semid`.
-    pub(crate) fn remove_sem_set<F>(&self, semid: IpcId, may_remove: F) -> Result<()>
-    where
-        F: FnOnce(&SemaphoreSet) -> Result<()>,
-    {
-        self.sem_ids.remove(semid, may_remove)
+    pub(crate) fn remove_sem_set(&self, semid: IpcId, ctx: &Context) -> Result<()> {
+        self.sem_ids.remove(semid, |sem_set| {
+            sem_set.permission().check_owner(ctx, &self.owner)?;
+            sem_set.mark_removed();
+            Ok(IpcRemoval::Destroy)
+        })
+    }
+
+    pub(crate) fn set_sem_permission(
+        &self,
+        semid: IpcId,
+        input: &IpcPerm,
+        ctx: &Context,
+    ) -> Result<()> {
+        self.sem_ids.update(semid, |sem_set| {
+            sem_set.set_permission(input, ctx, &self.owner)
+        })?
     }
 
     /// Returns the existing semaphore set or creates a new one.
@@ -116,77 +237,38 @@ impl IpcNamespace {
         num_sems: usize,
         flags: IpcFlags,
         mode: u16,
-        credentials: Credentials<ReadOp>,
+        ctx: &Context,
     ) -> Result<IpcId> {
-        if key == IPC_PRIVATE {
-            return self.create_sem_set(num_sems, mode, credentials);
-        }
-
-        // For now, we compute `semid` by hashing `key`. If the hash conflicts, we will simply
-        // return an error. See the TODO below.
-        const { assert!(SEMMNI <= u32::MAX as usize) };
-        let semid = IpcId::new(key.cast_unsigned() % SEMMNI as u32 + 1);
-
-        loop {
-            match self.sem_ids.with(semid, |sem_set| {
-                if sem_set.permission().key() != key {
-                    if flags.contains(IpcFlags::IPC_CREAT) {
-                        // TODO: Manage all keys in a data structure (e.g., a map)
-                        return_errno_with_message!(Errno::ENOSPC, "key hashes conflict");
-                    }
-                    return_errno_with_message!(Errno::ENOENT, "the key does not exist");
-                }
-
-                Self::validate_sem_set(sem_set, PermissionMode::ALTER | PermissionMode::READ)?;
-
-                if flags.contains(IpcFlags::IPC_CREAT | IpcFlags::IPC_EXCL) {
-                    return_errno_with_message!(
-                        Errno::EEXIST,
-                        "the semaphore set already exists with IPC_EXCL"
-                    );
-                }
-
+        let credentials = ctx.posix_thread.credentials();
+        let validate_creation = if num_sems == 0 {
+            Err(Error::with_message(
+                Errno::EINVAL,
+                "the number of semaphores is zero",
+            ))
+        } else {
+            Ok(())
+        };
+        self.sem_ids.get_or_create(
+            key,
+            flags,
+            validate_creation,
+            |_| {
+                Ok(Arc::new(SemaphoreSet::new(
+                    key,
+                    num_sems,
+                    mode,
+                    &credentials,
+                )?))
+            },
+            |sem_set| {
                 if sem_set.num_sems() < num_sems {
                     return_errno_with_message!(Errno::EINVAL, "the semaphore set is too small");
                 }
-
-                Ok(semid)
-            }) {
-                Err(_id_not_exist) if flags.contains(IpcFlags::IPC_CREAT) => {}
-                Err(_id_not_exist) => {
-                    return_errno_with_message!(Errno::ENOENT, "the key does not exist");
-                }
-                Ok(result) => return result,
-            }
-
-            match self.sem_ids.insert_at(semid, |_| {
-                SemaphoreSet::new(key, num_sems, mode, &credentials)
-            }) {
-                Ok(()) => return Ok(semid),
-                Err(err) if err.error() == Errno::EEXIST => continue,
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
-    fn validate_sem_set(_sem_set: &SemaphoreSet, required_perm: PermissionMode) -> Result<()> {
-        if !required_perm.is_empty() {
-            // TODO: Support permission check
-            warn!("Semaphore doesn't support permission check now");
-        }
-
-        Ok(())
-    }
-
-    /// Creates a new semaphore set and returns its ID.
-    fn create_sem_set(
-        &self,
-        num_sems: usize,
-        mode: u16,
-        credentials: Credentials<ReadOp>,
-    ) -> Result<IpcId> {
-        self.sem_ids
-            .insert_auto(|_| SemaphoreSet::new(IPC_PRIVATE, num_sems, mode, &credentials))
+                sem_set
+                    .permission()
+                    .check_access(IpcAccess::from_mode(mode), ctx, &self.owner)
+            },
+        )
     }
 }
 

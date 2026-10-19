@@ -8,6 +8,7 @@ use crate::{
         file::{FileLike, MappableObject},
         ramfs::memfd::MemfdInode,
     },
+    ipc::shared_memory::PendingAttachment,
     prelude::*,
     vm::{page_cache::Vmo, perms::VmPerms, vmar::MapHandle},
 };
@@ -50,10 +51,26 @@ impl Vmar {
     pub(crate) fn new_map<'b>(&self, size: usize, perms: VmPerms) -> VmarMapOptions<'_, 'b> {
         VmarMapOptions::new(self, size, perms)
     }
+
+    pub(crate) fn attach_shm(
+        &self,
+        pending: PendingAttachment,
+        offset: VmarMapOffset,
+    ) -> Result<Vaddr> {
+        let mut options = self
+            .new_map(pending.vmo().size(), pending.perms())
+            .vmo(pending.vmo().clone())
+            .may_perms(pending.may_perms())
+            .map_mode(MmapMode::Shared)
+            .offset(offset);
+        options.shm = Some(pending);
+        options.build()
+    }
 }
 
 /// Options for creating a new mapping.
 pub(crate) struct VmarMapOptions<'a, 'b> {
+    shm: Option<PendingAttachment>,
     parent: &'a Vmar,
     mappable: Option<MappableObject<'b>>,
     file: Option<Arc<dyn FileLike>>,
@@ -106,6 +123,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
     /// permissions.
     fn new(parent: &'a Vmar, size: usize, perms: VmPerms) -> Self {
         Self {
+            shm: None,
             parent,
             mappable: None,
             file: None,
@@ -253,6 +271,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
     pub(crate) fn build(self) -> Result<Vaddr> {
         self.check_options()?;
         let Self {
+            shm,
             parent,
             mappable,
             file,
@@ -374,6 +393,10 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             handle_page_faults_around,
             perms | may_perms,
         );
+
+        if let Some(pending) = shm {
+            vm_mapping.install_shm(pending.publish());
+        }
 
         let vmo_for_rmap = vm_mapping.vmo_for_rmap().cloned();
         let mut rmap = vmo_for_rmap.as_ref().map(|vmo| vmo.rmap().lock());

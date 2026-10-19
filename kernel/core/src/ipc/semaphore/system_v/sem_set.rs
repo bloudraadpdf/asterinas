@@ -4,13 +4,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use aster_rights::ReadOp;
 
-use super::sem::{
-    PendingBlocker, PendingOp, Semaphore, Status, update_pending_alter, wake_const_ops,
+use super::{
+    sem::{PendingBlocker, PendingOp, Semaphore, Status, update_pending_alter, wake_const_ops},
+    undo::SemUndo,
 };
 use crate::{
-    ipc::{IpcKey, IpcPermission},
+    ipc::{IpcKey, IpcPerm, IpcPermission},
     prelude::*,
-    process::{Credentials, PidIdentity},
+    process::{Credentials, PidIdentity, UserNamespace},
     time::clocks::RealTimeCoarseClock,
 };
 
@@ -28,7 +29,6 @@ pub(crate) const SEMOPM: usize = 500;
 /// Maximum semaphore value.
 pub(crate) const SEMVMX: i32 = 32767;
 /// Maximum value that can be recorded for semaphore adjustment (SEM_UNDO).
-#[expect(dead_code)]
 pub(crate) const SEMAEM: i32 = SEMVMX;
 
 #[derive(Debug)]
@@ -37,30 +37,10 @@ pub(crate) struct SemaphoreSet {
     num_sems: usize,
     /// Inner
     inner: Mutex<SemSetInner>,
-    /// Semaphore permission
-    permission: IpcPermission,
     /// Creation time or last modification via `semctl`
     sem_ctime: AtomicU64,
     /// Last `semop` time
     sem_otime: AtomicU64,
-}
-
-// Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/asm-generic/ipcbuf.h#L22>.
-#[padding_struct]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod)]
-struct IpcPerm {
-    key: u32,
-    uid: u32,
-    gid: u32,
-    cuid: u32,
-    cgid: u32,
-    mode: u16,
-    _pad1: u16,
-    seq: u16,
-    _pad2: u16,
-    _unused1: u64,
-    _unused2: u64,
 }
 
 // In Linux, most popular 64-bit architectures except x86_64 adopt the same
@@ -71,7 +51,7 @@ struct IpcPerm {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod)]
 pub(crate) struct SemidDs {
-    sem_perm: IpcPerm,
+    pub(crate) sem_perm: IpcPerm,
     sem_otime: u64,
     _unused1: u64,
     sem_ctime: u64,
@@ -86,7 +66,7 @@ pub(crate) struct SemidDs {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod)]
 pub(crate) struct SemidDs {
-    sem_perm: IpcPerm,
+    pub(crate) sem_perm: IpcPerm,
     sem_otime: u64,
     sem_ctime: u64,
     sem_nsems: u64,
@@ -96,6 +76,9 @@ pub(crate) struct SemidDs {
 
 #[derive(Debug)]
 pub(super) struct SemSetInner {
+    removed: bool,
+    pub(super) undo: Vec<Weak<SemUndo>>,
+    permission: IpcPermission,
     /// Semaphores
     pub(super) sems: Box<[Semaphore]>,
     /// Pending alter operations.
@@ -163,39 +146,94 @@ impl SemaphoreSet {
     }
 
     pub(crate) fn setval(&self, sem_num: usize, val: i32, pid: Arc<PidIdentity>) -> Result<()> {
+        if sem_num >= self.num_sems {
+            return_errno_with_message!(Errno::EINVAL, "the semaphore number is out of bounds");
+        }
         if !(0..=SEMVMX).contains(&val) {
             return_errno_with_message!(Errno::ERANGE, "the semaphore value exceeds SEMVMX");
         }
-
         let mut inner = self.inner();
-        let (sems, pending_alter, pending_const) = inner.field_mut();
-        let Some(sem) = sems.get_mut(sem_num) else {
-            return_errno_with_message!(Errno::EINVAL, "the semaphore number is out of bounds");
-        };
-
+        let sem = &mut inner.sems[sem_num];
         sem.set_val(val);
         sem.set_latest_modified_pid(pid);
+        self.clear_undo(&inner, Some(sem_num));
+        self.wake_pending(&mut inner);
+        self.update_ctime();
+        Ok(())
+    }
 
-        let mut wake_queue = LinkedList::new();
-        let mut has_completed_op = false;
-        if val == 0 {
-            has_completed_op |= wake_const_ops(sems, pending_const, &mut wake_queue);
+    pub(crate) fn values(&self) -> Result<Vec<u16>> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(self.num_sems)
+            .map_err(|_| Error::new(Errno::ENOMEM))?;
+        let inner = self.inner();
+        values.extend(inner.sems.iter().map(|sem| sem.val() as u16));
+        Ok(values)
+    }
+
+    pub(crate) fn set_values(&self, values: &[u16], pid: Arc<PidIdentity>) -> Result<()> {
+        if values.len() != self.num_sems {
+            return_errno_with_message!(Errno::EINVAL, "the semaphore array length is invalid");
         }
-        has_completed_op |=
-            update_pending_alter(sems, pending_alter, pending_const, &mut wake_queue);
+        if values.iter().any(|value| i32::from(*value) > SEMVMX) {
+            return_errno_with_message!(Errno::ERANGE, "a semaphore value exceeds SEMVMX");
+        }
+        let mut inner = self.inner();
+        for (sem, value) in inner.sems.iter_mut().zip(values) {
+            sem.set_val(i32::from(*value));
+            sem.set_latest_modified_pid(pid.clone());
+        }
+        self.clear_undo(&inner, None);
+        self.wake_pending(&mut inner);
+        self.update_ctime();
+        Ok(())
+    }
 
-        for wake_op in wake_queue {
-            if let Some(waker) = wake_op.waker() {
+    fn clear_undo(&self, inner: &SemSetInner, index: Option<usize>) {
+        for list in inner.undo.iter().filter_map(Weak::upgrade) {
+            list.clear(self as *const _, index);
+        }
+    }
+
+    pub(super) fn apply_undo(&self, list: &SemUndo, pid: Arc<PidIdentity>) {
+        let mut inner = self.inner();
+        let Some(adjustments) = list.take(self as *const _) else {
+            return;
+        };
+        if inner.removed {
+            return;
+        }
+        let mut changed = false;
+        for (sem, adjustment) in inner.sems.iter_mut().zip(adjustments) {
+            if adjustment != 0 {
+                sem.set_val((sem.val() + adjustment).clamp(0, SEMVMX));
+                sem.set_latest_modified_pid(pid.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.wake_pending(&mut inner);
+        }
+    }
+
+    pub(in crate::ipc) fn mark_removed(&self) {
+        self.inner().mark_removed(self as *const _);
+    }
+
+    fn wake_pending(&self, inner: &mut SemSetInner) {
+        let (sems, pending_alter, pending_const) = inner.field_mut();
+        let mut wake_queue = LinkedList::new();
+        let has_completed = wake_const_ops(sems, pending_const, &mut wake_queue)
+            | update_pending_alter(sems, pending_alter, pending_const, &mut wake_queue);
+        for op in wake_queue {
+            if let Some(waker) = op.waker() {
                 waker.wake_up();
             }
         }
-
-        self.update_ctime();
-        if has_completed_op {
+        if has_completed {
             self.update_otime();
         }
-
-        Ok(())
     }
 
     pub(crate) fn get<T>(&self, sem_num: usize, func: fn(&Semaphore) -> T) -> Result<T> {
@@ -208,8 +246,21 @@ impl SemaphoreSet {
         Ok(result)
     }
 
-    pub(crate) fn permission(&self) -> &IpcPermission {
-        &self.permission
+    pub(crate) fn permission(&self) -> IpcPermission {
+        self.inner.lock().permission
+    }
+
+    pub(in crate::ipc) fn set_permission(
+        &self,
+        input: &IpcPerm,
+        ctx: &Context,
+        owner: &UserNamespace,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        inner.permission.check_owner(ctx, owner)?;
+        inner.permission.update(input)?;
+        self.update_ctime();
+        Ok(())
     }
 
     fn update_ctime(&self) {
@@ -243,37 +294,33 @@ impl SemaphoreSet {
             return_errno_with_message!(Errno::EINVAL, "the number of semaphores exceeds SEMMSL");
         }
 
-        let mut sems = Vec::with_capacity(num_sems);
+        let mut sems = Vec::new();
+        sems.try_reserve_exact(num_sems)
+            .map_err(|_| Error::new(Errno::ENOMEM))?;
         for _ in 0..num_sems {
             sems.push(Semaphore::new(0));
         }
 
-        let permission =
-            IpcPermission::new_sem_perm(key, credentials.euid(), credentials.egid(), mode);
+        let permission = IpcPermission::new(key, credentials.euid(), credentials.egid(), mode);
 
         Ok(Self {
             num_sems,
             inner: Mutex::new(SemSetInner {
+                removed: false,
+                undo: Vec::new(),
+                permission,
                 sems: sems.into_boxed_slice(),
                 pending_alter: LinkedList::new(),
                 pending_const: LinkedList::new(),
             }),
-            permission,
             sem_ctime: AtomicU64::new(RealTimeCoarseClock::get().read_time().as_secs()),
             sem_otime: AtomicU64::new(0),
         })
     }
 
     pub(crate) fn semid_ds(&self) -> SemidDs {
-        let ipc_perm = IpcPerm {
-            key: self.permission.key().cast_unsigned(),
-            uid: self.permission.uid().into(),
-            gid: self.permission.gid().into(),
-            cuid: self.permission.cuid().into(),
-            cgid: self.permission.cguid().into(),
-            mode: self.permission.mode(),
-            ..IpcPerm::default()
-        };
+        let inner = self.inner.lock();
+        let ipc_perm = inner.permission.abi();
 
         SemidDs {
             sem_perm: ipc_perm,
@@ -285,26 +332,29 @@ impl SemaphoreSet {
     }
 }
 
+impl SemSetInner {
+    fn mark_removed(&mut self, set: *const SemaphoreSet) {
+        if self.removed {
+            return;
+        }
+        self.removed = true;
+        for queue in [&mut self.pending_alter, &mut self.pending_const] {
+            for op in core::mem::take(queue) {
+                op.set_status(Status::Removed);
+                if let Some(waker) = op.waker() {
+                    waker.wake_up();
+                }
+            }
+        }
+        for list in self.undo.drain(..).filter_map(|list| list.upgrade()) {
+            list.forget(set);
+        }
+    }
+}
+
 impl Drop for SemaphoreSet {
     fn drop(&mut self) {
-        let inner = self.inner.get_mut();
-
-        let pending_alter = &mut inner.pending_alter;
-        for pending_alter in pending_alter.iter_mut() {
-            pending_alter.set_status(Status::Removed);
-            if let Some(waker) = pending_alter.waker() {
-                waker.wake_up();
-            }
-        }
-        pending_alter.clear();
-
-        let pending_const = &mut inner.pending_const;
-        for pending_const in pending_const.iter_mut() {
-            pending_const.set_status(Status::Removed);
-            if let Some(waker) = pending_const.waker() {
-                waker.wake_up();
-            }
-        }
-        pending_const.clear();
+        let key = self as *const _;
+        self.inner.get_mut().mark_removed(key);
     }
 }

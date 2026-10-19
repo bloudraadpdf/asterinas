@@ -10,11 +10,11 @@ use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 use ostd::sync::{Waiter, Waker};
 
 use super::{
-    PermissionMode,
     sem_set::{SEMVMX, SemSetInner},
+    undo::UndoRef,
 };
 use crate::{
-    ipc::{IpcFlags, IpcId, IpcNamespace},
+    ipc::{IpcAccess, IpcFlags, IpcId, IpcNamespace},
     prelude::*,
     process::{Pid, PidIdentity, PidNamespace},
 };
@@ -22,9 +22,9 @@ use crate::{
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(crate) struct SemBuf {
-    sem_num: u16,
-    sem_op: i16,
-    sem_flags: i16,
+    pub(super) sem_num: u16,
+    pub(super) sem_op: i16,
+    pub(super) sem_flags: i16,
 }
 
 #[repr(u16)]
@@ -55,6 +55,8 @@ pub(super) struct PendingOp {
     status: Arc<AtomicStatus>,
     waker: Option<Arc<Waker>>,
     pid: Arc<PidIdentity>,
+    has_repeated_alter: bool,
+    undo: Option<UndoRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,17 +72,16 @@ impl PendingOp {
             if op.sem_num as usize >= num_sems {
                 return_errno_with_message!(Errno::EFBIG, "the semaphore number is out of bounds");
             }
-            if IpcFlags::from_bits_truncate(op.sem_flags as u32).contains(IpcFlags::SEM_UNDO) {
-                // TODO: Add support for the `SEM_UNDO` flag
-                return_errno_with_message!(Errno::EINVAL, "SEM_UNDO is not supported yet");
-            }
         }
 
+        let has_repeated_alter = check_dup_sops(&sops);
         Ok(Self {
             sops,
             status: Arc::new(AtomicStatus::new(Status::Pending)),
             waker: None,
             pid,
+            has_repeated_alter,
+            undo: None,
         })
     }
 
@@ -101,10 +102,19 @@ impl PendingOp {
     /// The caller should provide `sems` whose size matches the number used to construct this
     /// `PendingOp`. Otherwise, this method may panic.
     pub(super) fn blocker(&self, sems: &[Semaphore]) -> Result<PendingBlocker, Status> {
-        for op in self.sops.iter() {
+        for (index, op) in self.sops.iter().enumerate() {
             let sem_num = op.sem_num as usize;
             let sem = sems.get(sem_num).unwrap();
-            let val = sem.val();
+            let prior_delta: i32 = if self.has_repeated_alter {
+                self.sops[..index]
+                    .iter()
+                    .filter(|prior| prior.sem_num == op.sem_num)
+                    .map(|prior| i32::from(prior.sem_op))
+                    .sum()
+            } else {
+                0
+            };
+            let val = sem.val() + prior_delta;
 
             let flags = IpcFlags::from_bits_truncate(op.sem_flags as u32);
 
@@ -187,19 +197,13 @@ pub(crate) fn sem_op(
     ipc_ns: &Arc<IpcNamespace>,
     ctx: &Context,
 ) -> Result<()> {
-    let has_dup = check_dup_sops(&sops);
-    if has_dup {
-        warn!("Multiple operations on the same semaphore are not supported");
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "multiple operations on the same semaphore are not supported"
-        );
-    }
-
     let is_alter = check_alter_sop(&sops);
 
-    // TODO: Support permission check
-    warn!("Semaphore operation doesn't support permission check now");
+    let required = if is_alter {
+        IpcAccess::WRITE
+    } else {
+        IpcAccess::READ
+    };
 
     enum SemOpResult {
         Completed {
@@ -211,11 +215,19 @@ pub(crate) fn sem_op(
         },
     }
 
-    let sem_op_result = ipc_ns.with_sem_set(sem_id, PermissionMode::empty(), |sem_set| {
+    let sem_op_result = ipc_ns.with_sem_set(sem_id, required, ctx, |sem_set| {
         let mut pending_op =
             PendingOp::new(sops, ctx.process.pid_identity().clone(), sem_set.num_sems())?;
 
         let mut inner = sem_set.inner();
+        if pending_op.sops.iter().any(|op| {
+            IpcFlags::from_bits_truncate(op.sem_flags as u32).contains(IpcFlags::SEM_UNDO)
+        }) {
+            let list = ctx
+                .thread_local
+                .sem_undo(ctx.process.pid_identity().clone());
+            pending_op.undo = Some(list.register(sem_set, &mut inner)?);
+        }
 
         // Try to perform the operation without blocking
         if let Some(status) = perform_atomic_semop(&mut inner.sems, &mut pending_op) {
@@ -289,7 +301,7 @@ pub(crate) fn sem_op(
 
     if matches!(status.load(Ordering::Relaxed), Status::Pending) {
         // Remove and check again to avoid race conditions
-        let _ = ipc_ns.with_sem_set(sem_id, PermissionMode::empty(), |sem_set| {
+        let _ = ipc_ns.with_sem_set(sem_id, IpcAccess::empty(), ctx, |sem_set| {
             let mut inner = sem_set.inner();
             let pending_ops = if is_alter {
                 &mut inner.pending_alter
@@ -458,6 +470,12 @@ fn perform_atomic_semop(sems: &mut [Semaphore], pending_op: &mut PendingOp) -> O
         Ok(PendingBlocker::NotBlock) => (),
         Ok(PendingBlocker::Zero(_) | PendingBlocker::Decrease(_)) => return None,
         Err(status) => return Some(status),
+    }
+
+    if let Some(undo) = &pending_op.undo
+        && let Err(status) = undo.apply(&pending_op.sops)
+    {
+        return Some(status);
     }
 
     // Success, do operation

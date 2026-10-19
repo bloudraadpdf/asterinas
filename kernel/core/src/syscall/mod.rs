@@ -186,6 +186,8 @@ mod statx;
 mod symlink;
 mod sync;
 mod sysinfo;
+mod sysv_msg;
+mod sysv_shm;
 mod tgkill;
 mod time;
 mod timer_create;

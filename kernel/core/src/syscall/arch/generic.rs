@@ -164,6 +164,8 @@ macro_rules! import_generic_syscall_entries {
             symlink::sys_symlinkat,
             sync::{sys_sync, sys_syncfs},
             sysinfo::sys_sysinfo,
+            sysv_msg::{sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd},
+            sysv_shm::{sys_shmat, sys_shmctl, sys_shmdt, sys_shmget},
             tgkill::{sys_tgkill, sys_tkill},
             timer_create::{sys_timer_create, sys_timer_delete},
             timer_settime::{sys_timer_gettime, sys_timer_settime},
@@ -363,10 +365,18 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_GETEGID = 177                => sys_getegid(args[..0]);
             SYS_GETTID = 178                 => sys_gettid(args[..0]);
             SYS_SYSINFO = 179                => sys_sysinfo(args[..1]);
+            SYS_MSGGET = 186                 => sys_msgget(args[..2]);
+            SYS_MSGCTL = 187                 => sys_msgctl(args[..3]);
+            SYS_MSGRCV = 188                 => sys_msgrcv(args[..5]);
+            SYS_MSGSND = 189                 => sys_msgsnd(args[..4]);
             SYS_SEMGET = 190                 => sys_semget(args[..3]);
             SYS_SEMCTL = 191                 => sys_semctl(args[..4]);
             SYS_SEMTIMEDOP = 192             => sys_semtimedop(args[..4]);
             SYS_SEMOP = 193                  => sys_semop(args[..3]);
+            SYS_SHMGET = 194                 => sys_shmget(args[..3]);
+            SYS_SHMCTL = 195                 => sys_shmctl(args[..3]);
+            SYS_SHMAT = 196                  => sys_shmat(args[..3]);
+            SYS_SHMDT = 197                  => sys_shmdt(args[..1]);
             SYS_SOCKET = 198                 => sys_socket(args[..3]);
             SYS_SOCKETPAIR = 199             => sys_socketpair(args[..4]);
             SYS_BIND = 200                   => sys_bind(args[..3]);

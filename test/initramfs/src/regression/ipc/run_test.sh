@@ -9,5 +9,9 @@ set -e
 ./pipe/short_rw
 
 ./sem/sem
+./sem/control_lifetime
+
+./msg/queue_budget
 
 ./shm/posix_shm
+./shm/attachment_lifetime

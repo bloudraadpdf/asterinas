@@ -24,6 +24,7 @@ use crate::{
         file::file_table::{FdFlags, FileTable, RawFileDesc},
         thread_info::ThreadFsInfo,
     },
+    ipc::semaphore::system_v::undo::SemUndoOwner,
     prelude::*,
     process::{
         NsProxy, PidAllocation, PidIdentity, UserNamespace, pid_file::PidFile,
@@ -310,6 +311,15 @@ pub(crate) fn clone_child(
     clone_args: CloneArgs,
 ) -> Result<Tid> {
     clone_args.check(ctx)?;
+    if clone_args
+        .flags
+        .contains(CloneFlags::CLONE_NEWIPC | CloneFlags::CLONE_SYSVSEM)
+    {
+        return_errno_with_message!(
+            Errno::EINVAL,
+            "a new IPC namespace cannot share semaphore undo state"
+        );
+    }
 
     let namespaces = ChildNamespaces::new(ctx, clone_args.flags)?;
 
@@ -422,9 +432,6 @@ fn clone_child_task(
         ..
     } = ctx;
 
-    // Clone system V semaphore
-    clone_sysvsem(clone_flags)?;
-
     // Clone VMAR
     let child_vmar = thread_local
         .vmar()
@@ -493,6 +500,11 @@ fn clone_child_task(
         .fpu_context(child_fpu_context)
         .user_ns(child_user_ns)
         .ns_proxy(child_ns_proxy)
+        .sem_undo(clone_sysvsem(
+            ctx,
+            clone_flags,
+            ctx.process.pid_identity().clone(),
+        ))
         .default_timer_slack_ns(default_timer_slack_ns);
         #[cfg(target_arch = "x86_64")]
         {
@@ -569,9 +581,6 @@ fn clone_child_process(
     // Clone signal dispositions
     let child_sig_dispositions = clone_sighand(process.sig_dispositions(), clone_flags);
 
-    // Clone System V semaphore
-    clone_sysvsem(clone_flags)?;
-
     // Clone FPU context
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
 
@@ -625,6 +634,7 @@ fn clone_child_process(
             .fpu_context(child_fpu_context)
             .user_ns(child_user_ns.clone())
             .ns_proxy(child_ns_proxy)
+            .sem_undo(clone_sysvsem(ctx, clone_flags, child_identity.clone()))
             .default_timer_slack_ns(default_timer_slack_ns)
         };
         #[cfg(target_arch = "x86_64")]
@@ -812,11 +822,15 @@ fn clone_sighand(
     }
 }
 
-fn clone_sysvsem(clone_flags: CloneFlags) -> Result<()> {
-    if clone_flags.contains(CloneFlags::CLONE_SYSVSEM) {
-        warn!("CLONE_SYSVSEM is not supported now");
-    }
-    Ok(())
+fn clone_sysvsem(
+    ctx: &Context,
+    flags: CloneFlags,
+    child_pid: Arc<PidIdentity>,
+) -> Option<SemUndoOwner> {
+    flags.contains(CloneFlags::CLONE_SYSVSEM).then(|| {
+        ctx.thread_local
+            .share_sem_undo(ctx.process.pid_identity().clone(), child_pid)
+    })
 }
 
 fn clone_pidfd(

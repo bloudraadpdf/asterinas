@@ -11,9 +11,10 @@ use ostd::{
 use super::cpu_sync::CpuSync;
 use crate::{
     fs::{file::file_table::FileTable, thread_info::ThreadFsInfo},
+    ipc::semaphore::system_v::undo::{SemUndo, SemUndoOwner},
     prelude::*,
     process::{
-        NsProxy, UserNamespace,
+        NsProxy, PidIdentity, UserNamespace,
         signal::{SigStack, sig_mask::SigMask},
     },
     vm::vmar::VmarHandle,
@@ -52,6 +53,7 @@ pub(crate) struct ThreadLocal {
     // Namespaces.
     user_ns: RefCell<Arc<UserNamespace>>,
     ns_proxy: RefCell<Option<Arc<NsProxy>>>,
+    sem_undo: RefCell<Option<SemUndoOwner>>,
 }
 
 impl ThreadLocal {
@@ -65,6 +67,7 @@ impl ThreadLocal {
         supp_user_context: SuppUserContext,
         user_ns: Arc<UserNamespace>,
         ns_proxy: Arc<NsProxy>,
+        sem_undo: Option<SemUndoOwner>,
     ) -> Self {
         Self {
             set_child_tid: Cell::new(set_child_tid),
@@ -79,7 +82,30 @@ impl ThreadLocal {
             orig_syscall_ret: Cell::new(None),
             user_ns: RefCell::new(user_ns),
             ns_proxy: RefCell::new(Some(ns_proxy)),
+            sem_undo: RefCell::new(sem_undo),
         }
+    }
+
+    pub(crate) fn sem_undo(&self, pid: Arc<PidIdentity>) -> Arc<SemUndo> {
+        self.sem_undo
+            .borrow_mut()
+            .get_or_insert_with(|| SemUndoOwner::new(pid))
+            .access()
+    }
+
+    pub(in crate::process) fn share_sem_undo(
+        &self,
+        parent_pid: Arc<PidIdentity>,
+        child_pid: Arc<PidIdentity>,
+    ) -> SemUndoOwner {
+        self.sem_undo
+            .borrow_mut()
+            .get_or_insert_with(|| SemUndoOwner::new(parent_pid))
+            .share_for(child_pid)
+    }
+
+    pub(in crate::process) fn take_sem_undo(&self) -> Option<SemUndoOwner> {
+        self.sem_undo.borrow_mut().take()
     }
 
     pub(crate) fn set_child_tid(&self) -> &Cell<Vaddr> {

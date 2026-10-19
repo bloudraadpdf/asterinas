@@ -158,19 +158,9 @@ FN_TEST(semget_accept_arbitrary_keys)
 	int semid = TEST_SUCC(semget(CUSTOM_KEY, 1, IPC_CREAT | 0600));
 	int semid2;
 
-	/*
-	 * FIXME: Asterinas rejects keys that hash to the same ID.
-	 */
-#ifdef __asterinas__
-	TEST_ERRNO(semget(CUSTOM_KEY + SEMMNI, 1, IPC_CREAT | 0600), ENOSPC);
-	TEST_ERRNO(semget(CUSTOM_KEY + SEMMNI, 0, 0), ENOENT);
-	semid2 = TEST_RES(semget(CUSTOM_KEY + 1, 1, IPC_CREAT | 0600),
-			  _ret != semid);
-#else
 	TEST_ERRNO(semget(CUSTOM_KEY + SEMMNI, 0, 0), ENOENT);
 	semid2 = TEST_RES(semget(CUSTOM_KEY + SEMMNI, 1, IPC_CREAT | 0600),
 			  _ret != semid);
-#endif
 
 	TEST_RES(semget(CUSTOM_KEY, 0, IPC_CREAT | 0600), _ret == semid);
 	TEST_RES(semget(CUSTOM_KEY, 1, IPC_CREAT | 0600), _ret == semid);
@@ -413,16 +403,7 @@ FN_TEST(semop_duplicate_semnum)
 	};
 	int semid = TEST_SUCC(create_sem_set(1));
 
-	/*
-	 * FIXME: Linux supports multiple operations on the same semaphore in a
-	 * single `semop`, but Asterinas rejects this unsupported case before
-	 * applying any operation.
-	 */
-#ifdef __asterinas__
-	TEST_ERRNO(semop(semid, ops, 2), EOPNOTSUPP);
-#else
 	TEST_SUCC(semop(semid, ops, 2));
-#endif
 	TEST_RES(get_sem_val(semid, 0), _ret == 0);
 
 	TEST_SUCC(remove_sem_set(semid));
@@ -438,17 +419,8 @@ FN_TEST(semop_sem_undo)
 	};
 	int semid = TEST_SUCC(create_sem_set(1));
 
-	/*
-	 * FIXME: Linux applies `SEM_UNDO`, but Asterinas rejects the flag as it
-	 * is not supported.
-	 */
-#ifdef __asterinas__
-	TEST_ERRNO(semop(semid, &op, 1), EINVAL);
-	TEST_RES(get_sem_val(semid, 0), _ret == 0);
-#else
 	TEST_SUCC(semop(semid, &op, 1));
 	TEST_RES(get_sem_val(semid, 0), _ret == 1);
-#endif
 
 	TEST_SUCC(remove_sem_set(semid));
 }

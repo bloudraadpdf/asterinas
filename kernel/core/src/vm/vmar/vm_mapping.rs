@@ -28,6 +28,7 @@ use crate::{
         file::{FileLike, Mappable, MappedObject},
         vfs::{inode::Inode, path::PathResolver},
     },
+    ipc::shared_memory::{ShmAttachmentId, ShmMapping},
     prelude::*,
     process::LockedHeap,
     vm::{
@@ -56,6 +57,7 @@ use crate::{
 ///
 /// [`Vmar`]: crate::vm::vmar::Vmar
 pub(crate) struct VmMapping {
+    shm: Option<ShmMapping>,
     /// The size of mapping, in bytes. The map size can even be larger than the
     /// size of VMO. Those pages outside VMO range cannot be read or write.
     ///
@@ -122,6 +124,7 @@ impl VmMapping {
         perms: VmPerms,
     ) -> Self {
         Self {
+            shm: None,
             map_size,
             map_to_addr,
             mapped_mem,
@@ -134,6 +137,7 @@ impl VmMapping {
 
     pub(super) fn new_fork(&self) -> VmMapping {
         VmMapping {
+            shm: self.shm.clone(),
             mapped_mem: self.mapped_mem.dup(),
             file: self.file.clone(),
             ..*self
@@ -149,12 +153,26 @@ impl VmMapping {
     pub(super) fn clone_range_for_remap_at(&self, range: Range<Vaddr>, va: Vaddr) -> VmMapping {
         let offset_in_mapping = range.start - self.map_to_addr;
         VmMapping {
+            shm: self.shm.clone(),
             map_size: NonZeroUsize::new(range.end - range.start).unwrap(),
             map_to_addr: va,
             mapped_mem: self.mapped_mem.dup_at_offset(offset_in_mapping),
             file: self.file.clone(),
             ..*self
         }
+    }
+
+    pub(super) fn install_shm(&mut self, mapping: ShmMapping) {
+        debug_assert!(self.shm.is_none());
+        self.shm = Some(mapping);
+    }
+
+    pub(super) fn shm_origin(&self) -> Option<(Vaddr, ShmAttachmentId)> {
+        let shm = self.shm.as_ref()?;
+        Some((
+            self.map_to_addr.checked_sub(self.vmo()?.offset())?,
+            shm.id(),
+        ))
     }
 
     /// Returns the mapping's start address.
@@ -733,6 +751,7 @@ impl VmMapping {
         let l_mapped_mem = self.mapped_mem;
 
         let left = Self {
+            shm: self.shm.clone(),
             map_size: NonZeroUsize::new(left_size).unwrap(),
             map_to_addr: self.map_to_addr,
             mapped_mem: l_mapped_mem,
@@ -1056,6 +1075,7 @@ impl Drop for MappedVmo {
 fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     let is_adjacent = left.map_end() == right.map_to_addr();
     let is_type_equal = left.map_mode == right.map_mode
+        && left.shm.as_ref().map(ShmMapping::id) == right.shm.as_ref().map(ShmMapping::id)
         && left.handle_page_faults_around == right.handle_page_faults_around
         && left.perms == right.perms
         && match (&left.file, &right.file) {
@@ -1095,6 +1115,7 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     let map_size = NonZeroUsize::new(left.map_size() + right.map_size()).unwrap();
 
     Some(VmMapping {
+        shm: left.shm.clone(),
         map_size,
         mapped_mem,
         file: left.file.clone(),

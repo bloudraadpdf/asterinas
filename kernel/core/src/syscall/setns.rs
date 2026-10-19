@@ -21,8 +21,9 @@ use crate::{
     net::uts_ns::UtsNamespace,
     prelude::*,
     process::{
-        CloneFlags, ContextSetNsAdminApi, NsProxy, NsProxyBuilder, PidFile, PidNamespace,
-        check_unsupported_ns_flags, credentials::capabilities::CapSet, posix_thread::AsPosixThread,
+        CloneFlags, ContextSetNsAdminApi, ContextUnshareAdminApi, NsProxy, NsProxyBuilder, PidFile,
+        PidNamespace, check_unsupported_ns_flags, credentials::capabilities::CapSet,
+        posix_thread::AsPosixThread,
     },
     security::lsm::hooks as lsm_hooks,
     syscall::SyscallReturn,
@@ -39,11 +40,15 @@ pub(super) fn sys_setns(fd: RawFileDesc, flags: u32, ctx: &Context) -> Result<Sy
         file_table_locked.get_file(fd.try_into()?)?.clone()
     };
 
-    let new_ns_proxy = if let Some(pid_file) = file.downcast_ref::<PidFile>() {
+    let (new_ns_proxy, reset_undo) = if let Some(pid_file) = file.downcast_ref::<PidFile>() {
         build_proxy_from_pid_file(pid_file, ns_type_flags, ctx)?
     } else {
         build_proxy_from_ns_file(file.as_ref(), ns_type_flags, ctx)?
     };
+
+    if reset_undo {
+        ctx.unshare_sysvsem();
+    }
 
     // Install the newly created `NsProxy`.
     ctx.set_ns_proxy(Arc::new(new_ns_proxy));
@@ -55,7 +60,7 @@ fn build_proxy_from_pid_file(
     pid_file: &PidFile,
     flags: CloneFlags,
     ctx: &Context,
-) -> Result<NsProxy> {
+) -> Result<(NsProxy, bool)> {
     if flags.is_empty() {
         return_errno_with_message!(Errno::EINVAL, "flags must be specified with a PID file");
     }
@@ -111,14 +116,14 @@ fn build_proxy_from_pid_file(
 
     // TODO: Support setting other namespaces from the target process.
 
-    Ok(builder.build())
+    Ok((builder.build(), flags.contains(CloneFlags::CLONE_NEWIPC)))
 }
 
 fn build_proxy_from_ns_file(
     file: &dyn FileLike,
     flags: CloneFlags,
     ctx: &Context,
-) -> Result<NsProxy> {
+) -> Result<(NsProxy, bool)> {
     if flags.contains(CloneFlags::CLONE_NEWUSER) {
         return_errno_with_message!(Errno::EINVAL, "setting a user namespace is not supported");
     }
@@ -134,13 +139,16 @@ fn build_proxy_from_ns_file(
 
     let mut builder = NsProxyBuilder::new(current_proxy);
 
+    let mut reset_undo = false;
     #[expect(clippy::nonminimal_bool)]
     let applied = false
         || try_apply_ns_from_inode::<CgroupNamespace>(inode_handle, flags, |ns| {
             set_cgroup_ns(&mut builder, &ns, ctx)
         })?
         || try_apply_ns_from_inode::<IpcNamespace>(inode_handle, flags, |ns| {
-            set_ipc_ns(&mut builder, &ns, ctx)
+            set_ipc_ns(&mut builder, &ns, ctx)?;
+            reset_undo = true;
+            Ok(())
         })?
         || try_apply_ns_from_inode::<MountNamespace>(inode_handle, flags, |ns| {
             set_mnt_ns(&mut builder, &ns, ctx)
@@ -157,7 +165,7 @@ fn build_proxy_from_ns_file(
         return_errno_with_message!(Errno::EINVAL, "invalid flags are specified with a ns file");
     }
 
-    Ok(builder.build())
+    Ok((builder.build(), reset_undo))
 }
 
 fn try_apply_ns_from_inode<T: NsCommonOps>(
