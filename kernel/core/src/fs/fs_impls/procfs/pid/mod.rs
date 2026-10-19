@@ -56,6 +56,10 @@ impl PidDirOps {
 }
 
 impl ProcDirOps for PidDirOps {
+    fn is_removed(&self) -> bool {
+        self.pid_entry().type_().is_none()
+    }
+
     fn owner_thread(&self) -> Option<Arc<Thread>> {
         self.0.thread()
     }

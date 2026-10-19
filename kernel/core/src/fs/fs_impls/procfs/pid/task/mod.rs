@@ -144,6 +144,10 @@ impl TidDirOps {
 }
 
 impl ProcDirOps for TidDirOps {
+    fn is_removed(&self) -> bool {
+        self.thread().is_none()
+    }
+
     fn owner_thread(&self) -> Option<Arc<Thread>> {
         self.thread()
     }

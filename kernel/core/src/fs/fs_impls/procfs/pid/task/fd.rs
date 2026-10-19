@@ -236,7 +236,7 @@ impl ProcSymOps for FileSymOps {
 
     fn read_link(&self) -> Result<SymbolicLink> {
         let Some(thread) = self.tid_dir_ops.thread() else {
-            return_errno_with_message!(Errno::ESRCH, "the thread does not exist");
+            return_errno_with_message!(Errno::ENOENT, "the thread does not exist");
         };
         let posix_thread = thread.as_posix_thread().unwrap();
 
