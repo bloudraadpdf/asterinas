@@ -139,7 +139,7 @@ fn ostd_main_body(main_fn_name: &Ident) -> proc_macro2::TokenStream {
 ///
 /// ```ignore
 /// use core::alloc::Layout;
-/// use ostd::{mm::{frame::GlobalFrameAllocator, Paddr}, global_frame_allocator};
+/// use ostd::{mm::{AllocationPriority, frame::GlobalFrameAllocator, Paddr}, global_frame_allocator};
 ///
 /// // Of course it won't work because all allocations will fail.
 /// // It's just an example.
@@ -149,7 +149,7 @@ fn ostd_main_body(main_fn_name: &Ident) -> proc_macro2::TokenStream {
 /// struct MyFrameAllocator;
 ///
 /// impl GlobalFrameAllocator for MyFrameAllocator {
-///     fn alloc(&self, _layout: Layout) -> Option<Paddr> { None }
+///     fn alloc(&self, _layout: Layout, _priority: AllocationPriority) -> Option<Paddr> { None }
 ///     fn dealloc(&self, _paddr: Paddr, _size: usize) {}
 /// }
 /// ```

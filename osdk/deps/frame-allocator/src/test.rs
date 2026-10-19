@@ -6,7 +6,7 @@ use core::alloc::Layout;
 
 use ostd::{
     mm::{
-        FrameAllocOptions, HasPaddr, PAGE_SIZE, Paddr, Segment, UniqueFrame,
+        AllocationPriority, FrameAllocOptions, HasPaddr, PAGE_SIZE, Paddr, Segment, UniqueFrame,
         frame::GlobalFrameAllocator,
     },
     prelude::ktest,
@@ -31,7 +31,7 @@ fn frame_allocator_alloc_layout_match() {
 fn assert_allocation_well_formed(layout: Layout) {
     let instance = FrameAllocator;
 
-    let allocated = instance.alloc(layout).unwrap();
+    let allocated = instance.alloc(layout, AllocationPriority::Kernel).unwrap();
     assert_eq!(
         allocated % layout.align(),
         0,
@@ -86,4 +86,31 @@ impl Drop for MockMemoryRegion {
         let seg = Segment::from_unused(self.addr..self.addr + self.size, |_| ()).unwrap();
         drop(seg);
     }
+}
+
+#[ktest]
+fn normal_allocations_leave_frames_for_kernel_recovery() {
+    let capacity = super::load_total_free_size() / PAGE_SIZE;
+    let mut frames = alloc::vec::Vec::with_capacity(capacity);
+    let mut options = FrameAllocOptions::new();
+    options.priority(AllocationPriority::Normal);
+    let mut exhausted = false;
+    for _ in 0..capacity {
+        match options.alloc_frame() {
+            Ok(frame) => frames.push(frame),
+            Err(_) => {
+                exhausted = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        exhausted,
+        "ordinary frames must exhaust before the kernel reserve"
+    );
+    let kernel_frame = FrameAllocOptions::new()
+        .alloc_frame()
+        .expect("kernel allocation must survive ordinary frame exhaustion");
+    drop(kernel_frame);
+    drop(frames);
 }
