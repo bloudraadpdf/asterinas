@@ -16,7 +16,7 @@ use crate::{
     net::socket::util::ioctl::socket_ioctl,
     prelude::*,
     process::PidNamespace,
-    util::{MultiRead, MultiWrite, ioctl::RawIoctl},
+    util::{MultiRead, MultiWrite, VmReaderArray, VmWriterArray, ioctl::RawIoctl},
 };
 
 pub(crate) mod ip;
@@ -29,16 +29,34 @@ pub(crate) mod vsock;
 mod private {
     use core::time::Duration;
 
-    use super::util::RecvFlags;
-    use crate::{events::IoEvents, prelude::*, process::signal::Pollable, util::ioctl::RawIoctl};
+    use super::{
+        SocketCommon,
+        util::{MessageHeader, PendingError, RecvFlags, RecvOutput},
+    };
+    use crate::{
+        events::IoEvents, fs::file::FileCommon, prelude::*, process::signal::Pollable,
+        util::ioctl::RawIoctl,
+    };
 
     /// Common methods for sockets, but private to the network module.
     ///
     /// These are implementation details of sockets, so shouldn't be accessed outside the network
     /// module. Therefore, the whole trait is sealed.
     pub(crate) trait SocketPrivate: Pollable {
+        fn socket_common(&self) -> &SocketCommon;
+
+        fn pending_error(&self) -> &PendingError {
+            &self.socket_common().error
+        }
+
+        fn common(&self) -> &FileCommon {
+            &self.socket_common().file
+        }
+
         /// Returns whether the socket is in non-blocking mode.
-        fn is_nonblocking(&self) -> bool;
+        fn is_nonblocking(&self) -> bool {
+            self.common().is_nonblocking()
+        }
 
         /// Blocks until some events occur to complete I/O operations.
         ///
@@ -75,7 +93,7 @@ mod private {
             &self,
             flags: RecvFlags,
             timeout: Option<Duration>,
-            try_op: F,
+            mut try_op: F,
         ) -> Result<R>
         where
             Self: Sized,
@@ -85,7 +103,12 @@ mod private {
                 IoEvents::IN,
                 timeout,
                 flags.contains(RecvFlags::MSG_DONTWAIT),
-                try_op,
+                || {
+                    if !flags.contains(RecvFlags::MSG_ERRQUEUE) {
+                        self.pending_error().check()?;
+                    }
+                    try_op()
+                },
             )
         }
 
@@ -106,6 +129,23 @@ mod private {
                 })
         }
 
+        fn recv_stream(
+            &self,
+            flags: RecvFlags,
+            timeout: Option<Duration>,
+            try_op: impl FnMut() -> Result<usize>,
+        ) -> Result<(RecvOutput, MessageHeader)>
+        where
+            Self: Sized,
+        {
+            flags.warn_if_unsupported();
+            let count = self.block_on_recv(flags, timeout, try_op)?;
+            Ok((
+                RecvOutput::new_for_stream(count),
+                MessageHeader::new(None, Vec::new()),
+            ))
+        }
+
         /// Handles commands specific to its protocol or socket type.
         fn protocol_ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
             return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown");
@@ -113,8 +153,38 @@ mod private {
     }
 }
 
+pub(crate) struct SocketCommon {
+    file: FileCommon,
+    error: Arc<util::PendingError>,
+}
+
+impl core::ops::Deref for SocketCommon {
+    type Target = FileCommon;
+
+    fn deref(&self) -> &FileCommon {
+        &self.file
+    }
+}
+
 /// Operations defined on a socket.
 pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
+    fn take_error(&self) -> Option<Error> {
+        self.pending_error()
+            .take()
+            .or_else(|| self.transport_error())
+    }
+
+    fn transport_error(&self) -> Option<Error> {
+        None
+    }
+
+    fn get_error_option(&self, option: &mut dyn SocketOption) -> bool {
+        let Some(option) = option.as_any_mut().downcast_mut::<options::Error>() else {
+            return false;
+        };
+        option.set(self.take_error());
+        true
+    }
     /// Assigns the specified address to the socket.
     fn bind(&self, _socket_addr: SocketAddr) -> Result<()> {
         return_errno_with_message!(Errno::EOPNOTSUPP, "bind() is not supported");
@@ -203,9 +273,6 @@ pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)>;
-
-    /// Returns the common state for this socket.
-    fn common(&self) -> &FileCommon;
 }
 
 impl<T: Socket + 'static> FileLike for T {
@@ -229,6 +296,22 @@ impl<T: Socket + 'static> FileLike for T {
         )
     }
 
+    fn readv(&self, writers: &mut VmWriterArray) -> Result<usize> {
+        if writers.is_empty() {
+            return Ok(0);
+        }
+        self.recvmsg(writers, RecvFlags::empty())
+            .map(|(output, _)| output.len())
+    }
+
+    fn writev(&self, readers: &mut VmReaderArray) -> Result<usize> {
+        self.sendmsg(
+            readers,
+            MessageHeader::new(None, Vec::new()),
+            SendFlags::empty(),
+        )
+    }
+
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
         socket_ioctl(self, raw_ioctl)
     }
@@ -242,7 +325,7 @@ impl<T: Socket + 'static> FileLike for T {
     }
 
     fn common(&self) -> &FileCommon {
-        Socket::common(self)
+        private::SocketPrivate::common(self)
     }
 
     fn dump_proc_fdinfo(
@@ -277,14 +360,17 @@ impl<T: Socket + 'static> FileLike for T {
 }
 
 /// Create the `FileCommon` for the socket files.
-fn new_socket_common(is_nonblocking: bool) -> FileCommon {
+fn new_socket_common(is_nonblocking: bool) -> SocketCommon {
     let status_flags = if is_nonblocking {
         StatusFlags::O_NONBLOCK
     } else {
         StatusFlags::empty()
     };
     // Reference: <https://elixir.bootlin.com/linux/v7.0/source/net/socket.c#L483>.
-    FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags)
+    SocketCommon {
+        file: FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags),
+        error: Arc::new(util::PendingError::new()),
+    }
 }
 
 fn restart_error(error: Error, timeout: Option<Duration>) -> Error {

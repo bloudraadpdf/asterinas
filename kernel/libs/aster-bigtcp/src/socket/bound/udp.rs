@@ -4,15 +4,20 @@ use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
     sync::Arc,
+    vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Duration,
+};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
 use smoltcp::{
     iface::Context,
-    socket::udp::{BindError, UdpMetadata},
+    socket::udp::BindError,
+    storage::SliceLike,
     wire::{IpAddress, IpEndpoint, IpProtocol, IpRepr, UdpRepr},
 };
 
@@ -22,9 +27,9 @@ use crate::{
     ext::Ext,
     iface::{BoundUdpPort, Iface, IsUnicast, PacketSlice},
     socket::{
-        RawUdpSocket, UDP_SEND_PAYLOAD_LEN,
+        UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN,
         event::{SocketEventObserver, SocketEvents},
-        unbound::{UDP_METADATA_LEN, new_udp_socket},
+        unbound::UDP_METADATA_LEN,
     },
 };
 
@@ -43,12 +48,26 @@ struct Shared<E: Ext> {
 static NEXT_BINDING_ID: AtomicU64 = AtomicU64::new(1);
 
 struct State {
-    socket: Box<RawUdpSocket>,
+    incoming: VecDeque<ReceivedDatagram>,
+    incoming_bytes: usize,
     outgoing: BTreeMap<u32, VecDeque<Datagram>>,
     outgoing_bytes: usize,
     outgoing_packets: usize,
     connected: Option<(IpEndpoint, IpAddress)>,
     closed: bool,
+}
+
+/// The addresses and real-time timestamp recorded when a datagram arrives.
+#[derive(Clone, Copy, Debug)]
+pub struct UdpReceiveMetadata {
+    pub endpoint: IpEndpoint,
+    pub destination: IpEndpoint,
+    pub timestamp: Duration,
+}
+
+struct ReceivedDatagram {
+    metadata: UdpReceiveMetadata,
+    payload: Box<[u8]>,
 }
 
 struct Datagram {
@@ -125,13 +144,23 @@ impl<E: Ext> UdpSocketBg<E> {
         if !state.accepts_peer(ip_repr, udp_repr) {
             return false;
         }
-        state.socket.process(
-            cx,
-            smoltcp::phy::PacketMeta::default(),
-            ip_repr,
-            udp_repr,
-            udp_payload,
-        );
+        let length = udp_payload.len();
+        if state.incoming.len() >= UDP_METADATA_LEN
+            || length > UDP_RECV_PAYLOAD_LEN - state.incoming_bytes
+        {
+            return true;
+        }
+        let metadata = UdpReceiveMetadata {
+            endpoint: IpEndpoint::new(ip_repr.src_addr(), udp_repr.src_port),
+            destination: IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
+            timestamp: E::receive_timestamp(),
+        };
+        let mut payload = vec![0; length].into_boxed_slice();
+        udp_payload.copy_to_slice(&mut payload);
+        state
+            .incoming
+            .push_back(ReceivedDatagram { metadata, payload });
+        state.incoming_bytes += length;
         drop(state);
         self.shared.observer.on_events(SocketEvents::CAN_RECV);
         true
@@ -201,21 +230,14 @@ impl<E: Ext> UdpSocket<E> {
         else {
             return Err((bounds, BindError::InvalidState));
         };
-        let mut socket = new_udp_socket();
-        let local_endpoint = {
-            let interface = bounds[0].iface().common().interface();
-            IpEndpoint::new(
-                interface.map_broadcast_to_local(endpoint.addr),
-                endpoint.port,
-            )
-        };
-        if let Err(error) = socket.bind(local_endpoint) {
-            return Err((bounds, error));
+        if endpoint.port == 0 {
+            return Err((bounds, BindError::Unaddressable));
         }
         let shared = Arc::new(Shared {
             binding_id,
             state: SpinLock::new(State {
-                socket,
+                incoming: VecDeque::new(),
+                incoming_bytes: 0,
                 outgoing: BTreeMap::new(),
                 outgoing_bytes: 0,
                 outgoing_packets: 0,
@@ -339,21 +361,20 @@ impl<E: Ext> UdpSocket<E> {
 
     pub fn recv<F, R>(&self, behavior: ReceiveBehavior, copy: F) -> Result<R, RecvError>
     where
-        F: FnOnce(&[u8], UdpMetadata) -> R,
+        F: FnOnce(&[u8], UdpReceiveMetadata) -> R,
     {
         let mut state = self.first.shared.state.lock();
-        let (data, meta) = match behavior {
-            ReceiveBehavior::Recv => state.socket.recv()?,
-            ReceiveBehavior::Peek => {
-                let (data, meta) = state.socket.peek()?;
-                (data, *meta)
-            }
-        };
-        Ok(copy(data, meta))
+        let message = state.incoming.front().ok_or(RecvError::Exhausted)?;
+        let result = copy(&message.payload, message.metadata);
+        if behavior.will_consume_data() {
+            let message = state.incoming.pop_front().unwrap();
+            state.incoming_bytes -= message.payload.len();
+        }
+        Ok(result)
     }
 
     pub fn can_recv(&self) -> bool {
-        self.first.shared.state.lock().socket.can_recv()
+        !self.first.shared.state.lock().incoming.is_empty()
     }
 
     pub fn can_send(&self) -> bool {
@@ -367,7 +388,8 @@ impl<E: Ext> Drop for UdpSocket<E> {
         {
             let mut state = self.first.shared.state.lock();
             state.closed = true;
-            state.socket.close();
+            state.incoming.clear();
+            state.incoming_bytes = 0;
             state.outgoing.clear();
             state.outgoing_bytes = 0;
             state.outgoing_packets = 0;

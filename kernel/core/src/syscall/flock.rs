@@ -14,17 +14,17 @@ pub(super) fn sys_flock(raw_fd: RawFileDesc, ops: i32, ctx: &Context) -> Result<
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
-    let inode_file = file.as_inode_handle_or_err()?;
+    let common = file.common();
     let ops: FlockOps = FlockOps::from_i32(ops)?;
     if ops.contains(FlockOps::LOCK_UN) {
-        inode_file.unlock_flock()?;
+        common.unlock_flock()?;
     } else {
         let is_nonblocking = ops.contains(FlockOps::LOCK_NB);
         let flock = {
             let type_ = FlockType::from(ops);
-            FlockItem::new(&file, type_)
+            FlockItem::new(common.description_id(), type_)
         };
-        inode_file
+        common
             .set_flock(flock, is_nonblocking)
             .map_err(|err| match err.error() {
                 Errno::EINTR => Error::new(Errno::ERESTARTSYS),

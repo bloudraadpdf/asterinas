@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use ostd::sync::WaitQueue;
+use ostd::sync::{WaitQueue, Waiter};
 use spin::Once;
 
 use crate::{
@@ -15,11 +15,12 @@ use crate::{
             UnixSocketAddr,
             addr::{UnixSocketAddrBound, UnixSocketAddrKey},
             ctrl_msg::AuxiliaryData,
+            send_buffer::{SendBuffer, SendCharge},
         },
-        util::{ControlMessage, RecvFlags, RecvOutput},
+        util::{ControlMessage, PendingError, RecvFlags, RecvOutput},
     },
     prelude::*,
-    process::signal::Pollee,
+    process::signal::{PollHandle, Pollee},
     util::{MultiRead, MultiWrite},
 };
 
@@ -29,11 +30,13 @@ pub(super) struct MessageQueue {
     is_pass_cred: AtomicBool,
     pollee: Pollee,
     send_wait_queue: WaitQueue,
+    space_pollee: Pollee,
+    pending_error: Arc<PendingError>,
 }
 
 struct Inner {
     messages: VecDeque<Message>,
-    total_length: usize,
+    peer: Option<Weak<MessageQueue>>,
     is_shutdown: bool,
 }
 
@@ -41,6 +44,14 @@ struct Message {
     bytes: Vec<u8>,
     aux: AuxiliaryData,
     src: UnixSocketAddr,
+    _charge: SendCharge,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SendWait {
+    Ready,
+    Memory,
+    Receiver,
 }
 
 impl MessageQueue {
@@ -51,11 +62,12 @@ impl MessageQueue {
         })
     }
 
-    pub(super) fn try_send(
+    fn try_send(
         &self,
         reader: &mut dyn MultiRead,
         aux_data: &mut AuxiliaryData,
         source: &MessageReceiver,
+        waiting: &mut SendWait,
     ) -> Result<usize> {
         let mut inner = self.inner.lock();
         let Some(inner) = inner.as_mut() else {
@@ -66,15 +78,36 @@ impl MessageQueue {
         }
 
         let len = reader.sum_lens();
-        if len > UNIX_DATAGRAM_DEFAULT_BUF_SIZE {
-            return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
-        }
-        if UNIX_DATAGRAM_DEFAULT_BUF_SIZE - inner.total_length < len {
+        let paired = inner
+            .peer
+            .as_ref()
+            .is_some_and(|peer| peer.ptr_eq(&Arc::downgrade(&source.queue)));
+        if inner.peer.is_some() && !paired {
             return_errno_with_message!(
-                Errno::EAGAIN,
-                "the receive buffer does not have enough space"
+                Errno::EPERM,
+                "the receiver is connected to a different peer"
             );
         }
+        if *waiting == SendWait::Memory && !source.send_buffer.is_writable() {
+            return_errno_with_message!(Errno::EAGAIN, "waiting for send memory to become writable");
+        }
+        *waiting = SendWait::Ready;
+
+        if !paired
+            && !core::ptr::eq(self, Arc::as_ptr(&source.queue))
+            && inner.messages.len() > MAX_DGRAM_QLEN
+        {
+            *waiting = SendWait::Receiver;
+            return_errno_with_message!(Errno::EAGAIN, "the receiver datagram queue is full");
+        }
+        let charge = source
+            .send_buffer
+            .charge(len, aux_data.allocated_bytes())
+            .inspect_err(|error| {
+                if error.error() == Errno::EAGAIN {
+                    *waiting = SendWait::Memory;
+                }
+            })?;
 
         let msg = {
             let mut bytes = vec![0; len];
@@ -89,13 +122,18 @@ impl MessageQueue {
 
             let src = source.queue.addr();
 
-            Message { bytes, aux, src }
+            Message {
+                bytes,
+                aux,
+                src,
+                _charge: charge,
+            }
         };
 
-        inner.total_length += msg.bytes.len();
         inner.messages.push_back(msg);
 
         self.pollee.notify(IoEvents::IN);
+        self.space_pollee.invalidate();
 
         Ok(len)
     }
@@ -104,22 +142,59 @@ impl MessageQueue {
         self.addr.get().cloned().unwrap_or(UnixSocketAddr::Unnamed)
     }
 
-    /// Blocks until the buffer is free and the `try_send` succeeds, or until interrupted.
-    pub(super) fn block_send<F, R>(&self, timeout: Option<Duration>, mut try_send: F) -> Result<R>
-    where
-        F: FnMut() -> Result<R>,
-    {
-        self.send_wait_queue
+    pub(super) fn poll_send_space(
+        &self,
+        source: &MessageReceiver,
+        mask: IoEvents,
+        poller: Option<&mut PollHandle>,
+    ) -> IoEvents {
+        if core::ptr::eq(self, Arc::as_ptr(&source.queue)) {
+            return mask & IoEvents::OUT;
+        }
+        self.space_pollee
+            .poll_with(mask & IoEvents::OUT, poller, || {
+                let inner = self.inner.lock();
+                let writable = inner.as_ref().is_none_or(|inner| {
+                    inner.is_shutdown
+                        || inner.peer.is_some()
+                        || inner.messages.len() <= MAX_DGRAM_QLEN
+                });
+                if writable {
+                    IoEvents::OUT
+                } else {
+                    IoEvents::empty()
+                }
+            })
+    }
+
+    pub(super) fn send(
+        &self,
+        reader: &mut dyn MultiRead,
+        aux: &mut AuxiliaryData,
+        source: &MessageReceiver,
+        nonblocking: bool,
+        timeout: Option<Duration>,
+    ) -> Result<usize> {
+        let mut waiting = SendWait::Ready;
+        if nonblocking {
+            return self.try_send(reader, aux, source, &mut waiting);
+        }
+        let (waiter, waker) = Waiter::new_pair();
+        waiter
             .pause_until_or_timeout(
-                || match try_send() {
-                    Err(err) if err.error() == Errno::EAGAIN => None,
-                    result => Some(result),
+                || {
+                    self.send_wait_queue.enqueue(waker.clone());
+                    source.send_buffer.register(&waker);
+                    match self.try_send(reader, aux, source, &mut waiting) {
+                        Err(error) if error.error() == Errno::EAGAIN => None,
+                        result => Some(result),
+                    }
                 },
                 timeout.as_ref(),
             )
-            .map_err(|err| match err.error() {
+            .map_err(|error| match error.error() {
                 Errno::ETIME => Error::with_message(Errno::EAGAIN, "the socket timeout expired"),
-                _ => err,
+                _ => error,
             })?
     }
 }
@@ -132,13 +207,14 @@ pub(super) struct MessageReceiver {
     // so it must not belong to `MessageQueue`.
     addr: Mutex<Option<UnixSocketAddrBound>>,
     queue: Arc<MessageQueue>,
+    send_buffer: Arc<SendBuffer>,
 }
 
 impl MessageReceiver {
-    pub(super) fn new() -> MessageReceiver {
+    pub(super) fn new(pending_error: Arc<PendingError>) -> MessageReceiver {
         let inner = Inner {
             messages: VecDeque::new(),
-            total_length: 0,
+            peer: None,
             is_shutdown: false,
         };
 
@@ -148,12 +224,63 @@ impl MessageReceiver {
             is_pass_cred: AtomicBool::new(false),
             pollee: Pollee::new(),
             send_wait_queue: WaitQueue::new(),
+            space_pollee: Pollee::new(),
+            pending_error,
         };
 
         Self {
             addr: Mutex::new(None),
             queue: Arc::new(queue),
+            send_buffer: SendBuffer::new(UNIX_DATAGRAM_DEFAULT_BUF_SIZE),
         }
+    }
+
+    pub(super) fn set_peer(&self, peer: Option<&Arc<MessageQueue>>) {
+        let (old_peer, messages) = {
+            let mut inner = self.queue.inner.lock();
+            let inner = inner.as_mut().unwrap();
+            let new_peer = peer.map(Arc::downgrade);
+            if inner
+                .peer
+                .as_ref()
+                .zip(new_peer.as_ref())
+                .is_some_and(|(old, new)| old.ptr_eq(new))
+            {
+                return;
+            }
+            let old_peer = core::mem::replace(&mut inner.peer, new_peer);
+            let messages = old_peer
+                .as_ref()
+                .map(|_| core::mem::take(&mut inner.messages));
+            (old_peer.and_then(|peer| peer.upgrade()), messages)
+        };
+        if let Some(messages) = messages
+            && !messages.is_empty()
+        {
+            drop(messages);
+            self.queue.pollee.invalidate();
+            if let Some(old_peer) = old_peer {
+                let inner = old_peer.inner.lock();
+                if inner.as_ref().is_some_and(|inner| {
+                    inner
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.ptr_eq(&Arc::downgrade(&self.queue)))
+                }) {
+                    old_peer.pending_error.set(Error::new(Errno::ECONNRESET));
+                }
+            }
+        }
+        self.queue.space_pollee.invalidate();
+        self.queue.send_wait_queue.wake_all();
+    }
+
+    pub(super) fn pending_error(&self) -> &PendingError {
+        &self.queue.pending_error
+    }
+
+    pub(super) fn send_buffer(&self) -> &Arc<SendBuffer> {
+        &self.send_buffer
     }
 
     pub(super) fn bind(&self, addr_to_bind: UnixSocketAddr) -> Result<()> {
@@ -200,12 +327,12 @@ impl MessageReceiver {
         let behavior = flags.receive_behavior();
         let ctrl_msgs = if behavior.will_consume_data() {
             let mut message = inner.messages.pop_front().unwrap();
-            inner.total_length -= message.bytes.len();
 
             self.queue.pollee.invalidate();
             // A writer may still fail if the free space is not enough.
             // So we have to wake up all the writers here.
             self.queue.send_wait_queue.wake_all();
+            self.queue.space_pollee.notify(IoEvents::OUT);
 
             message.aux.generate_control(behavior, is_pass_cred)
         } else {
@@ -223,6 +350,7 @@ impl MessageReceiver {
 
         inner.is_shutdown = true;
         self.queue.send_wait_queue.wake_all();
+        self.queue.space_pollee.notify(IoEvents::OUT);
 
         // The caller will notify the pollee.
     }
@@ -265,8 +393,10 @@ impl Drop for MessageReceiver {
             QUEUE_TABLE.remove_queue(&addr.to_key());
         }
 
-        *self.queue.inner.lock() = None;
+        let inner = self.queue.inner.lock().take();
+        drop(inner);
         self.queue.send_wait_queue.wake_all();
+        self.queue.space_pollee.notify(IoEvents::OUT);
     }
 }
 
@@ -299,3 +429,5 @@ impl QueueTable {
 }
 
 pub(in crate::net) const UNIX_DATAGRAM_DEFAULT_BUF_SIZE: usize = 65536;
+
+const MAX_DGRAM_QLEN: usize = 10;

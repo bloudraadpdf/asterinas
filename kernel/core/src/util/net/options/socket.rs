@@ -8,7 +8,8 @@ use crate::{
     net::socket::options::{
         AcceptConn, Broadcast, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
         RecvBuf, RecvBufForce, RecvTimeout, ReuseAddr, ReusePort, SendBuf, SendBufForce,
-        SendTimeout, SocketOption, SocketType,
+        SendTimeout, SocketOption, SocketType, Timestamp, TimestampNew, TimestampNs,
+        TimestampNsNew,
     },
     prelude::*,
     process::Gid,
@@ -43,11 +44,15 @@ enum CSocketOptionName {
     SNDTIMEO_OLD = 21,
     ATTACH_FILTER = 26,
     DETACH_FILTER = 27,
+    TIMESTAMP_OLD = 29,
     ACCPETCONN = 30,
     PEERSEC = 31,
     SNDBUFFORCE = 32,
     RCVBUFFORCE = 33,
+    TIMESTAMPNS_OLD = 35,
     PEERGROUPS = 59,
+    TIMESTAMP_NEW = 63,
+    TIMESTAMPNS_NEW = 64,
     RCVTIMEO_NEW = 66,
     SNDTIMEO_NEW = 67,
 }
@@ -80,10 +85,18 @@ pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CSocketOptionName::SNDBUFFORCE => Ok(Box::new(SendBufForce::new())),
         CSocketOptionName::RCVBUFFORCE => Ok(Box::new(RecvBufForce::new())),
         CSocketOptionName::PEERGROUPS => Ok(Box::new(PeerGroups::new())),
+        CSocketOptionName::TIMESTAMP_OLD => Ok(Box::new(Timestamp::new())),
+        CSocketOptionName::TIMESTAMPNS_OLD => Ok(Box::new(TimestampNs::new())),
+        CSocketOptionName::TIMESTAMP_NEW => Ok(Box::new(TimestampNew::new())),
+        CSocketOptionName::TIMESTAMPNS_NEW => Ok(Box::new(TimestampNsNew::new())),
         _ => return_errno_with_message!(Errno::ENOPROTOOPT, "unsupported socket-level option"),
     }
 }
 
+impl_raw_socket_option!(Timestamp);
+impl_raw_socket_option!(TimestampNs);
+impl_raw_socket_option!(TimestampNew);
+impl_raw_socket_option!(TimestampNsNew);
 impl_raw_socket_option!(ReuseAddr);
 impl_raw_sock_option_get_only!(SocketType);
 impl_raw_sock_option_get_only!(Error);

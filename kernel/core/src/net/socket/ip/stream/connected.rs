@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    errors::tcp::{IoError, RecvError, SendError},
+    errors::tcp::{ConnectionError, IoError, RecvError, SendError},
     socket::{NeedIfacePoll, RawTcpSetOption},
     wire::IpEndpoint,
 };
@@ -108,9 +108,7 @@ impl ConnectedStream {
                 // earlier. Linux returns EOF in this case, so we follow it.
                 Ok((0, NeedIfacePoll::FALSE))
             }
-            Err(IoError::Socket(RecvError::ConnReset)) => {
-                return_errno_with_message!(Errno::ECONNRESET, "the connection is reset")
-            }
+            Err(IoError::Socket(RecvError::Connection(error))) => Err(connection_error(error)),
         }
     }
 
@@ -132,9 +130,7 @@ impl ConnectedStream {
             Err(IoError::Socket(SendError::InvalidState)) => {
                 return_errno_with_message!(Errno::EPIPE, "the connection is closed");
             }
-            Err(IoError::Socket(SendError::ConnReset)) => {
-                return_errno_with_message!(Errno::ECONNRESET, "the connection is reset");
-            }
+            Err(IoError::Socket(SendError::Connection(error))) => Err(connection_error(error)),
         }
     }
 
@@ -193,8 +189,7 @@ impl ConnectedStream {
                 events |= IoEvents::HUP;
             }
 
-            // If the connection is reset, add an ERR event.
-            if socket.is_rst_closed() {
+            if socket.pending_error().is_some() {
                 events |= IoEvents::ERR;
             }
 
@@ -203,14 +198,7 @@ impl ConnectedStream {
     }
 
     pub(super) fn test_and_clear_error(&self) -> Option<Error> {
-        if self.tcp_conn.clear_rst_closed() {
-            Some(Error::with_message(
-                Errno::ECONNRESET,
-                "the connection is reset",
-            ))
-        } else {
-            None
-        }
+        self.tcp_conn.take_error().map(connection_error)
     }
 
     pub(super) fn set_raw_option<R>(
@@ -227,6 +215,13 @@ impl ConnectedStream {
     pub(super) fn into_connection(self) -> TcpConnection {
         self.tcp_conn
     }
+}
+
+fn connection_error(error: ConnectionError) -> Error {
+    Error::new(match error {
+        ConnectionError::Reset => Errno::ECONNRESET,
+        ConnectionError::TimedOut => Errno::ETIMEDOUT,
+    })
 }
 
 pub(super) fn close_and_linger(tcp_conn: TcpConnection, linger: LingerOption, pollee: &Pollee) {

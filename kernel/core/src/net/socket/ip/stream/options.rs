@@ -14,6 +14,7 @@ impl_socket_options!(
     pub(crate) struct Congestion(CongestionControl);
     pub(crate) struct UserTimeout(u32);
     pub(crate) struct Inq(bool);
+    pub(crate) struct FastOpen(i32);
 );
 
 #[derive(Clone, Copy, Debug)]

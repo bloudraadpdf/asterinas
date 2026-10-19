@@ -10,10 +10,9 @@ use aster_rights::ReadDupOp;
 use super::message::{MessageQueue, MessageReceiver};
 use crate::{
     events::IoEvents,
-    fs::file::FileCommon,
     net::socket::{
-        Socket, new_socket_common,
-        options::{Error as SocketError, PeerCred, SocketOption, macros::sock_option_mut},
+        Socket, SocketCommon, new_socket_common,
+        options::{PeerCred, SocketOption, macros::sock_option_mut},
         private::SocketPrivate,
         unix::{CUserCred, UnixSocketAddr, cred::SocketCred, ctrl_msg::AuxiliaryData},
         util::{
@@ -39,7 +38,7 @@ pub(crate) struct UnixDatagramSocket {
     peer_cred: Option<SocketCred>,
 
     is_write_shutdown: AtomicBool,
-    common: FileCommon,
+    common: SocketCommon,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +70,12 @@ impl UnixDatagramSocket {
         let remote_queue_a = socket_a.remote_queue.get_mut();
         let remote_queue_b = socket_b.remote_queue.get_mut();
 
+        socket_a
+            .local_receiver
+            .set_peer(Some(socket_b.local_receiver.queue()));
+        socket_b
+            .local_receiver
+            .set_peer(Some(socket_a.local_receiver.queue()));
         *remote_queue_a = Some(socket_b.local_receiver.queue().clone());
         *remote_queue_b = Some(socket_a.local_receiver.queue().clone());
 
@@ -78,14 +83,15 @@ impl UnixDatagramSocket {
     }
 
     fn new_raw(is_nonblocking: bool) -> Self {
+        let common = new_socket_common(is_nonblocking);
         Self {
-            local_receiver: MessageReceiver::new(),
+            local_receiver: MessageReceiver::new(common.error.clone()),
             remote_queue: RwLock::new(None),
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
             peer_cred: None,
             is_write_shutdown: AtomicBool::new(false),
-            common: new_socket_common(is_nonblocking),
+            common,
         }
     }
 
@@ -111,13 +117,13 @@ impl UnixDatagramSocket {
             })?
         };
 
-        let res = if self.is_nonblocking() || flags.contains(SendFlags::MSG_DONTWAIT) {
-            queue.try_send(reader, &mut aux_data, &self.local_receiver)
-        } else {
-            queue.block_send(timeout, || {
-                queue.try_send(reader, &mut aux_data, &self.local_receiver)
-            })
-        };
+        let res = queue.send(
+            reader,
+            &mut aux_data,
+            &self.local_receiver,
+            self.is_nonblocking() || flags.contains(SendFlags::MSG_DONTWAIT),
+            timeout,
+        );
 
         // A connected socket will automatically be disconnected if the remote has been closed.
         if remote.is_none() && res.is_err_and(|err| err.error() == Errno::ECONNREFUSED) {
@@ -128,6 +134,7 @@ impl UnixDatagramSocket {
                 .is_some_and(|remote| Arc::ptr_eq(remote, &queue))
             {
                 *remote_queue = None;
+                self.local_receiver.set_peer(None);
             }
         }
 
@@ -135,12 +142,7 @@ impl UnixDatagramSocket {
     }
 
     fn check_io_events(&self) -> IoEvents {
-        // POLLOUT should be reported as long as there is space in the socket's send buffer.
-        // Currently, we only limit the size of the receive buffer, not the send buffer. Therefore,
-        // POLLOUT is always reported.
-        let mut io_events = IoEvents::OUT;
-
-        io_events |= self.local_receiver.check_io_events();
+        let mut io_events = self.local_receiver.check_io_events();
 
         if self.is_write_shutdown.load(Ordering::Relaxed) && io_events.contains(IoEvents::RDHUP) {
             io_events |= IoEvents::HUP;
@@ -151,16 +153,36 @@ impl UnixDatagramSocket {
 }
 
 impl Pollable for UnixDatagramSocket {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.local_receiver
-            .pollee()
-            .poll_with(mask, poller, || self.check_io_events())
+    fn poll(&self, mask: IoEvents, mut poller: Option<&mut PollHandle>) -> IoEvents {
+        let pending = self
+            .local_receiver
+            .pending_error()
+            .poll(poller.as_deref_mut());
+        let input = self.local_receiver.pollee().poll_with(
+            mask & !IoEvents::OUT,
+            poller.as_deref_mut(),
+            || self.check_io_events() & !IoEvents::OUT,
+        );
+        let mut output = self
+            .local_receiver
+            .send_buffer()
+            .poll(mask, poller.as_deref_mut());
+        let remote = self.remote_queue.read().clone();
+        if let Some(queue) = remote {
+            output &= queue.poll_send_space(&self.local_receiver, mask, poller);
+        }
+        let shutdown = if self.is_write_shutdown.load(Ordering::Relaxed) {
+            mask & IoEvents::OUT
+        } else {
+            IoEvents::empty()
+        };
+        pending | input | output | shutdown
     }
 }
 
 impl SocketPrivate for UnixDatagramSocket {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 }
 
@@ -177,6 +199,7 @@ impl Socket for UnixDatagramSocket {
         let queue = MessageQueue::lookup_bound(&connected_addr)?;
 
         let mut remote_queue = self.remote_queue.write();
+        self.local_receiver.set_peer(Some(&queue));
         *remote_queue = Some(queue);
 
         Ok(())
@@ -213,14 +236,9 @@ impl Socket for UnixDatagramSocket {
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                // TODO: Support socket errors for UNIX sockets
-                socket_errors.set(None);
-                return Ok(());
-            }
-            _ => (),
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         // Deal with UNIX-socket-specific socket-level options
         match do_unix_getsockopt(option, self) {
@@ -247,6 +265,12 @@ impl Socket for UnixDatagramSocket {
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         let mut options = self.options.write();
+        if let Some((send, bytes)) = options.socket.set_unix_buffer_option(option)? {
+            if send {
+                self.local_receiver.send_buffer().set_limit(bytes as usize);
+            }
+            return Ok(());
+        }
 
         match options
             .socket
@@ -270,6 +294,12 @@ impl Socket for UnixDatagramSocket {
         message_header: MessageHeader,
         flags: SendFlags,
     ) -> Result<usize> {
+        if flags.contains(SendFlags::MSG_OOB) {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "UNIX datagrams have no out-of-band data"
+            );
+        }
         // TODO: Deal with flags
         flags.warn_if_unsupported();
 
@@ -299,6 +329,12 @@ impl Socket for UnixDatagramSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
+        if flags.contains(RecvFlags::MSG_OOB) {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "UNIX datagrams have no out-of-band data"
+            );
+        }
         // TODO: Deal with flags
         flags.warn_if_unsupported();
 
@@ -310,10 +346,6 @@ impl Socket for UnixDatagramSocket {
         let message_header = MessageHeader::new(Some(peer_addr.into()), control_messages);
 
         Ok((output, message_header))
-    }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
     }
 }
 

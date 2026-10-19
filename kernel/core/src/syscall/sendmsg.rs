@@ -28,13 +28,7 @@ pub(super) fn sys_sendmsg(
         sockfd, c_user_msghdr, flags
     );
 
-    let file = {
-        // Reading control messages may access the file table,
-        // so we have to clone the file and drop the file table reference here.
-        let file_table = ctx.thread_local.borrow_file_table();
-        let file_table_locked = file_table.unwrap().read();
-        file_table_locked.get_file(sockfd.try_into()?)?.clone()
-    };
+    let file = super::socket::get_socket_file(sockfd, ctx)?;
     let socket = file.as_socket_or_err()?;
 
     let total_bytes = send_one_message(socket, &c_user_msghdr, &user_space, flags)?;

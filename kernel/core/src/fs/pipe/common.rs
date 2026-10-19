@@ -24,7 +24,7 @@ use crate::{
             signals::user::{UserSignal, UserSignalKind},
         },
     },
-    util::ioctl::RawIoctl,
+    util::{MultiRead, MultiWrite, ioctl::RawIoctl},
 };
 
 /// A handle for a pipe that implements `PerOpenFileOps`.
@@ -53,14 +53,43 @@ impl PipeHandle {
         })
     }
 
-    fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
+    fn read_vectored(&self, writer: &mut dyn MultiWrite, flags: StatusFlags) -> Result<usize> {
+        if writer.is_empty() {
+            return Ok(0);
+        }
+        if flags.contains(StatusFlags::O_NONBLOCK) {
+            self.try_read(writer)
+        } else {
+            self.wait_events(IoEvents::IN, None, || self.try_read(writer))
+        }
+    }
+
+    fn write_vectored(&self, reader: &mut dyn MultiRead, flags: StatusFlags) -> Result<usize> {
+        if reader.is_empty() {
+            return Ok(0);
+        }
+        if flags.contains(StatusFlags::O_NONBLOCK) {
+            return self.try_write(reader, flags);
+        }
+        let mut total = 0;
+        while !reader.is_empty() {
+            match self.wait_events(IoEvents::OUT, None, || self.try_write(reader, flags)) {
+                Ok(count) => total += count,
+                Err(_) if total != 0 => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(total)
+    }
+
+    fn try_read(&self, writer: &mut dyn MultiWrite) -> Result<usize> {
         // `InodeHandle` checks the access mode before calling methods in `PerOpenFileOps`.
         debug_assert!(self.access_mode.is_readable());
 
         self.inner.try_read(writer)
     }
 
-    fn try_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
+    fn try_write(&self, reader: &mut dyn MultiRead, status_flags: StatusFlags) -> Result<usize> {
         // `InodeHandle` checks the access mode before calling methods in `PerOpenFileOps`.
         debug_assert!(self.access_mode.is_writable());
 
@@ -117,42 +146,30 @@ impl Drop for PipeHandle {
 }
 
 impl FileOps for PipeHandle {
-    fn read_at(
-        &self,
-        _offset: usize,
-        writer: &mut VmWriter,
-        status_flags: StatusFlags,
-    ) -> Result<usize> {
-        if !writer.has_avail() {
-            // Even the peer endpoint has been closed, reading an empty buffer is
-            // still fine.
-            return Ok(0);
-        }
-
-        if status_flags.contains(StatusFlags::O_NONBLOCK) {
-            self.try_read(writer)
-        } else {
-            self.wait_events(IoEvents::IN, None, || self.try_read(writer))
-        }
+    fn read_at(&self, _offset: usize, writer: &mut VmWriter, flags: StatusFlags) -> Result<usize> {
+        self.read_vectored(writer, flags)
     }
 
-    fn write_at(
+    fn readv_at(
         &self,
         _offset: usize,
-        reader: &mut VmReader,
-        status_flags: StatusFlags,
+        mut writers: &mut [VmWriter],
+        flags: StatusFlags,
     ) -> Result<usize> {
-        if !reader.has_remain() {
-            // Even the peer endpoint has been closed, writing an empty buffer is
-            // still fine.
-            return Ok(0);
-        }
+        self.read_vectored(&mut writers, flags)
+    }
 
-        if status_flags.contains(StatusFlags::O_NONBLOCK) {
-            self.try_write(reader, status_flags)
-        } else {
-            self.wait_events(IoEvents::OUT, None, || self.try_write(reader, status_flags))
-        }
+    fn write_at(&self, _offset: usize, reader: &mut VmReader, flags: StatusFlags) -> Result<usize> {
+        self.write_vectored(reader, flags)
+    }
+
+    fn writev_at(
+        &self,
+        _offset: usize,
+        mut readers: &mut [VmReader],
+        flags: StatusFlags,
+    ) -> Result<usize> {
+        self.write_vectored(&mut readers, flags)
     }
 }
 
@@ -341,7 +358,7 @@ impl PipeObj {
         })
     }
 
-    fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
+    fn try_read(&self, writer: &mut dyn MultiWrite) -> Result<usize> {
         let has_writers = self.num_writer.load(Ordering::Relaxed) != 0;
         let count = self.buffer.lock().read(writer)?;
         if count != 0 {
@@ -353,7 +370,7 @@ impl PipeObj {
         Ok(count)
     }
 
-    fn try_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
+    fn try_write(&self, reader: &mut dyn MultiRead, status_flags: StatusFlags) -> Result<usize> {
         if self.num_reader.load(Ordering::Relaxed) == 0 {
             if let Some(posix_thread) = current_thread!().as_posix_thread() {
                 posix_thread.enqueue_signal(Box::new(UserSignal::new(

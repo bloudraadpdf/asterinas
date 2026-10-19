@@ -17,6 +17,8 @@ pub(super) struct ListenStream {
     tcp_listeners: Vec<TcpListener>,
 }
 
+pub(super) const MAX_LISTEN_BACKLOG: usize = 4096;
+
 impl ListenStream {
     pub(super) fn new(
         bound_port: TcpBinding,
@@ -24,8 +26,7 @@ impl ListenStream {
         option: &RawTcpOption,
         observer: StreamObserver,
     ) -> Result<Self, (TcpBinding, Error)> {
-        const SOMAXCONN: usize = 4096;
-        let max_conn = SOMAXCONN.min(backlog);
+        let max_conn = MAX_LISTEN_BACKLOG.min(backlog);
 
         match TcpListener::new_listen_many(bound_port.into_ports(), max_conn, option, observer) {
             Ok(tcp_listeners) => Ok(Self { tcp_listeners }),
@@ -53,6 +54,10 @@ impl ListenStream {
 
     pub(super) fn iface(&self) -> &Arc<Iface> {
         self.tcp_listeners[0].iface()
+    }
+
+    pub(super) fn set_fast_open_backlog(&self, limit: usize) {
+        self.tcp_listeners[0].set_fast_open_backlog(limit);
     }
 
     pub(super) fn check_io_events(&self) -> IoEvents {

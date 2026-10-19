@@ -380,6 +380,58 @@ pub trait FileOps {
         status_flags: StatusFlags,
     ) -> Result<usize>;
 
+    /// Reads a vector of buffers at the given offset.
+    fn readv_at(
+        &self,
+        offset: usize,
+        writers: &mut [VmWriter],
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        if writers.is_empty() {
+            return self.read_at(
+                offset,
+                &mut VmWriter::from(&mut [][..]).to_fallible(),
+                status_flags,
+            );
+        }
+        crate::util::io_vectors(
+            writers,
+            |count, writer| {
+                let position = offset
+                    .checked_add(count)
+                    .ok_or_else(|| Error::new(Errno::EOVERFLOW))?;
+                self.read_at(position, writer, status_flags)
+            },
+            VmWriter::avail,
+        )
+    }
+
+    /// Writes a vector of buffers at the given offset.
+    fn writev_at(
+        &self,
+        offset: usize,
+        readers: &mut [VmReader],
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        if readers.is_empty() {
+            return self.write_at(
+                offset,
+                &mut VmReader::from(&[][..]).to_fallible(),
+                status_flags,
+            );
+        }
+        crate::util::io_vectors(
+            readers,
+            |count, reader| {
+                let position = offset
+                    .checked_add(count)
+                    .ok_or_else(|| Error::new(Errno::EOVERFLOW))?;
+                self.write_at(position, reader, status_flags)
+            },
+            VmReader::remain,
+        )
+    }
+
     /// Reads directory entries from the given offset.
     fn readdir_at(
         &self,

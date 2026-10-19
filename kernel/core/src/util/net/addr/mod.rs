@@ -4,6 +4,7 @@ pub(crate) use family::{
     CSocketAddrFamily, read_socket_addr_from_user, write_socket_addr_to_user,
     write_socket_addr_with_max_len,
 };
+pub(crate) use ip::CSocketAddrInet;
 
 mod family;
 mod ip;

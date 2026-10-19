@@ -7,26 +7,30 @@ pub(crate) use range::{FileRange, OFFSET_MAX};
 use range::{FileRangeChange, OverlapWith};
 
 use crate::{
+    fs::file::FileDescriptionId,
     prelude::*,
-    process::{Pid, PidIdentity, PidNamespace},
+    process::{PidIdentity, PidNamespace},
 };
 
 mod range;
 
-/// Identifies the file table that owns a [`RangeLock`].
+/// Identifies the file table or description that owns a range lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RangeLockOwner(usize);
+pub(crate) enum RangeLockOwner {
+    FileTable(usize),
+    FileDescription(FileDescriptionId),
+}
 
 impl RangeLockOwner {
     pub(in crate::fs) fn from_address(address: usize) -> Self {
-        Self(address)
+        Self::FileTable(address)
     }
 }
 
 /// The metadata of a POSIX advisory file range lock.
 #[derive(Clone, Debug)]
 struct RangeLock {
-    /// File-table identity that owns the lock.
+    /// Identity that owns the lock.
     owner: RangeLockOwner,
     /// PID associated with this lock.
     identity: Arc<PidIdentity>,
@@ -79,8 +83,11 @@ impl RangeLockItem {
     }
 
     /// Returns the process ID reported for the lock.
-    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> Pid {
-        self.lock.identity.in_namespace(namespace)
+    pub(crate) fn pid_in(&self, namespace: &PidNamespace) -> i32 {
+        match self.owner() {
+            RangeLockOwner::FileDescription(_) => -1,
+            RangeLockOwner::FileTable(_) => self.lock.identity.in_namespace(namespace) as i32,
+        }
     }
 
     /// Sets the process ID reported for the lock.

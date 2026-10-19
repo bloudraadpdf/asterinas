@@ -102,6 +102,38 @@ impl SocketOptionSet {
         }
     }
 
+    pub(in crate::net) fn set_unix_buffer_option(
+        &mut self,
+        option: &dyn SocketOption,
+    ) -> Result<Option<(bool, u32)>> {
+        let (value, minimum, send, force) = sock_option_ref!(match option {
+            value @ SendBuf => {
+                (*value.get().unwrap(), 4608, true, false)
+            }
+            value @ SendBufForce => {
+                (*value.get().unwrap(), 4608, true, true)
+            }
+            value @ RecvBuf => {
+                (*value.get().unwrap(), 2304, false, false)
+            }
+            value @ RecvBufForce => {
+                (*value.get().unwrap(), 2304, false, true)
+            }
+            _ => return Ok(None),
+        });
+        if force {
+            check_current_privileged()?;
+        }
+        let maximum = if force { i32::MAX as u32 / 2 } else { 212_992 };
+        let bytes = value.min(maximum).saturating_mul(2).max(minimum);
+        if send {
+            self.set_send_buf(bytes);
+        } else {
+            self.set_recv_buf(bytes);
+        }
+        Ok(Some((send, bytes)))
+    }
+
     /// Gets socket-level options.
     ///
     /// Note that the socket error has to be handled separately. This method does not handle it

@@ -5,7 +5,7 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use core::{
-    num::NonZeroUsize,
+    num::{NonZeroU8, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
 
@@ -20,11 +20,12 @@ use smoltcp::{
 use super::{
     ReceiveBehavior,
     common::{Inner, NeedIfacePoll, Socket, SocketBg},
+    fast_open::PendingFastOpen,
     tcp_listen::TcpListenerBg,
 };
 use crate::{
     define_boolean_value,
-    errors::tcp::{ConnectError, IoError, RecvError, SendError},
+    errors::tcp::{ConnectError, ConnectionError, IoError, RecvError, SendError},
     ext::Ext,
     iface::{BoundTcpPort, PacketSlice, PollKey, PollableIfaceMut},
     socket::{
@@ -49,10 +50,10 @@ pub struct RawTcpSocketExt<E: Ext> {
     socket: Box<RawTcpSocket>,
     pub(super) listener: Option<Arc<TcpListenerBg<E>>>,
     has_connected: bool,
+    pending_fast_open: Option<PendingFastOpen>,
     /// Indicates if the receiving side of this socket is shut down by the user.
     is_recv_shut: bool,
-    /// Indicates if the socket is closed by a RST packet.
-    is_rst_closed: bool,
+    pending_error: Option<ConnectionError>,
 }
 
 impl<E: Ext> Deref for RawTcpSocketExt<E> {
@@ -70,6 +71,11 @@ impl<E: Ext> DerefMut for RawTcpSocketExt<E> {
 }
 
 impl<E: Ext> RawTcpSocketExt<E> {
+    /// Returns whether the transport is in TCP CLOSED, excluding TIME-WAIT.
+    pub fn is_closed(&self) -> bool {
+        self.state() == State::Closed
+    }
+
     /// Checks if the socket may receive any new data.
     ///
     /// This is similar to [`RawTcpSocket::may_recv`]. However, this method checks if there can be
@@ -80,6 +86,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
     pub fn may_recv_new(&self) -> bool {
         // See also the implementation of `RawTcpSocket::may_recv`.
         match self.state() {
+            State::SynReceived if self.fast_open_pending() => true,
             State::Established => true,
             // Our sending half is closed, but the peer's sending half is still active.
             State::FinWait1 | State::FinWait2 => true,
@@ -104,12 +111,9 @@ impl<E: Ext> RawTcpSocketExt<E> {
         self.is_recv_shut
     }
 
-    /// Checks if the socket is closed by a RST packet.
-    ///
-    /// Note that the flag is automatically cleared when it is read by
-    /// [`TcpConnection::clear_rst_closed`], [`TcpConnection::send`], or [`TcpConnection::recv`].
-    pub fn is_rst_closed(&self) -> bool {
-        self.is_rst_closed
+    /// Returns a deferred terminal error without consuming it.
+    pub fn pending_error(&self) -> Option<ConnectionError> {
+        self.pending_error
     }
 }
 
@@ -127,6 +131,12 @@ impl<E: Ext> RawTcpSocketExt<E> {
         old_recv_queue: usize,
         is_rst: bool,
     ) -> (SocketEvents, TcpConnBecameDead) {
+        if self.take_fast_open_timeout() {
+            self.pending_error = Some(ConnectionError::TimedOut);
+        }
+        if !self.fast_open_pending() {
+            self.pending_fast_open = None;
+        }
         let became_dead = if self.state() != State::Established {
             // After the connection is closed by the user, no new data can be read, and such unread
             // data will immediately cause the connection to be reset.
@@ -140,7 +150,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
                 // Strictly speaking, the socket isn't closed by an incoming RST packet in this
                 // situation. Instead, we reset the connection and _send_ an outgoing RST packet.
                 // However, Linux reports `ECONNRESET`, so we have to follow Linux.
-                self.is_rst_closed = true;
+                self.pending_error = Some(ConnectionError::Reset);
                 self.abort();
             }
             self.check_dead(this)
@@ -150,7 +160,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
 
         let events = if self.state() != old_state {
             if self.state() == State::Closed && is_rst {
-                self.is_rst_closed = true;
+                self.pending_error = Some(ConnectionError::Reset);
             }
             self.on_new_state(this)
         } else {
@@ -223,6 +233,7 @@ impl<E: Ext> TcpConnectionInner<E> {
     pub(super) fn new(
         socket: Box<RawTcpSocket>,
         listener: Option<Arc<TcpListenerBg<E>>>,
+        pending_fast_open: Option<PendingFastOpen>,
         weak_self: &Weak<TcpConnectionBg<E>>,
     ) -> Self {
         let connection_key = {
@@ -237,12 +248,14 @@ impl<E: Ext> TcpConnectionInner<E> {
         let accept_context = listener
             .as_ref()
             .map(|listener| E::tcp_accept_context(listener.observer.get().unwrap()));
+        let has_connected = socket.fast_open_pending();
         let socket_ext = RawTcpSocketExt {
             socket,
             listener,
-            has_connected: false,
+            has_connected,
+            pending_fast_open,
             is_recv_shut: false,
-            is_rst_closed: false,
+            pending_error: None,
         };
 
         TcpConnectionInner {
@@ -342,8 +355,9 @@ impl<E: Ext> TcpConnection<E> {
             return Err((bound, ConnectError::AddressInUse));
         }
 
-        let connection =
-            Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak));
+        let connection = Self::new_cyclic(bound, |weak| {
+            TcpConnectionInner::new(socket, None, None, weak)
+        });
         interface.update_next_poll_at_ms(&connection.0, PollAt::Now);
         connection.init_observer(observer);
 
@@ -401,9 +415,8 @@ impl<E: Ext> TcpConnection<E> {
 
         let mut socket = self.0.inner.lock();
 
-        if socket.is_rst_closed {
-            socket.is_rst_closed = false;
-            return Err(IoError::Socket(SendError::ConnReset));
+        if let Some(error) = socket.pending_error.take() {
+            return Err(IoError::Socket(SendError::Connection(error)));
         }
 
         let mut total_sent_bytes = 0;
@@ -520,9 +533,10 @@ impl<E: Ext> TcpConnection<E> {
             };
 
             let copy_result = match recv_result {
-                Err(_) if socket.is_rst_closed && total_recv_bytes == 0 => {
-                    socket.is_rst_closed = false;
-                    return Err(IoError::Socket(RecvError::ConnReset));
+                Err(_) if socket.pending_error.is_some() && total_recv_bytes == 0 => {
+                    return Err(IoError::Socket(RecvError::Connection(
+                        socket.pending_error.take().unwrap(),
+                    )));
                 }
                 Err(_) if total_recv_bytes > 0 => break total_recv_bytes,
                 res => res?,
@@ -551,16 +565,9 @@ impl<E: Ext> TcpConnection<E> {
         Ok((result, need_poll))
     }
 
-    /// Checks if the socket is closed by a RST packet and clears the flag.
-    ///
-    /// This flag is set when the socket is closed by a RST packet, and cleared when the connection
-    /// reset error is reported via one of the [`Self::send`], [`Self::recv`], or this method.
-    pub fn clear_rst_closed(&self) -> bool {
-        let mut socket = self.0.inner.lock();
-
-        let is_rst = socket.is_rst_closed;
-        socket.is_rst_closed = false;
-        is_rst
+    /// Consumes a deferred terminal connection error.
+    pub fn take_error(&self) -> Option<ConnectionError> {
+        self.0.inner.lock().pending_error.take()
     }
 
     /// Shuts down the sending half of the connection.
@@ -667,6 +674,10 @@ impl<E: Ext> RawTcpSetOption for TcpConnection<E> {
     fn set_nagle_enabled(&self, enabled: bool) {
         let mut socket = self.0.inner.lock();
         socket.set_nagle_enabled(enabled);
+    }
+
+    fn set_fast_open_retries(&self, limit: NonZeroU8) {
+        self.0.inner.lock().set_fast_open_retries(limit);
     }
 }
 

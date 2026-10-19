@@ -6,7 +6,7 @@ use core::fmt::Display;
 
 use super::{
     AccessMode, CreationFlags, FileCommon, FileLike, InodeType, MappableObject,
-    SettableStatusFlags, StatusFlags, SyncMode, file_table::FdFlags, flock::FlockItem,
+    SettableStatusFlags, StatusFlags, SyncMode, file_table::FdFlags,
 };
 use crate::{
     events::IoEvents,
@@ -14,9 +14,7 @@ use crate::{
         utils::DirentVisitor,
         vfs::{
             inode::{FallocMode, FileOps},
-            inode_ext::InodeExt,
             path::Path,
-            range_lock::{RangeLockItem, RangeLockOwner, RangeLockType},
             xattr::clear_file_priv,
         },
     },
@@ -25,7 +23,7 @@ use crate::{
         PidNamespace,
         signal::{PollHandle, Pollable},
     },
-    util::ioctl::RawIoctl,
+    util::{MultiRead, VmReaderArray, VmWriterArray, ioctl::RawIoctl},
     vm::vmar::FileMmapRequest,
 };
 
@@ -156,108 +154,63 @@ impl InodeHandle {
         Ok(read_cnt)
     }
 
-    pub(crate) fn test_range_lock(&self, mut lock: RangeLockItem) -> Result<RangeLockItem> {
-        if self.status_flags().contains(StatusFlags::O_PATH) {
-            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-        }
-
-        let Some(range_lock_list) = self
-            .path()
-            .inode()
-            .fs_lock_context()
-            .map(|c| c.range_lock_list())
-        else {
-            // The lock list is not present. So nothing is locked.
-            lock.set_type(RangeLockType::Unlock);
-            return Ok(lock);
+    fn read_with_offset(
+        &self,
+        explicit: Option<usize>,
+        operation: impl FnOnce(&dyn FileOps, usize, StatusFlags) -> Result<usize>,
+    ) -> Result<usize> {
+        let (file_ops, current_offset) = if explicit.is_some() {
+            (self.file_ops_for_positional_io()?, false)
+        } else {
+            self.file_ops_and_is_offset_aware()
         };
-
-        let req_lock = range_lock_list.test_lock(lock);
-        Ok(req_lock)
+        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
+            return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
+        }
+        let flags = self.status_flags();
+        if !current_offset {
+            return operation(file_ops, explicit.unwrap_or(0), flags);
+        }
+        let mut offset = self.offset.lock();
+        let count = operation(file_ops, *offset, flags)?;
+        *offset += count;
+        Ok(count)
     }
 
-    pub(crate) fn set_range_lock(&self, lock: &RangeLockItem, is_nonblocking: bool) -> Result<()> {
-        match lock.type_() {
-            RangeLockType::ReadLock => {
-                if self.status_flags().contains(StatusFlags::O_PATH)
-                    || !self.access_mode().is_readable()
-                {
-                    return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
-                }
-            }
-            RangeLockType::WriteLock => {
-                if self.status_flags().contains(StatusFlags::O_PATH)
-                    || !self.access_mode().is_writable()
-                {
-                    return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
-                }
-            }
-            RangeLockType::Unlock => {
-                if self.status_flags().contains(StatusFlags::O_PATH) {
-                    return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-                }
-            }
+    fn write_with_offset(
+        &self,
+        explicit: Option<usize>,
+        has_data: bool,
+        operation: impl FnOnce(&dyn FileOps, usize, StatusFlags) -> Result<usize>,
+    ) -> Result<usize> {
+        let (file_ops, current_offset) = if explicit.is_some() {
+            (self.file_ops_for_positional_io()?, false)
+        } else {
+            self.file_ops_and_is_offset_aware()
+        };
+        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
+            return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
         }
-
-        if RangeLockType::Unlock == lock.type_() {
-            self.unlock_range_lock(lock);
-            return Ok(());
+        if has_data {
+            clear_file_priv(self.path().dentry())?;
         }
-
-        let range_lock_list = self
-            .path()
-            .inode()
-            .fs_lock_context_or_init()
-            .range_lock_list();
-        range_lock_list.set_lock(lock, is_nonblocking)
-    }
-
-    pub(crate) fn release_range_locks(&self, owner: RangeLockOwner) {
-        if let Some(range_lock_list) = self
-            .path()
-            .inode()
-            .fs_lock_context()
-            .map(|context| context.range_lock_list())
-        {
-            range_lock_list.unlock_all(owner);
+        let flags = self.status_flags();
+        let append = flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none();
+        if !current_offset {
+            let position = if append {
+                self.path().size()
+            } else {
+                explicit.unwrap_or(0)
+            };
+            return operation(file_ops, position, flags);
         }
-    }
-
-    fn unlock_range_lock(&self, lock: &RangeLockItem) {
-        if let Some(range_lock_list) = self
-            .path()
-            .inode()
-            .fs_lock_context()
-            .map(|c| c.range_lock_list())
-        {
-            range_lock_list.unlock(lock);
+        let mut offset = self.offset.lock();
+        if append {
+            *offset = self.path().size();
         }
-    }
-
-    pub(crate) fn set_flock(&self, lock: FlockItem, is_nonblocking: bool) -> Result<()> {
-        if self.status_flags().contains(StatusFlags::O_PATH) {
-            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-        }
-
-        let flock_list = self.path().inode().fs_lock_context_or_init().flock_list();
-        flock_list.set_lock(lock, is_nonblocking)
-    }
-
-    pub(crate) fn unlock_flock(&self) -> Result<()> {
-        if self.status_flags().contains(StatusFlags::O_PATH) {
-            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-        }
-
-        if let Some(flock_list) = self
-            .path()
-            .inode()
-            .fs_lock_context()
-            .map(|c| c.flock_list())
-        {
-            flock_list.unlock(self);
-        }
-
-        Ok(())
+        let count = operation(file_ops, *offset, flags)?;
+        *offset += count;
+        Ok(count)
     }
 
     pub(crate) fn downcast_open_file<T: 'static>(&self) -> Result<Option<&T>> {
@@ -290,86 +243,51 @@ impl Pollable for InodeHandle {
 
 impl FileLike for InodeHandle {
     fn read(&self, writer: &mut VmWriter) -> Result<usize> {
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
-        }
-
-        let (file_ops, is_offset_aware) = self.file_ops_and_is_offset_aware();
-        let status_flags = self.status_flags();
-
-        if !is_offset_aware {
-            return file_ops.read_at(0, writer, status_flags);
-        }
-
-        let mut offset = self.offset.lock();
-
-        let len = file_ops.read_at(*offset, writer, status_flags)?;
-        *offset += len;
-
-        Ok(len)
+        self.read_with_offset(None, |file, offset, flags| {
+            file.read_at(offset, writer, flags)
+        })
     }
 
-    fn write(&self, reader: &mut VmReader) -> Result<usize> {
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
-        }
-        if reader.remain() > 0 {
-            clear_file_priv(self.path().dentry())?;
-        }
-
-        let (file_ops, is_offset_aware) = self.file_ops_and_is_offset_aware();
-        let status_flags = self.status_flags();
-
-        if !is_offset_aware {
-            return file_ops.write_at(0, reader, status_flags);
-        }
-
-        let mut offset = self.offset.lock();
-
-        // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
-        if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
-            // FIXME: `O_APPEND` should ensure that new content is appended even if another process
-            // is writing to the file concurrently.
-            *offset = self.path().size();
-        }
-
-        let len = file_ops.write_at(*offset, reader, status_flags)?;
-        *offset += len;
-
-        Ok(len)
+    fn readv(&self, writers: &mut VmWriterArray) -> Result<usize> {
+        self.read_with_offset(None, |file, offset, flags| {
+            file.readv_at(offset, writers.writers_mut(), flags)
+        })
     }
 
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
-        let file_ops = self.file_ops_for_positional_io()?;
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
-        }
-
-        let status_flags = self.status_flags();
-
-        file_ops.read_at(offset, writer, status_flags)
+        self.read_with_offset(Some(offset), |file, offset, flags| {
+            file.read_at(offset, writer, flags)
+        })
     }
 
-    fn write_at(&self, mut offset: usize, reader: &mut VmReader) -> Result<usize> {
-        let file_ops = self.file_ops_for_positional_io()?;
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
-        }
-        if reader.remain() > 0 {
-            clear_file_priv(self.path().dentry())?;
-        }
+    fn readv_at(&self, offset: usize, writers: &mut VmWriterArray) -> Result<usize> {
+        self.read_with_offset(Some(offset), |file, offset, flags| {
+            file.readv_at(offset, writers.writers_mut(), flags)
+        })
+    }
 
-        let status_flags = self.status_flags();
+    fn write(&self, reader: &mut VmReader) -> Result<usize> {
+        self.write_with_offset(None, reader.has_remain(), |file, offset, flags| {
+            file.write_at(offset, reader, flags)
+        })
+    }
 
-        // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
-        if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
-            // If the file has the `O_APPEND` flag, the offset is ignored.
-            // FIXME: `O_APPEND` should ensure that new content is appended even if another process
-            // is writing to the file concurrently.
-            offset = self.path().size();
-        }
+    fn writev(&self, readers: &mut VmReaderArray) -> Result<usize> {
+        self.write_with_offset(None, !readers.is_empty(), |file, offset, flags| {
+            file.writev_at(offset, readers.readers_mut(), flags)
+        })
+    }
 
-        file_ops.write_at(offset, reader, status_flags)
+    fn write_at(&self, offset: usize, reader: &mut VmReader) -> Result<usize> {
+        self.write_with_offset(Some(offset), reader.has_remain(), |file, offset, flags| {
+            file.write_at(offset, reader, flags)
+        })
+    }
+
+    fn writev_at(&self, offset: usize, readers: &mut VmReaderArray) -> Result<usize> {
+        self.write_with_offset(Some(offset), !readers.is_empty(), |file, offset, flags| {
+            file.writev_at(offset, readers.readers_mut(), flags)
+        })
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -544,12 +462,6 @@ impl FileLike for InodeHandle {
         }
 
         self.path().sync(mode)
-    }
-}
-
-impl Drop for InodeHandle {
-    fn drop(&mut self) {
-        let _ = self.unlock_flock();
     }
 }
 

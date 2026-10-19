@@ -10,6 +10,14 @@ pub enum BindError {
 }
 
 pub mod tcp {
+    /// A deferred terminal connection error, consumed by I/O or socket error queries.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ConnectionError {
+        /// The connection was reset.
+        Reset,
+        /// The passive Fast Open handshake exhausted its retry budget.
+        TimedOut,
+    }
     /// An error returned by a TCP stream I/O operation before any byte is transferred.
     ///
     /// If some bytes are transferred before a socket or copy error is observed, the
@@ -72,8 +80,8 @@ pub mod tcp {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum SendError {
         InvalidState,
-        /// The connection is reset.
-        ConnReset,
+        /// The connection has a deferred terminal error.
+        Connection(ConnectionError),
     }
 
     impl From<smoltcp::socket::tcp::SendError> for SendError {
@@ -97,8 +105,8 @@ pub mod tcp {
     pub enum RecvError {
         InvalidState,
         Finished,
-        /// The connection is reset.
-        ConnReset,
+        /// The connection has a deferred terminal error.
+        Connection(ConnectionError),
     }
 
     impl From<smoltcp::socket::tcp::RecvError> for RecvError {

@@ -250,14 +250,19 @@ pub(super) struct AuxiliaryData {
 }
 
 impl AuxiliaryData {
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.files.capacity() * size_of::<Arc<dyn FileLike>>()
+    }
+
     /// Builds the auxiliary data from the control messages.
     pub(super) fn from_control(ctrl_msgs: Vec<ControlMessage>) -> Result<Self> {
         let mut files = Vec::new();
         let mut cred = None;
 
         for ctrl_msg in ctrl_msgs.into_iter() {
-            let ControlMessage::Unix(unix_ctrl_msg) = ctrl_msg;
-            // TODO: What should we do if there are control messages of other protocols?
+            let ControlMessage::Unix(unix_ctrl_msg) = ctrl_msg else {
+                return_errno_with_message!(Errno::EINVAL, "the control message is receive-only");
+            };
 
             match unix_ctrl_msg.0 {
                 Message::Files(FileMessage {
@@ -343,11 +348,6 @@ impl AuxiliaryData {
         }
 
         ctrl_msgs
-    }
-
-    /// Returns whether the auxiliary data contains nothing.
-    pub(super) fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.cred.is_none()
     }
 
     /// Returns whether the auxiliary data can be treated as a subset of the other one.

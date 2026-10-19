@@ -288,9 +288,8 @@ impl FileTable {
 impl Drop for FileTable {
     fn drop(&mut self) {
         for (_, file) in self.fds_and_files() {
-            if let Ok(inode_handle) = file.as_inode_handle_or_err() {
-                inode_handle.release_range_locks(self.as_range_lock_owner());
-            }
+            file.common()
+                .release_range_locks(self.as_range_lock_owner());
         }
     }
 }
@@ -315,9 +314,9 @@ impl ClosedFile {
 
 impl Drop for ClosedFile {
     fn drop(&mut self) {
-        if let Ok(inode_handle) = self.file.as_inode_handle_or_err() {
-            inode_handle.release_range_locks(self.range_lock_owner);
-        }
+        self.file
+            .common()
+            .release_range_locks(self.range_lock_owner);
     }
 }
 

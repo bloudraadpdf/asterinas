@@ -17,8 +17,8 @@ use crate::{
     wire::{IpEndpoint, Ipv4Address, Ipv4Cidr},
 };
 
-pub(super) struct TestExt;
-pub(super) struct NoScheduler;
+pub(crate) struct TestExt;
+pub(crate) struct NoScheduler;
 struct TestDevice(SpinLock<Loopback, BottomHalfDisabled>);
 
 impl Ext for TestExt {
@@ -28,6 +28,18 @@ impl Ext for TestExt {
 
     fn tcp_accept_context(_observer: &Self::TcpEventObserver) {}
     type UdpEventObserver = ();
+
+    fn receive_timestamp() -> core::time::Duration {
+        static NEXT_STAMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+        core::time::Duration::from_nanos(
+            NEXT_STAMP.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn fill_random(bytes: &mut [u8]) {
+        static NEXT_KEY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(1);
+        bytes.fill(NEXT_KEY.fetch_add(1, core::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 impl ScheduleNextPoll for NoScheduler {
@@ -66,6 +78,8 @@ fn options() -> RawTcpOption {
     RawTcpOption {
         keep_alive: None,
         is_nagle_enabled: true,
+        fast_open_backlog: 0,
+        fast_open_retries: core::num::NonZeroU8::new(6).unwrap(),
     }
 }
 
@@ -372,6 +386,40 @@ mod udp {
             .unwrap();
         receiver
             .recv(ReceiveBehavior::Recv, |data, _| assert_eq!(data, &[3]))
+            .unwrap();
+        assert!(!receiver.can_recv());
+    }
+
+    #[ktest]
+    fn udp_arrival_metadata_survives_peek_and_later_packets() {
+        let ifaces = ifaces();
+        let sender = socket(&ifaces);
+        let receiver = socket(&ifaces);
+        let target = destination(&receiver, &ifaces[1]);
+        sender.send(&ifaces[1], target, payload(1, 7)).unwrap();
+        ifaces[1].poll();
+        let arrival = receiver
+            .recv(ReceiveBehavior::Peek, |data, meta| {
+                assert_eq!(data, &[7]);
+                assert_eq!(meta.destination, target);
+                assert_eq!(meta.endpoint, destination(&sender, &ifaces[1]));
+                assert!(!meta.timestamp.is_zero());
+                meta.timestamp
+            })
+            .unwrap();
+        sender.send(&ifaces[1], target, payload(0, 0)).unwrap();
+        ifaces[1].poll();
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, meta| {
+                assert_eq!(data, &[7]);
+                assert_eq!(meta.timestamp, arrival);
+            })
+            .unwrap();
+        receiver
+            .recv(ReceiveBehavior::Recv, |data, meta| {
+                assert!(data.is_empty());
+                assert!(meta.timestamp > arrival);
+            })
             .unwrap();
         assert!(!receiver.can_recv());
     }

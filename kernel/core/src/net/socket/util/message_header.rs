@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use align_ext::AlignExt;
+use core::time::Duration;
 
-use super::{RecvFlags, SocketAddr};
+use align_ext::AlignExt;
+use aster_bigtcp::wire::{Ipv4Address, PortNum};
+
+use super::{RecvFlags, SocketAddr, TimestampMode};
 use crate::{
-    fs::file::file_table::FdFlags, net::socket::unix::UnixControlMessage, prelude::*,
-    util::net::CSocketOptionLevel,
+    fs::file::file_table::FdFlags,
+    net::socket::unix::UnixControlMessage,
+    prelude::*,
+    time::{timespec_t, timeval_t},
+    util::net::{CSocketAddrInet, CSocketOptionLevel},
 };
 
 /// Message header used for sendmsg/recvmsg.
@@ -42,7 +48,14 @@ impl MessageHeader {
 #[derive(Debug)]
 pub(crate) enum ControlMessage {
     Unix(UnixControlMessage),
+    Timestamp {
+        mode: TimestampMode,
+        stamp: Duration,
+    },
+    OriginalDestination(Ipv4Address, PortNum),
 }
+
+const IP_ORIGDSTADDR: i32 = 20;
 
 impl ControlMessage {
     pub(crate) fn read_all_from(reader: &mut VmReader) -> Result<Vec<Self>> {
@@ -143,8 +156,49 @@ impl ControlMessage {
     ) -> Result<(CControlHeader, RecvFlags)> {
         match self {
             Self::Unix(msg) => msg.write_to(writer, fd_flags),
+            Self::Timestamp { mode, stamp } => {
+                if mode.is_nanoseconds() {
+                    write_control_value(
+                        writer,
+                        CSocketOptionLevel::SOL_SOCKET,
+                        *mode as i32,
+                        &timespec_t::from(*stamp),
+                    )
+                } else {
+                    write_control_value(
+                        writer,
+                        CSocketOptionLevel::SOL_SOCKET,
+                        *mode as i32,
+                        &timeval_t::from(*stamp),
+                    )
+                }
+            }
+            Self::OriginalDestination(addr, port) => write_control_value(
+                writer,
+                CSocketOptionLevel::SOL_IP,
+                IP_ORIGDSTADDR,
+                &CSocketAddrInet::from((*addr, *port)),
+            ),
         }
     }
+}
+
+fn write_control_value<T: Pod>(
+    writer: &mut VmWriter,
+    level: CSocketOptionLevel,
+    kind: i32,
+    value: &T,
+) -> Result<(CControlHeader, RecvFlags)> {
+    let payload_len = CControlHeader::payload_len_from_total(writer.avail())?.min(size_of::<T>());
+    let flags = if payload_len < size_of::<T>() {
+        RecvFlags::MSG_CTRUNC
+    } else {
+        RecvFlags::empty()
+    };
+    let header = CControlHeader::new(level, kind, payload_len);
+    writer.write_val(&header)?;
+    writer.write_fallible(&mut VmReader::from(&value.as_bytes()[..payload_len]))?;
+    Ok((header, flags))
 }
 
 /// `cmsghdr` in Linux.

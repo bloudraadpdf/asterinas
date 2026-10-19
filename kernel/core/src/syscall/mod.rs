@@ -125,6 +125,7 @@ mod read;
 mod readlink;
 mod reboot;
 mod recvfrom;
+mod recvmmsg;
 mod recvmsg;
 mod removexattr;
 mod rename;
