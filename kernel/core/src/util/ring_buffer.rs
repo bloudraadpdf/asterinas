@@ -111,11 +111,6 @@ impl RingBufferU8Ext for RingBuffer<u8> {
 
 /// Extension methods for reading bytes from a [`Consumer<u8, _>`].
 pub(crate) trait ConsumerU8Ext {
-    /// Reads data from the ring buffer into `writer`.
-    ///
-    /// Returns the number of bytes read.
-    fn read_fallible(&mut self, writer: &mut dyn MultiWrite) -> Result<usize>;
-
     /// Reads up to `max_len` bytes from the ring buffer into `writer`.
     ///
     /// Returns the number of bytes read.
@@ -127,10 +122,6 @@ pub(crate) trait ConsumerU8Ext {
 }
 
 impl<R: Deref<Target = RingBuffer<u8>>> ConsumerU8Ext for Consumer<u8, R> {
-    fn read_fallible(&mut self, writer: &mut dyn MultiWrite) -> Result<usize> {
-        self.read_fallible_with_max_len(writer, usize::MAX)
-    }
-
     fn read_fallible_with_max_len(
         &mut self,
         writer: &mut dyn MultiWrite,
@@ -175,12 +166,12 @@ mod test {
 
         let mut output = [0u8];
         assert_eq!(
-            cons.read_fallible(&mut writer_from(output.as_mut_slice()))
+            cons.read_fallible_with_max_len(&mut writer_from(output.as_mut_slice()), usize::MAX)
                 .unwrap(),
             1
         );
         assert_eq!(
-            cons.read_fallible(&mut writer_from(output.as_mut_slice()))
+            cons.read_fallible_with_max_len(&mut writer_from(output.as_mut_slice()), usize::MAX)
                 .unwrap(),
             0
         );
@@ -210,7 +201,7 @@ mod test {
         let mut output = vec![0u8; step];
         for i in (0..4 * PAGE_SIZE).step_by(step) {
             let read_len = cons
-                .read_fallible(&mut writer_from(output.as_mut_slice()))
+                .read_fallible_with_max_len(&mut writer_from(output.as_mut_slice()), usize::MAX)
                 .unwrap();
             assert_eq!(read_len, step);
             assert_eq!(output[0], i as u8);

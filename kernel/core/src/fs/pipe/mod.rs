@@ -9,4 +9,5 @@ pub(crate) use anon_pipe::new_file_pair;
 pub(super) use common::Pipe;
 
 mod anon_pipe;
+mod buffer;
 mod common;

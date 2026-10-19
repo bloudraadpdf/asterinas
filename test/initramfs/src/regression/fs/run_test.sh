@@ -163,6 +163,7 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 ./pseudofs/pseudo_dentry
 ./pseudofs/pseudo_dev_id
 ./pseudofs/pseudo_inode
+./pseudofs/pipe_lifetime
 ./pseudofs/pseudo_mount
 
 ./rename/same_inode

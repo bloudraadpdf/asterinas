@@ -2,11 +2,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{
-    events::IoEvents,
-    prelude::*,
-    process::signal::{PollHandle, Pollee},
-};
+use crate::{events::IoEvents, prelude::*, process::signal::Pollee};
 
 /// One of two connected endpoints.
 ///
@@ -68,19 +64,7 @@ impl<T> Endpoint<T> {
     }
 }
 
-/// An [`Endpoint`] state that helps end-to-end data communication.
-///
-/// The state contains a [`Pollee`] that will be notified when new data or the buffer becomes
-/// available. Additionally, this state tracks whether communication has been shut down, i.e.,
-/// whether further data writing is disallowed.
-///
-/// By having [`EndpointState`] as a part of the endpoint data (i.e., `T` in [`Endpoint`] should
-/// implement [`AsRef<EndpointState>`]), methods like [`Endpoint::read_with`],
-/// [`Endpoint::write_with`], and [`Endpoint::poll_with`] are available for performing data
-/// transmission and registering event observers.
-///
-/// The data communication can be unidirectional, such as pipes, or bidirectional, such as UNIX
-/// sockets.
+/// Shutdown and readiness state for a UNIX socket endpoint.
 pub(crate) struct EndpointState {
     pollee: Pollee,
     is_shutdown: AtomicBool,
@@ -183,22 +167,6 @@ impl<T: AsRef<EndpointState>> Endpoint<T> {
         self.this_end().as_ref().pollee.invalidate();
     }
 
-    /// Polls the I/O events in the local [`Pollee`].
-    pub(crate) fn poll_with<F>(
-        &self,
-        mask: IoEvents,
-        poller: Option<&mut PollHandle>,
-        check: F,
-    ) -> IoEvents
-    where
-        F: FnOnce() -> IoEvents,
-    {
-        self.this_end()
-            .as_ref()
-            .pollee
-            .poll_with(mask, poller, check)
-    }
-
     /// Shuts down the local endpoint.
     ///
     /// After this method, data cannot be written to from the local endpoint
@@ -229,24 +197,6 @@ impl<T: AsRef<EndpointState>> Endpoint<T> {
         this_end
             .pollee
             .notify(IoEvents::HUP | IoEvents::ERR | IoEvents::OUT);
-    }
-
-    /// Activates the local endpoint.
-    pub(in crate::fs) fn activate(&self) {
-        self.this_end()
-            .as_ref()
-            .is_shutdown
-            .store(false, Ordering::Relaxed);
-        self.this_end().as_ref().pollee.invalidate();
-    }
-
-    /// Activates the remote endpoint.
-    pub(in crate::fs) fn peer_activate(&self) {
-        self.peer_end()
-            .as_ref()
-            .is_shutdown
-            .store(false, Ordering::Relaxed);
-        self.peer_end().as_ref().pollee.invalidate();
     }
 
     /// Returns whether the local endpoint has shut down.
