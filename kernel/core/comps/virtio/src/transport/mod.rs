@@ -109,6 +109,15 @@ pub(crate) struct ConfigManager<T: Pod> {
 }
 
 impl<T: Pod> ConfigManager<T> {
+    pub(crate) fn from_transport(transport: &dyn VirtioTransport) -> Self {
+        Self::new(
+            transport
+                .device_config_mem()
+                .map(|memory| SafePtr::new(memory, 0)),
+            transport.device_config_bar(),
+        )
+    }
+
     pub(super) fn new(
         modern_space: Option<SafePtr<T, IoMem>>,
         legacy_space: Option<(BarAccess, usize)>,

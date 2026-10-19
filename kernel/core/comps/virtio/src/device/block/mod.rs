@@ -5,12 +5,11 @@ pub mod device;
 use core::mem::offset_of;
 
 use aster_block::SECTOR_SIZE;
-use aster_util::safe_ptr::SafePtr;
 use bitflags::bitflags;
 use int_to_c_enum::TryFromInt;
 use ostd_pod::FromZeros;
 
-use crate::transport::{ConfigManager, VirtioTransport};
+use crate::transport::ConfigManager;
 
 pub const DEVICE_NAME: &str = "Virtio-Block";
 
@@ -125,15 +124,6 @@ struct VirtioBlockTopology {
 }
 
 impl VirtioBlockConfig {
-    pub(self) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
-        let safe_ptr = transport
-            .device_config_mem()
-            .map(|mem| SafePtr::new(mem, 0));
-        let bar_space = transport.device_config_bar();
-
-        ConfigManager::new(safe_ptr, bar_space)
-    }
-
     pub(self) const fn sector_size() -> usize {
         SECTOR_SIZE
     }

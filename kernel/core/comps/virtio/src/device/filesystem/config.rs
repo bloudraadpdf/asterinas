@@ -4,10 +4,9 @@
 
 use core::mem::offset_of;
 
-use aster_util::safe_ptr::SafePtr;
 use ostd_pod::FromZeros;
 
-use crate::transport::{ConfigManager, VirtioTransport};
+use crate::transport::ConfigManager;
 
 bitflags::bitflags! {
     /// The virtio-fs feature bits supported by the driver.
@@ -50,16 +49,6 @@ impl VirtioFsConfig {
     /// Returns the number of request queues advertised by the device.
     pub(super) fn num_request_queues(&self) -> u32 {
         self.num_request_queues
-    }
-
-    /// Creates a config-space manager for the virtio-fs device config.
-    pub(super) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
-        let safe_ptr = transport
-            .device_config_mem()
-            .map(|mem| SafePtr::new(mem, 0));
-        let bar_space = transport.device_config_bar();
-
-        ConfigManager::new(safe_ptr, bar_space)
     }
 }
 

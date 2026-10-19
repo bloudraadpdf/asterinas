@@ -25,7 +25,7 @@ use crate::{
         },
     },
     queue::VirtQueue,
-    transport::{DeviceTransport, VirtioTransport},
+    transport::{ConfigManager, DeviceTransport, VirtioTransport},
 };
 
 impl FileSystemDevice {
@@ -40,7 +40,8 @@ impl FileSystemDevice {
 
     /// Initializes one virtio-fs device from its virtio transport.
     pub(crate) fn init(mut device_transport: DeviceTransport) -> Result<(), VirtioDeviceError> {
-        let config_manager = VirtioFsConfig::new_manager(device_transport.as_ref());
+        let config_manager =
+            ConfigManager::<VirtioFsConfig>::from_transport(device_transport.as_ref());
         let config = config_manager.read_config();
 
         let negotiated_features = FileSystemFeatures::from_bits_truncate(Self::negotiate_features(

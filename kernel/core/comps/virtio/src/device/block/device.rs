@@ -158,7 +158,8 @@ impl DeviceInner {
 
     /// Creates and inits the device.
     fn init(mut device_transport: DeviceTransport) -> Result<Arc<Self>, VirtioDeviceError> {
-        let config_manager = VirtioBlockConfig::new_manager(device_transport.as_ref());
+        let config_manager =
+            ConfigManager::<VirtioBlockConfig>::from_transport(device_transport.as_ref());
 
         let config = config_manager.read_config();
         debug!("virio_blk_config = {:?}", config);

@@ -2,10 +2,9 @@
 
 use core::mem::offset_of;
 
-use aster_util::safe_ptr::SafePtr;
 use ostd_pod::FromZeros;
 
-use crate::transport::{ConfigManager, VirtioTransport};
+use crate::transport::ConfigManager;
 
 bitflags::bitflags! {
     pub(super) struct ConsoleFeatures: u64{
@@ -27,16 +26,6 @@ pub(super) struct VirtioConsoleConfig {
     pub rows: u16,
     pub max_nr_ports: u32,
     pub emerg_wr: u32,
-}
-
-impl VirtioConsoleConfig {
-    pub(super) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
-        let safe_ptr = transport
-            .device_config_mem()
-            .map(|mem| SafePtr::new(mem, 0));
-        let bar_space = transport.device_config_bar();
-        ConfigManager::new(safe_ptr, bar_space)
-    }
 }
 
 impl ConfigManager<VirtioConsoleConfig> {

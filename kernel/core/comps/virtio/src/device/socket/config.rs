@@ -2,10 +2,9 @@
 
 use core::mem::offset_of;
 
-use aster_util::safe_ptr::SafePtr;
 use bitflags::bitflags;
 
-use crate::transport::{ConfigManager, VirtioTransport};
+use crate::transport::ConfigManager;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
@@ -15,15 +14,6 @@ pub(super) struct VirtioVsockConfig {
 }
 
 impl VirtioVsockConfig {
-    pub(super) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
-        ConfigManager::new(
-            transport
-                .device_config_mem()
-                .map(|memory| SafePtr::new(memory, 0)),
-            transport.device_config_bar(),
-        )
-    }
-
     pub(super) fn read_guest_cid(config_manager: &ConfigManager<Self>) -> u64 {
         // We have no way to read the 64-bit CID atomically because the virtio specification says
         // "Drivers MUST NOT assume reads from fields greater than 32 bits wide are atomic." For
