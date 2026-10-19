@@ -7,6 +7,7 @@ set -e
 ./clock_nanosleep/nanosleep_err
 
 ./gettimeofday/gettimeofday
+./gettimeofday/realtime_epoch
 
 ./itimer/setitimer
 ./itimer/timer_create

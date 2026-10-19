@@ -151,6 +151,11 @@ pub fn read_tsc() -> u64 {
     unsafe { _rdtsc() }
 }
 
+/// Reads initial real time from KVM on the boot CPU, if available.
+pub fn read_kvm_realtime() -> Option<core::time::Duration> {
+    kernel::kvm_clock::read_realtime()
+}
+
 /// Reads a hardware generated 64-bit random value.
 ///
 /// Returns `None` if no random value was generated.
