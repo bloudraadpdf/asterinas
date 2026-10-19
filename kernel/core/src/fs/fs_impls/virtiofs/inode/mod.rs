@@ -45,7 +45,8 @@ use crate::{
         vfs::{
             file_system::FileSystem,
             inode::{
-                Extension, FileOps, Inode, Metadata, RenameMode, RevalidationPolicy, SymbolicLink,
+                Extension, FileOps, Inode, Metadata, ReaddirContext, RenameMode,
+                RevalidationPolicy, SymbolicLink,
             },
             path::Dentry,
         },
@@ -630,7 +631,12 @@ impl FileOps for VirtioFsInode {
         )
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         let fs = self.fs_ref();
         let open_out = fs
             .session()

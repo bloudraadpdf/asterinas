@@ -89,19 +89,17 @@ impl<T: FdOps> ProcDirOps for FdDirOps<T> {
         };
         let posix_thread = thread.as_posix_thread().unwrap();
 
-        let file_table = posix_thread.file_table().lock();
-        let Some(file_table) = file_table.as_ref() else {
-            // The thread has exited.
-            return Ok(());
-        };
-
-        // Collect the list of FDs first before visiting entries. This can avoid holding the file
-        // table lock while calling `visit_fn`, which may break the atomic mode.
         let file_descs = {
+            let file_table = posix_thread.file_table().lock();
+            let Some(file_table) = file_table.as_ref() else {
+                return Ok(());
+            };
             let file_table = file_table.read();
             file_table
                 .fds_and_files()
                 .map(|(file_desc, _)| usize::from(file_desc))
+                .filter(|file_desc| *file_desc >= offset.saturating_sub(2))
+                .take(64)
                 .collect::<Vec<_>>()
         };
 

@@ -21,8 +21,8 @@ use crate::{
         vfs::{
             file_system::FileSystem,
             inode::{
-                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
-                SymbolicLink,
+                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, ReaddirContext,
+                RenameMode, SymbolicLink,
             },
             path::Dentry,
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
@@ -60,8 +60,13 @@ impl FileOps for Ext2Inode {
         }
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
-        self.readdir_at(offset, visitor)
+    fn readdir_at(
+        &self,
+        context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
+        self.readdir_at(offset, visitor, context.status_flags)
     }
 }
 

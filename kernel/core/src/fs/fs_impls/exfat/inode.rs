@@ -34,7 +34,10 @@ use crate::{
         utils::DirentVisitor,
         vfs::{
             file_system::FileSystem,
-            inode::{Extension, FileOps, Inode, Metadata, MknodType, RenameMode, SymbolicLink},
+            inode::{
+                Extension, FileOps, Inode, Metadata, MknodType, ReaddirContext, RenameMode,
+                SymbolicLink,
+            },
             path::Dentry,
         },
     },
@@ -1374,7 +1377,12 @@ impl FileOps for ExfatInode {
         }
     }
 
-    fn readdir_at(&self, dir_cnt: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        context: &ReaddirContext<'_>,
+        dir_cnt: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         let inner = self.inner.upread();
 
         if dir_cnt >= (inner.num_sub_inodes + 2) as usize {
@@ -1425,7 +1433,9 @@ impl FileOps for ExfatInode {
             dir_read
         };
 
-        inner.upgrade().update_atime()?;
+        if !context.status_flags.contains(StatusFlags::O_NOATIME) {
+            inner.upgrade().update_atime()?;
+        }
 
         Ok(dir_read)
     }

@@ -10,7 +10,7 @@ use crate::{
     fs::{
         file::{PerOpenFileOps, StatusFlags, SyncMode},
         utils::DirentVisitor,
-        vfs::inode::{FileOps, Inode},
+        vfs::inode::{FileOps, Inode, ReaddirContext},
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
@@ -56,7 +56,12 @@ impl FileOps for VirtioFsDir {
         return_errno_with_message!(Errno::EISDIR, "the inode is a directory");
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         // FIXME: `readdir_at` should pass current status flags to the
         // server, while `FileOps` interface currently does not expose them,
         // so `FUSE_READDIR` uses the flags captured at open time.

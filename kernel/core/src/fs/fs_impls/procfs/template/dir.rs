@@ -18,7 +18,8 @@ use crate::{
         vfs::{
             file_system::{FileSystem, SuperBlock},
             inode::{
-                Extension, FileOps, Inode, Metadata, MknodType, RenameMode, RevalidationPolicy,
+                Extension, FileOps, Inode, Metadata, MknodType, ReaddirContext, RenameMode,
+                RevalidationPolicy,
             },
             path::{Dentry, is_dot, is_dotdot},
         },
@@ -114,7 +115,12 @@ impl<D: ProcDirOps + 'static> FileOps for ProcDir<D> {
         Err(Error::new(Errno::EISDIR))
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         if self.inner.is_removed() {
             return Ok(0);
         }
@@ -139,12 +145,15 @@ impl<D: ProcDirOps + 'static> FileOps for ProcDir<D> {
             }
 
             self.inner.visit_entries_from_offset(*offset, |child| {
-                visitor.visit(
-                    child.name.as_ref(),
-                    child.ino,
-                    child.type_,
-                    child.next_offset,
-                )?;
+                let inode = match context.child_inode_number(child.name.as_ref()) {
+                    Ok(dentry) => dentry,
+                    Err(error) if matches!(error.error(), Errno::ENOENT | Errno::ESRCH) => {
+                        *offset = child.next_offset;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                visitor.visit(child.name.as_ref(), inode, child.type_, child.next_offset)?;
                 *offset = child.next_offset;
                 Ok(())
             })?;
@@ -416,7 +425,6 @@ mod readdir {
     /// starting point of the next [`FileOps::readdir_at`] call.
     pub(in procfs) struct ReaddirEntry<'a> {
         pub(super) name: Cow<'a, str>,
-        pub(super) ino: u64,
         pub(super) type_: InodeType,
         pub(super) next_offset: usize,
     }
@@ -425,28 +433,16 @@ mod readdir {
         /// Creates an entry with an explicit continuation offset.
         pub(super) fn new(
             name: impl Into<Cow<'a, str>>,
-            ino: u64,
             type_: InodeType,
             next_offset: usize,
         ) -> Self {
             Self {
                 name: name.into(),
-                ino,
                 type_,
                 next_offset,
             }
         }
     }
-
-    /// A placeholder inode number for procfs entries.
-    ///
-    /// [`FileOps::readdir_at`] reports procfs entries without instantiating child inodes first,
-    /// so the inode number returned here is only a placeholder.
-    /// Lookup still creates the real child inode on demand when the path is opened.
-    //
-    // TODO: Adopt deterministic inode numbers derived from stable entity identity
-    // (for example, PID) as the long-term fix for `d_ino`/`st_ino` consistency.
-    pub(super) const PLACEHOLDER_DIRENT_INO: u64 = 2;
 
     /// Builds sequential directory entries whose continuation offsets increase by one.
     ///
@@ -468,8 +464,7 @@ mod readdir {
             .filter_map(move |(idx, entry)| {
                 let next_offset = first_entry_offset.saturating_add(idx).saturating_add(1);
                 let ListedEntry { name, type_ } = entry;
-                (next_offset > offset)
-                    .then(|| ReaddirEntry::new(name, PLACEHOLDER_DIRENT_INO, type_, next_offset))
+                (next_offset > offset).then(|| ReaddirEntry::new(name, type_, next_offset))
             })
     }
 
@@ -499,7 +494,7 @@ mod readdir {
             let next_offset = first_entry_offset.saturating_add(key).saturating_add(1);
             (key >= start_key && next_offset > offset).then(|| {
                 let ListedEntry { name, type_ } = entry_fn(key);
-                ReaddirEntry::new(name, PLACEHOLDER_DIRENT_INO, type_, next_offset)
+                ReaddirEntry::new(name, type_, next_offset)
             })
         })
     }

@@ -247,7 +247,7 @@ fn read_layer_entries(layer_dir: &Arc<Dentry>, layer_index: usize) -> Result<Vec
         layer_index,
         entries: Vec::new(),
     };
-    read_all_dirents(dir.inode(), &mut visitor)?;
+    read_all_dirents(&dir, &mut visitor)?;
     // The two dot names are positions of their own, not entries any layer can contribute.
     let mut entries = visitor.entries;
     entries.retain(|entry| !is_dot_or_dotdot(&entry.name));

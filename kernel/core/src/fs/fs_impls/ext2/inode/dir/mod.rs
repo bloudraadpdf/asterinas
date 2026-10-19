@@ -53,12 +53,15 @@ impl Inode {
         &self,
         offset: usize,
         visitor: &mut dyn DirentVisitor,
+        status_flags: crate::fs::file::StatusFlags,
     ) -> Result<usize> {
         let result = {
             let inner = self.inner.read();
             inner.readdir_at(offset, visitor)
         };
-        self.inner.write().set_atime(utils::now());
+        if !status_flags.contains(crate::fs::file::StatusFlags::O_NOATIME) {
+            self.inner.write().set_atime(utils::now());
+        }
         result
     }
 
