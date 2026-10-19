@@ -74,7 +74,11 @@ fn do_accept(
 
     let fd = {
         let mut file_table_locked = file_table.unwrap().write();
-        file_table_locked.insert(connected_socket, fd_flags)
+        file_table_locked.insert(
+            connected_socket,
+            fd_flags,
+            ctx.process.resource_limits().nofile(),
+        )?
     };
 
     Ok(SyscallReturn::Return(fd.into()))

@@ -141,28 +141,27 @@ impl FileTable {
         fd: FileDesc,
         ceil_fd: FileDesc,
         flags: FdFlags,
+        limit: usize,
     ) -> Result<FileDesc> {
         let entry = self.duplicate_entry(fd, flags)?;
 
-        // Get the lowest-numbered available fd equal to or greater than `ceil_fd`.
-        let get_min_free_fd = || -> usize {
-            let ceil_fd = ceil_fd.into();
-            if self.table.get(ceil_fd).is_none() {
-                return ceil_fd;
-            }
-
-            for idx in ceil_fd + 1..self.len() {
-                if self.table.get(idx).is_none() {
-                    return idx;
-                }
-            }
-            self.len()
-        };
-
-        let min_free_fd = get_min_free_fd();
+        let min_free_fd = self.find_free_fd(ceil_fd.into(), limit)?;
         self.table.put_at(min_free_fd, entry);
-        // Resource limits guarantee the table never exceeds `i32::MAX` entries.
         Ok((min_free_fd as RawFileDesc).try_into().unwrap())
+    }
+
+    fn find_free_fd(&self, start: usize, limit: usize) -> Result<usize> {
+        let free = if self.table.len() == self.len() || start >= self.len() {
+            self.len().max(start)
+        } else {
+            (start..self.len().min(limit))
+                .find(|&fd| self.table.get(fd).is_none())
+                .unwrap_or(self.len())
+        };
+        if free >= limit {
+            return_errno_with_message!(Errno::EMFILE, "the open file limit has been reached");
+        }
+        Ok(free)
     }
 
     /// Duplicates `fd` onto the exact descriptor number `new_fd`.
@@ -187,10 +186,35 @@ impl FileTable {
         Ok(FileTableEntry::new(file, flags))
     }
 
-    pub(crate) fn insert(&mut self, item: Arc<dyn FileLike>, flags: FdFlags) -> FileDesc {
-        let entry = FileTableEntry::new(item, flags);
-        // Resource limits guarantee the table never exceeds `i32::MAX` entries.
-        (self.table.put(entry) as RawFileDesc).try_into().unwrap()
+    pub(crate) fn insert(
+        &mut self,
+        item: Arc<dyn FileLike>,
+        flags: FdFlags,
+        limit: usize,
+    ) -> Result<FileDesc> {
+        let fd = self.find_free_fd(0, limit)?;
+        self.table.put_at(fd, FileTableEntry::new(item, flags));
+        Ok((fd as RawFileDesc).try_into().unwrap())
+    }
+
+    /// Installs a descriptor pair only when both descriptors fit the limit.
+    pub(crate) fn insert_pair(
+        &mut self,
+        first: Arc<dyn FileLike>,
+        second: Arc<dyn FileLike>,
+        flags: FdFlags,
+        limit: usize,
+    ) -> Result<(FileDesc, FileDesc)> {
+        let first_fd = self.find_free_fd(0, limit)?;
+        let second_fd = self.find_free_fd(first_fd + 1, limit)?;
+        self.table
+            .put_at(first_fd, FileTableEntry::new(first, flags));
+        self.table
+            .put_at(second_fd, FileTableEntry::new(second, flags));
+        Ok((
+            (first_fd as RawFileDesc).try_into().unwrap(),
+            (second_fd as RawFileDesc).try_into().unwrap(),
+        ))
     }
 
     pub(crate) fn close_file(&mut self, fd: FileDesc) -> Option<ClosedFile> {

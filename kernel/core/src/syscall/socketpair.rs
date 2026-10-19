@@ -61,8 +61,12 @@ pub(super) fn sys_socketpair(
         } else {
             FdFlags::empty()
         };
-        let fd_a = file_table_locked.insert(socket_a, fd_flags);
-        let fd_b = file_table_locked.insert(socket_b, fd_flags);
+        let (fd_a, fd_b) = file_table_locked.insert_pair(
+            socket_a,
+            socket_b,
+            fd_flags,
+            ctx.process.resource_limits().nofile(),
+        )?;
         SocketFds(fd_a.into(), fd_b.into())
     };
     ctx.user_space().write_val(sv, &socket_fds)?;

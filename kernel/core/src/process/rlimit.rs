@@ -36,6 +36,13 @@ pub(crate) struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    /// Returns the exclusive upper bound for newly allocated file descriptors.
+    pub(crate) fn nofile(&self) -> usize {
+        self.get_rlimit(ResourceType::RLIMIT_NOFILE)
+            .get_cur()
+            .min(i32::MAX as u64) as usize
+    }
+
     /// Returns a reference to a specific resource limit.
     pub(crate) fn get_rlimit(&self, resource: ResourceType) -> &RLimit64 {
         &self.rlimits[resource as usize]

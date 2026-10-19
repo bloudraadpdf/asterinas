@@ -44,7 +44,11 @@ pub(super) fn sys_fsmount(
         .borrow_file_table()
         .unwrap()
         .write()
-        .insert(file, FdFlags::from(flags));
+        .insert(
+            file,
+            FdFlags::from(flags),
+            ctx.process.resource_limits().nofile(),
+        )?;
     Ok(SyscallReturn::Return(fd.into()))
 }
 

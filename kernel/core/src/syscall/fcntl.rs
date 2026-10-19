@@ -46,12 +46,17 @@ pub(super) fn sys_fcntl(
 }
 
 fn handle_dupfd(fd: FileDesc, arg: u64, flags: FdFlags, ctx: &Context) -> Result<SyscallReturn> {
-    let ceil_fd = (arg as RawFileDesc)
-        .try_into()
-        .map_err(|_| Error::with_message(Errno::EINVAL, "invalid fd"))?;
-
     let file_table = ctx.thread_local.borrow_file_table();
-    let new_fd = file_table.unwrap().write().dup_ceil(fd, ceil_fd, flags)?;
+    let mut file_table = file_table.unwrap().write();
+    file_table.get_file(fd)?;
+    let ceil_fd: FileDesc = (arg as RawFileDesc)
+        .try_into()
+        .map_err(|_| Error::with_message(Errno::EINVAL, "invalid minimum fd"))?;
+    let limit = ctx.process.resource_limits().nofile();
+    if usize::from(ceil_fd) >= limit {
+        return_errno_with_message!(Errno::EINVAL, "the minimum fd exceeds the open file limit");
+    }
+    let new_fd = file_table.dup_ceil(fd, ceil_fd, flags, limit)?;
     Ok(SyscallReturn::Return(new_fd.into()))
 }
 

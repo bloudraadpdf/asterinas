@@ -129,28 +129,56 @@ impl FileMessage {
         if nfiles == 0 {
             return_errno_with_message!(Errno::EINVAL, "the control message buffer is too small");
         }
-        let output_flags = if nfiles < self.files.len() {
+        let installed = {
+            let mut payload_writer = writer.clone_exclusive();
+            payload_writer.skip(size_of::<CControlHeader>());
+
+            let current = Task::current().unwrap();
+            let file_table = current.as_thread_local().unwrap().borrow_file_table();
+            let limit = current
+                .as_posix_thread()
+                .unwrap()
+                .process()
+                .resource_limits()
+                .nofile();
+            let mut installed = 0;
+            for file in self.files[..nfiles].iter() {
+                let fd = match file_table
+                    .unwrap()
+                    .write()
+                    .insert(file.clone(), fd_flags, limit)
+                {
+                    Ok(fd) => fd,
+                    Err(error) if error.error() == Errno::EMFILE => break,
+                    Err(error) => return Err(error),
+                };
+                if let Err(error) = payload_writer.write_val::<i32>(&(fd.into())) {
+                    let closed = file_table.unwrap().write().close_file(fd);
+                    drop(closed);
+                    if installed == 0 {
+                        return Err(error.into());
+                    }
+                    break;
+                }
+                installed += 1;
+            }
+            installed
+        };
+        if installed == 0 {
+            return_errno_with_message!(Errno::EMFILE, "no descriptor could be installed");
+        }
+        let header = CControlHeader::new(
+            CSocketOptionLevel::SOL_SOCKET,
+            CControlType::SCM_RIGHTS as i32,
+            installed * size_of::<i32>(),
+        );
+        writer.write_val(&header)?;
+        writer.skip(installed * size_of::<i32>());
+        let output_flags = if installed < self.files.len() {
             RecvFlags::MSG_CTRUNC
         } else {
             RecvFlags::empty()
         };
-
-        let header = CControlHeader::new(
-            CSocketOptionLevel::SOL_SOCKET,
-            CControlType::SCM_RIGHTS as i32,
-            nfiles * size_of::<i32>(),
-        );
-        writer.write_val::<CControlHeader>(&header)?;
-
-        let current = Task::current().unwrap();
-        let file_table = current.as_thread_local().unwrap().borrow_file_table();
-        for file in self.files[..nfiles].iter() {
-            let fd = file_table.unwrap().write().insert(file.clone(), fd_flags);
-            // Perhaps we should remove the inserted files from the file table if we cannot write
-            // the file descriptor back to user space? However, even Linux cannot handle every
-            // corner case (https://elixir.bootlin.com/linux/v6.15.2/source/net/core/scm.c#L357).
-            writer.write_val::<i32>(&(fd.into()))?;
-        }
 
         Ok((header, output_flags))
     }
