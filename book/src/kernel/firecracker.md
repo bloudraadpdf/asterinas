@@ -47,6 +47,24 @@ reserves 128 KiB per task stack and retains its guard pages.
 `log_max_level_info` removes kernel debug messages at compile time and keeps
 informational messages, warnings and errors.
 
+The default features retain the general-purpose device and filesystem set.
+A build with `--no-default-features` retains the serial console, loopback,
+virtio-MMIO entropy and vsock, CPIO, and memory and pseudo filesystems.
+The optional component features are:
+
+| Feature | Components |
+| --- | --- |
+| `console_video` | DRM, framebuffer, virtual terminals, keyboard and input devices |
+| `storage_nvme` | NVMe driver and request workers |
+| `filesystems_extra` | ext2, exFAT, overlayfs, configfs and virtiofs |
+| `virtio_devices` | virtio block, console, filesystem, input and network devices |
+| `virtio_pci` | virtio PCI transport |
+
+`filesystems_extra` enables `virtio_devices` for virtiofs. The `cvm_guest`
+feature enables `filesystems_extra` for its configfs interface.
+Process isolation, namespaces and cgroup accounting remain available in a
+minimal build. The default console is `ttyS0` when `console_video` is disabled.
+
 The output kernel image is:
 
 ```text

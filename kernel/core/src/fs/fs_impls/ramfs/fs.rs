@@ -1143,6 +1143,7 @@ impl Inode for RamInode {
         self.metadata.lock().set_mtime(time);
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.metadata.lock().ctime
     }

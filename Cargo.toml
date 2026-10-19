@@ -188,7 +188,7 @@ aster-pci = { path = "kernel/core/comps/pci" }
 aster-softirq = { path = "kernel/core/comps/softirq" }
 aster-systree = { path = "kernel/core/comps/systree" }
 aster-time = { path = "kernel/core/comps/time" }
-aster-virtio = { path = "kernel/core/comps/virtio" }
+aster-virtio = { path = "kernel/core/comps/virtio", default-features = false }
 
 # Crates under kernel/libs
 aster-bigtcp = { path = "kernel/libs/aster-bigtcp" }

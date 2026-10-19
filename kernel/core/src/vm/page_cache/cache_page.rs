@@ -56,6 +56,7 @@ impl PageState {
     }
 
     /// Checks if the page is dirty.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(super) fn is_dirty(self) -> bool {
         matches!(self, Self::Dirty)
     }
@@ -144,6 +145,7 @@ pub(crate) trait CachePageExt: Sized {
     /// Callers must invoke this method only to finish a writeback operation
     /// previously started with [`LockedCachePage::set_writing_back`], either
     /// from its completion callback or while handling submission failure.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn clear_writing_back(&self) {
         self.metadata()
             .is_writing_back
@@ -307,6 +309,7 @@ impl<PageRef: Borrow<CachePage>> LockedCachePage<PageRef> {
 
     /// Sets the writing back flag of the page, indicating that the page
     /// is in-flight to storage.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn set_writing_back(&self) {
         self.metadata()
             .is_writing_back
@@ -329,6 +332,7 @@ impl<PageRef: Borrow<CachePage>> LockedCachePage<PageRef> {
 
 impl LockedCachePage<CachePage> {
     /// Unlocks the page and returns the underlying cache page.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn unlock(mut self) -> CachePage {
         let page = self.page.take().expect("page already taken");
         unlock_page(&page, self.wait_queue);
@@ -338,6 +342,7 @@ impl LockedCachePage<CachePage> {
     /// Transfers ownership of the locked page to a new guard.
     ///
     /// This method leaves this guard inert so it will not unlock the page when dropped.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(super) fn detach(&mut self) -> LockedCachePage {
         let page = self.page.take().expect("page already detached");
         LockedCachePage::new(page, self.wait_queue)

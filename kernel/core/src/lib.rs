@@ -7,7 +7,7 @@
 #![no_std]
 #![deny(unsafe_code)]
 #![feature(alloc_io)]
-#![feature(array_try_from_fn)]
+#![cfg_attr(feature = "console_video", feature(array_try_from_fn))]
 #![feature(associated_type_defaults)]
 #![feature(btree_cursors)]
 #![feature(debug_closure_helpers)]

@@ -428,6 +428,7 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
     fn set_mtime(&self, self_dentry: &Dentry, time: Duration);
 
     /// Returns the inode's metadata-change time.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration;
 
     /// Sets the inode's metadata-change time.
@@ -749,6 +750,7 @@ impl Debug for dyn Inode {
 pub(crate) struct Extension {
     group1: Once<ThinBox<dyn Any + Send + Sync>>,
     group2: Once<ThinBox<dyn Any + Send + Sync>>,
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     group3: Once<ThinBox<dyn Any + Send + Sync>>,
 }
 
@@ -758,6 +760,7 @@ impl Extension {
         Self {
             group1: Once::new(),
             group2: Once::new(),
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             group3: Once::new(),
         }
     }
@@ -773,6 +776,7 @@ impl Extension {
     }
 
     /// Gets the third extension group.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn group3(&self) -> &Once<ThinBox<dyn Any + Send + Sync>> {
         &self.group3
     }

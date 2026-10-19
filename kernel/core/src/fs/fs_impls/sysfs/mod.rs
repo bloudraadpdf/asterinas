@@ -6,6 +6,7 @@ mod kernel;
 #[cfg(ktest)]
 mod test;
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 use aster_systree::SysNode;
 pub(crate) use aster_systree::primary_tree as systree_singleton;
 use fs::SysFsType;
@@ -21,6 +22,7 @@ pub(crate) fn init() {
 }
 
 /// Registers a new kernel `SysNode`.
+#[cfg(any(feature = "filesystems_extra", ktest))]
 pub(crate) fn register_kernel_sysnode(config_obj: Arc<dyn SysNode>) -> Result<()> {
     kernel::register(config_obj)
 }

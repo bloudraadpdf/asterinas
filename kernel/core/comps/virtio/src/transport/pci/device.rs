@@ -123,7 +123,11 @@ impl VirtioTransport for VirtioPciModernTransport {
             (self.notify.offset + self.notify.offset_multiplier * idx as u32) as usize,
         ));
 
-        ConfigManager::new(safe_ptr, None)
+        ConfigManager::new(
+            safe_ptr,
+            #[cfg(feature = "pci")]
+            None,
+        )
     }
 
     fn num_queues(&self) -> u16 {

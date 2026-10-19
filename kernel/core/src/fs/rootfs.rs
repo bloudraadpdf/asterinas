@@ -38,18 +38,20 @@ use core::{
 use aster_cmdline::parse::ParamStorage;
 use spin::once::Once;
 
-use super::{
-    ext2,
-    vfs::{
-        file_system::FsFlags,
-        path::{FsPath, Mount, MountNamespace, Path, PathResolver, PerMountFlags},
-        registry::{DynFsType, FsAndRoot, FsCreationCtx},
-    },
+#[cfg(feature = "filesystems_extra")]
+use super::ext2;
+use super::vfs::{
+    file_system::FsFlags,
+    path::{FsPath, Mount, MountNamespace, Path, PathResolver, PerMountFlags},
+    registry::{DynFsType, FsAndRoot, FsCreationCtx},
 };
 use crate::prelude::*;
 
 /// Filesystem types supported for the root filesystem.
-pub(crate) static SUPPORTED_ROOTFS_TYPES: &[&dyn DynFsType] = &[&ext2::EXT2_TYPE];
+pub(crate) static SUPPORTED_ROOTFS_TYPES: &[&dyn DynFsType] = &[
+    #[cfg(feature = "filesystems_extra")]
+    &ext2::EXT2_TYPE,
+];
 
 /// Mounts and switches to the root filesystem configured by the kernel command line.
 ///

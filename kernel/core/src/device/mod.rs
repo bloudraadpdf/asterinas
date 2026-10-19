@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#[cfg(feature = "console_video")]
 mod evdev;
+#[cfg(feature = "console_video")]
 mod fb;
 mod mem;
 pub(crate) mod misc;
@@ -57,9 +59,11 @@ pub(crate) fn init_in_first_kthread() {
     registry::init_in_first_kthread();
     mem::init_in_first_kthread();
     misc::init_in_first_kthread();
+    #[cfg(feature = "console_video")]
     evdev::init_in_first_kthread();
     // TODO: Transfer ownership of the boot framebuffer to DRM and skip registering the
     // legacy framebuffer device once DRM has initialized successfully.
+    #[cfg(feature = "console_video")]
     fb::init_in_first_kthread();
 }
 
