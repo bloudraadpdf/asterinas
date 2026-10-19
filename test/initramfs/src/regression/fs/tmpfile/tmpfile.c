@@ -84,6 +84,22 @@ FN_TEST(tmpfile_status_flags_survive_setfl)
 }
 END_TEST()
 
+FN_TEST(tmpfile_cannot_be_linked_after_last_unlink)
+{
+	int fd = TEST_SUCC(open(TEST_DIR, O_TMPFILE | O_RDWR, 0600));
+	int dirfd = TEST_SUCC(open(TEST_DIR, O_RDONLY | O_DIRECTORY));
+	TEST_SUCC(linkat(fd, "", dirfd, "first", AT_EMPTY_PATH));
+	TEST_SUCC(unlinkat(dirfd, "first", 0));
+	TEST_ERRNO(linkat(fd, "", dirfd, "again", AT_EMPTY_PATH), ENOENT);
+	TEST_SUCC(close(fd));
+	fd = TEST_SUCC(openat(dirfd, "regular", O_CREAT | O_RDWR, 0600));
+	TEST_SUCC(unlinkat(dirfd, "regular", 0));
+	TEST_ERRNO(linkat(fd, "", dirfd, "again", AT_EMPTY_PATH), ENOENT);
+	TEST_SUCC(close(fd));
+	TEST_SUCC(close(dirfd));
+}
+END_TEST()
+
 FN_TEST(tmpfile_open_write_only_succeeds)
 {
 	int fd;
