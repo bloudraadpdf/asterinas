@@ -262,8 +262,7 @@ impl OverlayInode {
             .get()
             .expect("an upper entry replaced by a whiteout has an upper real object");
 
-        let cleared =
-            kind == RemoveKind::Rmdir && !read_child_names(occupant.real_inode())?.is_empty();
+        let cleared = kind == RemoveKind::Rmdir && !read_child_names(occupant.dentry())?.is_empty();
         if cleared {
             let empty_copy = fs.upper_workdir_inuse().create_workdir_temp(
                 &target.name,

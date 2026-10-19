@@ -285,7 +285,7 @@ impl UpperWorkdirInuse {
     fn remove_work_entries(&self, dir_dentry: &Arc<Dentry>, level: usize) -> Result<()> {
         const WORKDIR_CLEANUP_MAX_DEPTH: usize = 2;
 
-        let names = read_child_names(dir_dentry.inode())?;
+        let names = read_child_names(dir_dentry)?;
         let dir = dir_dentry.as_dir_dentry_or_err()?;
         for name in names {
             let child = dir.lookup_child(&name)?;

@@ -528,12 +528,17 @@ impl DirentVisitor for TestDirentVisitor {
 #[ktest]
 fn readdir_leaf() {
     let root_dentry = init_sysfs(create_mock_systree());
-    let root_inode = root_dentry.inode();
-    let leaf1_inode = root_inode
-        .lookup("branch1")
+    let branch = root_dentry
+        .as_dir_dentry_or_err()
         .unwrap()
-        .lookup("leaf1")
-        .unwrap(); // The sysfs dir for the leaf node
+        .lookup_child("branch1")
+        .unwrap();
+    let leaf1_dentry = branch
+        .as_dir_dentry_or_err()
+        .unwrap()
+        .lookup_child("leaf1")
+        .unwrap();
+    let leaf1_inode = leaf1_dentry.inode();
     let mut visitor = TestDirentVisitor { entries: vec![] };
 
     // Action: Read directory entries from the sysfs directory representing a systree leaf node
@@ -541,7 +546,11 @@ fn readdir_leaf() {
     let mut offset = 0;
     loop {
         // Pass offset as usize
-        let result = leaf1_inode.readdir_at(offset, &mut visitor);
+        let result = leaf1_inode.readdir_at(
+            &crate::fs::vfs::inode::ReaddirContext::new(&leaf1_dentry, StatusFlags::empty()),
+            offset,
+            &mut visitor,
+        );
         match result {
             Ok(next_offset) => {
                 if next_offset == offset || next_offset == 0 {

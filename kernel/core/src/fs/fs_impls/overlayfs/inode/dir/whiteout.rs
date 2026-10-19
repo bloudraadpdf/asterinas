@@ -265,7 +265,7 @@ impl OverlayFs {
     /// it clears are the **upper's** own: only this mount publishes there, and an external
     /// writer under it is outside the supported contract.
     pub(super) fn sweep_whiteouts(&self, upper_dir: &Arc<Dentry>) -> Result<()> {
-        let names = read_child_names(upper_dir.inode())?;
+        let names = read_child_names(upper_dir)?;
         self.validate_whiteout_children(upper_dir, &names)?;
         let dir = upper_dir.as_dir_dentry_or_err()?;
         for name in &names {

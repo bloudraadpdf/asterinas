@@ -21,7 +21,7 @@ use crate::{
         },
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
-            inode::{Extension, FileOps, Inode, Metadata, SymbolicLink},
+            inode::{Extension, FileOps, Inode, Metadata, ReaddirContext, SymbolicLink},
             path::Dentry,
             registry::FsCreationCtx,
             xattr::{XATTR_LIST_MAX_LEN, XattrName, XattrNamespace},
@@ -181,7 +181,12 @@ impl FileOps for ErofsInode {
     ) -> Result<usize> {
         return_errno!(Errno::EROFS);
     }
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         let fs = self.fs.upgrade().unwrap();
         let mut position = offset as u64;
         loop {

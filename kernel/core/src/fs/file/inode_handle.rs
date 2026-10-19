@@ -145,7 +145,11 @@ impl InodeHandle {
             self.path().inode().as_ref()
         };
         let mut offset = self.offset.lock();
-        let read_cnt = file_ops.readdir_at(*offset, visitor)?;
+        let read_cnt = file_ops.readdir_at(
+            &crate::fs::vfs::inode::ReaddirContext::new(self.path().dentry(), self.status_flags()),
+            *offset,
+            visitor,
+        )?;
         *offset += read_cnt;
         Ok(read_cnt)
     }

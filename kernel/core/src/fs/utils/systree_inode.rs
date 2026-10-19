@@ -14,8 +14,8 @@ use crate::{
         vfs::{
             file_system::{FileSystem, SuperBlock},
             inode::{
-                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
-                RevalidationPolicy, SymbolicLink,
+                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, ReaddirContext,
+                RenameMode, RevalidationPolicy, SymbolicLink,
             },
             path::Dentry as VfsDentry,
         },
@@ -336,7 +336,12 @@ impl<KInode: SysTreeInodeTy + Send + Sync + 'static> FileOps for KInode {
         Ok(len)
     }
 
-    default fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    default fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         // Why interpreting the `offset` argument as an inode number?
         //
         // It may take multiple `getdents` system calls

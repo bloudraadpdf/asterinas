@@ -332,6 +332,32 @@ bitflags! {
     }
 }
 
+/// State of an open directory during enumeration.
+pub struct ReaddirContext<'a> {
+    dentry: &'a Dentry,
+    /// Current per-open file status flags.
+    pub status_flags: StatusFlags,
+}
+
+impl<'a> ReaddirContext<'a> {
+    pub(crate) fn new(dentry: &'a Dentry, status_flags: StatusFlags) -> Self {
+        Self {
+            dentry,
+            status_flags,
+        }
+    }
+
+    /// Returns a child inode number through the directory's dentry cache.
+    pub fn child_inode_number(&self, name: &str) -> Result<u64> {
+        Ok(self
+            .dentry
+            .as_dir_dentry_or_err()?
+            .lookup_child(name)?
+            .inode()
+            .ino())
+    }
+}
+
 /// Basic file operations.
 ///
 /// For inode-backed files without per-`open()` state, [`Inode`] implements this
@@ -355,7 +381,12 @@ pub trait FileOps {
     ) -> Result<usize>;
 
     /// Reads directory entries from the given offset.
-    fn readdir_at(&self, _offset: usize, _visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        _offset: usize,
+        _visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         return_errno_with_message!(Errno::ENOTDIR, "readdir is not supported");
     }
 }

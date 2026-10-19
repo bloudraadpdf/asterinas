@@ -197,14 +197,15 @@ impl RealObjectStack {
 }
 
 /// Drives one real directory through `visitor` until it reports exhaustion.
-pub(super) fn read_all_dirents(
-    real_dir: &Arc<dyn Inode>,
-    visitor: &mut dyn DirentVisitor,
-) -> Result<()> {
+pub(super) fn read_all_dirents(real_dir: &Dentry, visitor: &mut dyn DirentVisitor) -> Result<()> {
     // A single `readdir_at` may stop short of the end, so the loop advances by what it reported.
     let mut offset = 0;
     loop {
-        match real_dir.readdir_at(offset, visitor)? {
+        match real_dir.inode().readdir_at(
+            &crate::fs::vfs::inode::ReaddirContext::new(real_dir, StatusFlags::empty()),
+            offset,
+            visitor,
+        )? {
             0 => break,
             visited => offset += visited,
         }
@@ -212,7 +213,7 @@ pub(super) fn read_all_dirents(
     Ok(())
 }
 
-pub(super) fn read_child_names(real_dir: &Arc<dyn Inode>) -> Result<Vec<String>> {
+pub(super) fn read_child_names(real_dir: &Dentry) -> Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
     read_all_dirents(real_dir, &mut names)?;
     names.retain(|name| !path::is_dot_or_dotdot(name));

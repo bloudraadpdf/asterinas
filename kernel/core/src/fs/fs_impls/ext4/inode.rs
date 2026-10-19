@@ -17,8 +17,8 @@ use crate::{
         vfs::{
             file_system::FileSystem,
             inode::{
-                Extension, FileOps, HardLinkability, Inode, Metadata, MknodType, RenameMode,
-                SymbolicLink,
+                Extension, FileOps, HardLinkability, Inode, Metadata, MknodType, ReaddirContext,
+                RenameMode, SymbolicLink,
             },
             path::Dentry,
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
@@ -292,7 +292,12 @@ impl FileOps for Ext4Inode {
         result.map(|()| 0)
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         let mut position = offset;
         loop {
             let entries = {

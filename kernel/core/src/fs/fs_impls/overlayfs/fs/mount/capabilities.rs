@@ -128,7 +128,14 @@ impl UpperFilesystemCapabilities {
         let mut d_type_probe = DTypeProbeVisitor::new();
         let mut offset = 0;
         let d_type_scan_result = loop {
-            match workspace.inode().readdir_at(offset, &mut d_type_probe) {
+            match workspace.inode().readdir_at(
+                &crate::fs::vfs::inode::ReaddirContext::new(
+                    workspace,
+                    crate::fs::file::StatusFlags::empty(),
+                ),
+                offset,
+                &mut d_type_probe,
+            ) {
                 Ok(0) => break Ok(()),
                 Ok(visited) => offset += visited,
                 Err(err) => break Err(err),

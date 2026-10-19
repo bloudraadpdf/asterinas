@@ -18,7 +18,7 @@ use crate::{
         },
         utils::DirentVisitor,
         vfs::{
-            inode::{FileOps, Inode},
+            inode::{FileOps, Inode, ReaddirContext},
             path::Dentry,
         },
     },
@@ -182,7 +182,12 @@ impl FileOps for OverlayDirOpenHandle {
         return_errno_with_message!(Errno::EISDIR, "the inode is a directory");
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        _context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         self.emit_entries(offset, visitor)
     }
 }

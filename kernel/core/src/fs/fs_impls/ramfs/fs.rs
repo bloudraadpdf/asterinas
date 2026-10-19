@@ -27,7 +27,7 @@ use crate::{
             file_system::{FileSystem, FsEventSubscriberStats, SuperBlock},
             inode::{
                 Extension, FallocMode, FileOps, HardLinkability, Inode, Metadata, MknodType,
-                RenameMode, RevalidationPolicy, SymbolicLink,
+                ReaddirContext, RenameMode, RevalidationPolicy, SymbolicLink,
             },
             path::{Dentry, is_dot, is_dot_or_dotdot, is_dotdot},
             registry::{FsCreationCtx, FsProperties, FsType},
@@ -1081,7 +1081,7 @@ impl FileOps for RamInode {
         &self,
         offset: usize,
         writer: &mut VmWriter,
-        _status_flags: StatusFlags,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
         let read_len = match &self.inner {
             Inner::File(page_cache) => {
@@ -1097,7 +1097,7 @@ impl FileOps for RamInode {
             _ => return_errno_with_message!(Errno::EISDIR, "read is not supported"),
         };
 
-        if self.typ == InodeType::File {
+        if self.typ == InodeType::File && !status_flags.contains(StatusFlags::O_NOATIME) {
             self.metadata.lock().set_atime(now());
         }
         Ok(read_len)
@@ -1160,7 +1160,12 @@ impl FileOps for RamInode {
         Ok(written_len)
     }
 
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+    fn readdir_at(
+        &self,
+        context: &ReaddirContext<'_>,
+        offset: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
         if self.typ != InodeType::Dir {
             return_errno_with_message!(Errno::ENOTDIR, "self is not dir");
         }
@@ -1172,7 +1177,9 @@ impl FileOps for RamInode {
             .read()
             .visit_entry(offset, visitor)?;
 
-        self.metadata.lock().set_atime(now());
+        if !context.status_flags.contains(StatusFlags::O_NOATIME) {
+            self.metadata.lock().set_atime(now());
+        }
 
         Ok(cnt)
     }
