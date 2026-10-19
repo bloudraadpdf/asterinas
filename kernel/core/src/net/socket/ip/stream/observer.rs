@@ -2,14 +2,24 @@
 
 use aster_bigtcp::socket::{SocketEventObserver, SocketEvents};
 
-use crate::{events::IoEvents, process::signal::Pollee};
+use crate::{
+    events::IoEvents, net::socket::util::options::SocketTimeouts, prelude::*,
+    process::signal::Pollee,
+};
 
 #[derive(Clone)]
-pub(crate) struct StreamObserver(Pollee);
+pub(crate) struct StreamObserver {
+    pollee: Pollee,
+    timeouts: Arc<SocketTimeouts>,
+}
 
 impl StreamObserver {
-    pub(super) fn new(pollee: Pollee) -> Self {
-        Self(pollee)
+    pub(super) fn new(pollee: Pollee, timeouts: Arc<SocketTimeouts>) -> Self {
+        Self { pollee, timeouts }
+    }
+
+    pub(in crate::net) fn accept_timeouts(&self) -> SocketTimeouts {
+        (*self.timeouts).clone()
     }
 }
 
@@ -39,6 +49,6 @@ impl SocketEventObserver for StreamObserver {
             io_events |= IoEvents::HUP | IoEvents::ERR;
         }
 
-        self.0.notify(io_events);
+        self.pollee.notify(io_events);
     }
 }

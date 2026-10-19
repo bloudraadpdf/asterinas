@@ -24,6 +24,9 @@ struct TestDevice(SpinLock<Loopback, BottomHalfDisabled>);
 impl Ext for TestExt {
     type ScheduleNextPoll = NoScheduler;
     type TcpEventObserver = ();
+    type TcpAcceptContext = ();
+
+    fn tcp_accept_context(_observer: &Self::TcpEventObserver) {}
     type UdpEventObserver = ();
 }
 

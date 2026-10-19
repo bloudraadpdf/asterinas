@@ -42,6 +42,7 @@ pub struct TcpConnectionInner<E: Ext> {
     socket: SpinLock<RawTcpSocketExt<E>, BottomHalfDisabled>,
     poll_key: PollKey,
     connection_key: ConnectionKey,
+    accept_context: Option<E::TcpAcceptContext>,
 }
 
 pub struct RawTcpSocketExt<E: Ext> {
@@ -233,6 +234,9 @@ impl<E: Ext> TcpConnectionInner<E> {
 
         let poll_key = PollKey::new(Weak::as_ptr(weak_self).addr());
 
+        let accept_context = listener
+            .as_ref()
+            .map(|listener| E::tcp_accept_context(listener.observer.get().unwrap()));
         let socket_ext = RawTcpSocketExt {
             socket,
             listener,
@@ -245,6 +249,7 @@ impl<E: Ext> TcpConnectionInner<E> {
             socket: SpinLock::new(socket_ext),
             poll_key,
             connection_key,
+            accept_context,
         }
     }
 
@@ -294,6 +299,11 @@ pub enum ConnectState {
 }
 
 impl<E: Ext> TcpConnection<E> {
+    /// Returns the listener state saved when this incoming connection was created.
+    pub fn accept_context(&self) -> Option<&E::TcpAcceptContext> {
+        self.0.inner.accept_context.as_ref()
+    }
+
     /// Connects to a remote endpoint.
     ///
     /// Polling the iface is _always_ required after this method succeeds.

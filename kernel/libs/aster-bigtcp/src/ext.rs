@@ -17,6 +17,12 @@ pub trait Ext {
     /// The type for TCP sockets to observe events.
     type TcpEventObserver: SocketEventObserver + Clone;
 
+    /// Per-connection state captured from a listener when a connection arrives.
+    type TcpAcceptContext: Send + Sync;
+
+    /// Captures the listener state inherited by a new incoming connection.
+    fn tcp_accept_context(observer: &Self::TcpEventObserver) -> Self::TcpAcceptContext;
+
     /// The type for UDP sockets to observe events.
     type UdpEventObserver: SocketEventObserver;
 }

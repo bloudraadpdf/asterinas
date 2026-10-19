@@ -35,6 +35,12 @@ pub(super) struct ConnectedStream {
 }
 
 impl ConnectedStream {
+    pub(super) fn accept_timeouts(&self) -> &crate::net::socket::util::options::SocketTimeouts {
+        self.tcp_conn
+            .accept_context()
+            .expect("incoming TCP connection must save listener timeouts")
+    }
+
     pub(super) fn new(
         tcp_conn: TcpConnection,
         remote_endpoint: IpEndpoint,
