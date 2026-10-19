@@ -365,6 +365,7 @@ struct InodeMeta {
     ctime: Duration,
     mode: InodeMode,
     nlinks: usize,
+    never_linked_tmpfile: bool,
     uid: Uid,
     gid: Gid,
 }
@@ -380,6 +381,7 @@ impl InodeMeta {
             ctime: now,
             mode,
             nlinks: 1,
+            never_linked_tmpfile: false,
             uid,
             gid,
         }
@@ -395,6 +397,7 @@ impl InodeMeta {
             ctime: now,
             mode,
             nlinks: NUM_SPECIAL_ENTRIES,
+            never_linked_tmpfile: false,
             uid,
             gid,
         }
@@ -403,6 +406,7 @@ impl InodeMeta {
     pub(crate) fn new_tmpfile(mode: InodeMode, uid: Uid, gid: Gid) -> Self {
         let mut meta = Self::new(mode, uid, gid);
         meta.nlinks = 0;
+        meta.never_linked_tmpfile = true;
         meta
     }
 
@@ -1339,15 +1343,16 @@ impl Inode for RamInode {
         if self_dir.contains_entry(name) {
             return_errno_with_message!(Errno::EEXIST, "entry exist");
         }
-        self_dir.append_entry(name, old.this.upgrade().unwrap());
         let now = now();
-
-        // An `O_TMPFILE` inode starts with zero links. Bump the link count
-        // before exposing the new entry to concurrent lookup or unlink.
         let mut old_meta = old.metadata.lock();
+        if old_meta.nlinks == 0 && !old_meta.never_linked_tmpfile {
+            return_errno_with_message!(Errno::ENOENT, "the inode has been unlinked");
+        }
         old_meta.inc_nlinks();
+        old_meta.never_linked_tmpfile = false;
         old_meta.set_ctime(now);
         drop(old_meta);
+        self_dir.append_entry(name, old.this.upgrade().unwrap());
         drop(self_dir);
 
         let mut self_meta = self.metadata.lock();
