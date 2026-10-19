@@ -15,6 +15,7 @@ use spin::Once;
 use super::{PosixThread, ThreadLocal};
 use crate::{
     fs::{file::file_table::FileTable, thread_info::ThreadFsInfo},
+    ipc::semaphore::system_v::undo::SemUndoOwner,
     prelude::*,
     process::{
         Credentials, NsProxy, PidIdentity, Process, UserNamespace,
@@ -48,6 +49,7 @@ pub(crate) struct PosixThreadBuilder {
     supp_user_context: SuppUserContext,
     user_ns: Option<Arc<UserNamespace>>,
     ns_proxy: Option<Arc<NsProxy>>,
+    sem_undo: Option<SemUndoOwner>,
     default_timer_slack_ns: u64,
 }
 
@@ -76,6 +78,7 @@ impl PosixThreadBuilder {
             supp_user_context: SuppUserContext::new(),
             user_ns: None,
             ns_proxy: None,
+            sem_undo: None,
             default_timer_slack_ns: 50_000, // 50 usec default slack
         }
     }
@@ -143,6 +146,11 @@ impl PosixThreadBuilder {
         self
     }
 
+    pub(crate) fn sem_undo(mut self, undo: Option<SemUndoOwner>) -> Self {
+        self.sem_undo = undo;
+        self
+    }
+
     pub(crate) fn default_timer_slack_ns(mut self, slack_ns: u64) -> Self {
         self.default_timer_slack_ns = slack_ns;
         self
@@ -167,6 +175,7 @@ impl PosixThreadBuilder {
             user_ns,
             ns_proxy,
             default_timer_slack_ns,
+            sem_undo,
         } = self;
 
         let file_table = file_table.unwrap_or_else(FileTable::new);
@@ -227,6 +236,7 @@ impl PosixThreadBuilder {
                 supp_user_context,
                 user_ns,
                 ns_proxy,
+                sem_undo,
             );
 
             task::create_new_user_task(user_ctx, thread, thread_local)

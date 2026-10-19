@@ -22,13 +22,13 @@ pub(super) fn sys_unshare(unshare_flags: u32, ctx: &Context) -> Result<SyscallRe
         ctx.unshare_fs();
     }
 
-    if flags.contains(CloneFlags::CLONE_SYSVSEM) {
-        ctx.unshare_sysvsem();
-    }
-
     let ns_flags = flags.intersection(CloneFlags::CLONE_NS_FLAGS);
     if !ns_flags.is_empty() {
         ctx.unshare_namespaces(ns_flags)?;
+    }
+
+    if flags.contains(CloneFlags::CLONE_SYSVSEM) {
+        ctx.unshare_sysvsem();
     }
 
     Ok(SyscallReturn::Return(0))

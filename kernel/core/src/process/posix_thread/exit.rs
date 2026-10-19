@@ -100,6 +100,8 @@ fn exit_internal(
 
     wake_robust_list(posix_thread);
 
+    drop_after!(thread_local.take_sem_undo());
+
     wake_clear_ctid(thread_local);
 
     // According to Linux behavior, the main thread shouldn't be removed from the table until the

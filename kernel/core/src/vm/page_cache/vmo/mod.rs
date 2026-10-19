@@ -340,7 +340,11 @@ impl Vmo {
             return Ok(page.clone());
         }
 
-        let charge = self.quota.as_ref().map(Quota::charge).transpose()?;
+        let charge = self
+            .quota
+            .as_ref()
+            .map(|quota| quota.charge(1))
+            .transpose()?;
         let new_page = CachePage::alloc_zero(charge)?;
         cursor.store(new_page.clone());
         Ok(new_page)

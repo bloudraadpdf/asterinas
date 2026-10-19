@@ -51,7 +51,7 @@ impl RamFsQuota {
     pub(in crate::fs) fn new(pages: usize, inodes: usize) -> Result<Self> {
         let pages = (pages != 0).then(|| Quota::new(pages));
         let inodes = (inodes != 0).then(|| Quota::new(inodes));
-        let root = inodes.as_ref().map(Quota::charge).transpose()?;
+        let root = inodes.as_ref().map(|quota| quota.charge(1)).transpose()?;
         Ok(Self {
             pages,
             inodes,
@@ -156,7 +156,10 @@ impl RamFs {
     }
 
     fn reserve_inode(&self) -> Result<Option<QuotaCharge>> {
-        self.inode_quota.as_ref().map(Quota::charge).transpose()
+        self.inode_quota
+            .as_ref()
+            .map(|quota| quota.charge(1))
+            .transpose()
     }
 
     fn alloc_id(&self) -> u64 {

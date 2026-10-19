@@ -11,6 +11,37 @@ use crate::{
 };
 
 impl Vmar {
+    pub(crate) fn detach_shm(&self, address: Vaddr) -> Result<()> {
+        let mut inner = self.inner.write();
+        let identity = inner
+            .vm_mappings
+            .iter()
+            .find_map(|mapping| mapping.shm_origin().filter(|(base, _)| *base == address))
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let matching = |mapping: &super::VmMapping| mapping.shm_origin() == Some(identity);
+        let count = inner
+            .vm_mappings
+            .iter()
+            .filter(|mapping| matching(mapping))
+            .count();
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(count)
+            .map_err(|_| Error::new(Errno::ENOMEM))?;
+        ranges.extend(
+            inner
+                .vm_mappings
+                .iter()
+                .filter(|mapping| matching(mapping))
+                .map(Interval::range),
+        );
+        let mut rss_delta = RssDelta::new(self);
+        for range in ranges {
+            inner.alloc_free_region_exact_truncate(self, range.start, range.len(), &mut rss_delta);
+        }
+        Ok(())
+    }
+
     /// Clears all mappings.
     ///
     /// After being cleared, this VMAR will become an empty VMAR.

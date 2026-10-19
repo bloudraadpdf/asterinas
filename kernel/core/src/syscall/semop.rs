@@ -68,10 +68,12 @@ fn do_sys_semtimedop(
     }
 
     let user_space = ctx.user_space();
-    let mut semops = Vec::with_capacity(nsops);
-    for i in 0..nsops {
-        semops.push(user_space.read_val::<SemBuf>(sops + size_of::<SemBuf>() * i)?);
-    }
+    let mut semops = Vec::new();
+    semops
+        .try_reserve_exact(nsops)
+        .map_err(|_| Error::new(Errno::ENOMEM))?;
+    semops.resize(nsops, SemBuf::new_zeroed());
+    user_space.read_slice(sops, &mut semops)?;
 
     let ns_proxy = ctx.thread_local.borrow_ns_proxy();
     let ipc_ns = ns_proxy.unwrap().ipc_ns();

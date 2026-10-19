@@ -35,8 +35,8 @@ impl ContextUnshareAdminApi for Context<'_> {
     }
 
     fn unshare_sysvsem(&self) {
-        // TODO: Support unsharing System V semaphore.
-        warn!("unsharing System V semaphore is not supported");
+        let undo = self.thread_local.take_sem_undo();
+        drop(undo);
     }
 
     fn unshare_namespaces(&self, flags: CloneFlags) -> Result<()> {
