@@ -22,6 +22,12 @@ bitflags! {
         const O_NOATIME = 1 << 18;
         /// synchronized I/O, data and metadata
         const O_SYNC = 1 << 20;
+        /// opened as a directory
+        const O_DIRECTORY = 1 << 16;
+        /// opened without following the final symbolic link
+        const O_NOFOLLOW = 1 << 17;
+        /// anonymous temporary file
+        const O_TMPFILE = 1 << 22;
         /// equivalent of POSIX.1's O_EXEC
         const O_PATH = 1 << 21;
     }

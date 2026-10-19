@@ -68,6 +68,22 @@ FN_TEST(tmpfile_open_succeeds)
 }
 END_TEST()
 
+FN_TEST(tmpfile_status_flags_survive_setfl)
+{
+	int fd =
+		TEST_SUCC(open(TEST_DIR, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600));
+	int flags = TEST_SUCC(fcntl(fd, F_GETFL));
+	TEST_RES(flags,
+		 (flags & (O_TMPFILE | O_ACCMODE)) == (O_TMPFILE | O_RDWR));
+	TEST_RES(flags, (flags & O_CLOEXEC) == 0);
+	TEST_SUCC(fcntl(fd, F_SETFL, O_APPEND));
+	flags = TEST_SUCC(fcntl(fd, F_GETFL));
+	TEST_RES(flags, (flags & (O_TMPFILE | O_ACCMODE | O_APPEND)) ==
+				(O_TMPFILE | O_RDWR | O_APPEND));
+	TEST_SUCC(close(fd));
+}
+END_TEST()
+
 FN_TEST(tmpfile_open_write_only_succeeds)
 {
 	int fd;
