@@ -300,6 +300,15 @@ impl Dentry {
         }
     }
 
+    pub(super) fn is_unlinked(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & DentryFlags::UNLINKED.bits() != 0
+    }
+
+    fn mark_unlinked(&self) {
+        self.flags
+            .fetch_or(DentryFlags::UNLINKED.bits(), Ordering::Release);
+    }
+
     pub(super) fn is_pseudo(&self) -> bool {
         matches!(self.name_and_parent, NameAndParent::Pseudo(_))
     }
@@ -793,6 +802,7 @@ impl DirDentry<'_> {
         };
 
         remove_child_fn(dir_inode.as_ref(), &child_dentry)?;
+        child_dentry.mark_unlinked();
         if cached_child.is_some() {
             children.upgrade().delete(name);
         }
@@ -864,6 +874,7 @@ impl DirDentry<'_> {
             }
 
             old_dir_inode.rename(&old_dentry, self, new_name, replaced_inode, mode)?;
+            Self::mark_replaced_unlinked(mode, new_dentry.as_ref());
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
@@ -921,6 +932,7 @@ impl DirDentry<'_> {
             }
 
             old_dir_inode.rename(&old_dentry, new_dir, new_name, replaced_inode, mode)?;
+            Self::mark_replaced_unlinked(mode, new_dentry.as_ref());
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
@@ -969,6 +981,14 @@ impl DirDentry<'_> {
         }
 
         Ok(())
+    }
+
+    fn mark_replaced_unlinked(mode: RenameMode, replaced: Option<&Arc<Dentry>>) {
+        if matches!(mode, RenameMode::Replace)
+            && let Some(replaced) = replaced
+        {
+            replaced.mark_unlinked();
+        }
     }
 
     fn check_rename_mode(mode: RenameMode, new_dentry: Option<&Arc<Dentry>>) -> Result<()> {
@@ -1067,6 +1087,7 @@ impl DentryKey {
 bitflags! {
     struct DentryFlags: u32 {
         const MOUNTED = 1 << 0;
+        const UNLINKED = 1 << 1;
     }
 }
 

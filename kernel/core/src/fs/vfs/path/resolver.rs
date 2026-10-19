@@ -223,18 +223,6 @@ impl PathResolver {
             return AbsPathResult::Unreachable(path.name());
         }
 
-        // TODO: The paths reported via `/proc/<pid>/fd/<fd>` are currently
-        // incorrect for unlinked-but-open ("deleted") and anonymous
-        // (`O_TMPFILE`) dentries. Linux unhashes such dentries and renders the
-        // path with a trailing " (deleted)" (their dentry name is just "/",
-        // which Asterinas mirrors). Here there is no such detection: an
-        // anonymous dentry's "/" name is walked as an ordinary component, so
-        // e.g. an `O_TMPFILE` file under `/tmp` is rendered as `/tmp//` and
-        // misreported as `Reachable` instead of `Unreachable`. Detecting
-        // unreachable/deleted dentries belongs at this `Path` layer (mirroring
-        // the pseudo-path special-case above); the anonymous side is wired up
-        // together with the `O_TMPFILE` open path in PR #3185.
-
         let mut components = VecDeque::new();
         components.push_front(self.resolve_name(path));
 
@@ -259,7 +247,10 @@ impl PathResolver {
             parent_path = self.resolve_parent(&parent_dir);
         }
 
-        let path_name = alloc::format!("/{}", components.make_contiguous().join("/"));
+        let mut path_name = alloc::format!("/{}", components.make_contiguous().join("/"));
+        if path.dentry().is_unlinked() {
+            path_name.push_str(" (deleted)");
+        }
         debug_assert!(path_name.starts_with('/'));
 
         if reach_resolver_root {
