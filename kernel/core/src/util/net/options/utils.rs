@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use ostd::mm::VmIo;
+use ostd::{mm::VmIo, timer::TIMER_FREQ};
 
 use crate::{
     context::current_userspace,
@@ -138,14 +138,24 @@ impl ReadFromUser for SocketTimeout {
         }
 
         let timeval = current_userspace!().read_val::<timeval_t>(addr)?;
+        if !(0..1_000_000).contains(&timeval.usec) {
+            return_errno_with_message!(Errno::EDOM, "usec is out of range");
+        }
         if timeval.sec < 0 {
+            return Ok(Self::new(Some(Duration::ZERO)));
+        }
+        if (timeval.sec == 0 && timeval.usec == 0)
+            || timeval.sec as u64 >= i64::MAX as u64 / TIMER_FREQ - 1
+        {
             return Ok(Self::new(None));
         }
-
-        let duration: Duration = timeval
-            .try_into()
-            .map_err(|_| Error::with_message(Errno::EDOM, "usec is out of range"))?;
-        Ok(Self::new((!duration.is_zero()).then_some(duration)))
+        let ticks = timeval.sec as u64 * TIMER_FREQ
+            + (timeval.usec as u64 * TIMER_FREQ).div_ceil(1_000_000);
+        let duration = Duration::new(
+            ticks / TIMER_FREQ,
+            ((ticks % TIMER_FREQ) * 1_000_000_000 / TIMER_FREQ) as u32,
+        );
+        Ok(Self::new(Some(duration)))
     }
 }
 
