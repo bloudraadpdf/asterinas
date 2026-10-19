@@ -38,7 +38,11 @@ fn do_inotify_init(flags: u32, ctx: &Context) -> Result<SyscallReturn> {
         FdFlags::empty()
     };
     let file_table = ctx.thread_local.borrow_file_table();
-    let fd = file_table.unwrap().write().insert(file, fd_flags);
+    let fd = file_table.unwrap().write().insert(
+        file,
+        fd_flags,
+        ctx.process.resource_limits().nofile(),
+    )?;
     Ok(SyscallReturn::Return(fd.into()))
 }
 

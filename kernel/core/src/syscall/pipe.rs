@@ -37,8 +37,12 @@ pub(super) fn sys_pipe2(fds: Vaddr, flags: u32, ctx: &Context) -> Result<Syscall
     let file_table = ctx.thread_local.borrow_file_table();
     let mut file_table_locked = file_table.unwrap().write();
 
-    let reader_fd = file_table_locked.insert(pipe_reader, fd_flags);
-    let writer_fd = file_table_locked.insert(pipe_writer, fd_flags);
+    let (reader_fd, writer_fd) = file_table_locked.insert_pair(
+        pipe_reader,
+        pipe_writer,
+        fd_flags,
+        ctx.process.resource_limits().nofile(),
+    )?;
     let pipe_fds = PipeFds {
         reader_raw_fd: reader_fd.into(),
         writer_raw_fd: writer_fd.into(),
