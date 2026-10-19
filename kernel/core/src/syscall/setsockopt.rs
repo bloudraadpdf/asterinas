@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use ostd::mm::VmIo;
+
 use super::SyscallReturn;
 use crate::{
     fs::file::file_table::{RawFileDesc, get_file_fast},
@@ -30,6 +32,13 @@ pub(super) fn sys_setsockopt(
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, sockfd.try_into()?);
     let socket = file.as_socket_or_err()?;
+
+    if matches!(level, CSocketOptionLevel::SOL_SOCKET) {
+        if optlen < size_of::<i32>() as u32 {
+            return_errno!(Errno::EINVAL);
+        }
+        ctx.user_space().read_val::<i32>(optval)?;
+    }
 
     let raw_option = {
         let mut option = new_raw_socket_option(level, optname)?;

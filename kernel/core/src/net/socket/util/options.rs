@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{
-    ops::RangeInclusive,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
-    time::Duration,
-};
+use core::{ops::RangeInclusive, time::Duration};
 
 use aster_bigtcp::socket::{
     NeedIfacePoll, TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN,
 };
+use aster_softirq::BottomHalfDisabled;
 
 use super::{LingerOption, SocketTimeout};
 use crate::{
@@ -284,51 +281,27 @@ impl SocketOptionSet {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SocketTimeouts {
-    recv_timeout: DurationCell,
-    send_timeout: DurationCell,
+    recv_timeout: SpinLock<SocketTimeout, BottomHalfDisabled>,
+    send_timeout: SpinLock<SocketTimeout, BottomHalfDisabled>,
+}
+
+impl Default for SocketTimeouts {
+    fn default() -> Self {
+        Self {
+            recv_timeout: SpinLock::new(SocketTimeout::default()),
+            send_timeout: SpinLock::new(SocketTimeout::default()),
+        }
+    }
 }
 
 impl Clone for SocketTimeouts {
     fn clone(&self) -> Self {
         Self {
-            recv_timeout: DurationCell::new(self.recv_timeout.load()),
-            send_timeout: DurationCell::new(self.send_timeout.load()),
+            recv_timeout: SpinLock::new(*self.recv_timeout.lock()),
+            send_timeout: SpinLock::new(*self.send_timeout.lock()),
         }
-    }
-}
-
-#[derive(Debug, Default)]
-struct DurationCell {
-    seconds: AtomicU64,
-    nanoseconds: AtomicU32,
-}
-
-impl DurationCell {
-    /// Creates a new duration cell.
-    fn new(duration: Duration) -> Self {
-        Self {
-            seconds: AtomicU64::new(duration.as_secs()),
-            nanoseconds: AtomicU32::new(duration.subsec_nanos()),
-        }
-    }
-
-    /// Loads the current duration.
-    ///
-    /// The returned value is not guaranteed to be a snapshot of a single previous `store` call.
-    fn load(&self) -> Duration {
-        Duration::new(
-            self.seconds.load(Ordering::Relaxed),
-            self.nanoseconds.load(Ordering::Relaxed),
-        )
-    }
-
-    /// Stores a new duration.
-    fn store(&self, duration: Duration) {
-        self.seconds.store(duration.as_secs(), Ordering::Relaxed);
-        self.nanoseconds
-            .store(duration.subsec_nanos(), Ordering::Relaxed);
     }
 }
 
@@ -364,21 +337,19 @@ impl SocketTimeouts {
     }
 
     pub(crate) fn set_recv_timeout(&self, recv_timeout: Option<Duration>) {
-        self.recv_timeout.store(recv_timeout.unwrap_or_default());
+        *self.recv_timeout.lock() = SocketTimeout::new(recv_timeout);
     }
 
     pub(crate) fn set_send_timeout(&self, send_timeout: Option<Duration>) {
-        self.send_timeout.store(send_timeout.unwrap_or_default());
+        *self.send_timeout.lock() = SocketTimeout::new(send_timeout);
     }
 
     pub(crate) fn recv_timeout(&self) -> Option<Duration> {
-        let timeout = self.recv_timeout.load();
-        (!timeout.is_zero()).then_some(timeout)
+        self.recv_timeout.lock().duration()
     }
 
     pub(crate) fn send_timeout(&self) -> Option<Duration> {
-        let timeout = self.send_timeout.load();
-        (!timeout.is_zero()).then_some(timeout)
+        self.send_timeout.lock().duration()
     }
 }
 
