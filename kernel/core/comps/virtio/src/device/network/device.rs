@@ -75,7 +75,8 @@ impl NetworkDevice {
     }
 
     pub(crate) fn init(mut device_transport: DeviceTransport) -> Result<(), VirtioDeviceError> {
-        let config_manager = VirtioNetConfig::new_manager(device_transport.as_ref());
+        let config_manager =
+            ConfigManager::<VirtioNetConfig>::from_transport(device_transport.as_ref());
         let config = config_manager.read_config();
         debug!("virtio_net_config = {:?}", config);
         let mac_addr = EthernetAddress(config.mac);

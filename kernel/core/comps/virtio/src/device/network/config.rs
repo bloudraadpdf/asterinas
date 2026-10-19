@@ -2,11 +2,10 @@
 
 use core::mem::offset_of;
 
-use aster_util::safe_ptr::SafePtr;
 use bitflags::bitflags;
 use ostd_pod::FromZeros;
 
-use crate::transport::{ConfigManager, VirtioTransport};
+use crate::transport::ConfigManager;
 
 bitflags! {
     /// Virtio Net Feature bits.
@@ -75,16 +74,6 @@ pub(super) struct VirtioNetConfig {
     rss_max_key_size: u8,
     rss_max_indirection_table_length: u16,
     supported_hash_types: u32,
-}
-
-impl VirtioNetConfig {
-    pub(super) fn new_manager(transport: &dyn VirtioTransport) -> ConfigManager<Self> {
-        let safe_ptr = transport
-            .device_config_mem()
-            .map(|mem| SafePtr::new(mem, 0));
-        let bar_space = transport.device_config_bar();
-        ConfigManager::new(safe_ptr, bar_space)
-    }
 }
 
 impl ConfigManager<VirtioNetConfig> {

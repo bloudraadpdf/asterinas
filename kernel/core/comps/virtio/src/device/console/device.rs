@@ -86,7 +86,8 @@ impl ConsoleDevice {
     }
 
     pub(crate) fn init(mut device_transport: DeviceTransport) -> Result<(), VirtioDeviceError> {
-        let config_manager = VirtioConsoleConfig::new_manager(device_transport.as_ref());
+        let config_manager =
+            ConfigManager::<VirtioConsoleConfig>::from_transport(device_transport.as_ref());
         debug!("virtio_console_config = {:?}", config_manager.read_config());
 
         const RECV0_QUEUE_INDEX: u16 = 0;
