@@ -34,6 +34,19 @@ pub(super) fn sys_prctl(
             };
             ctx.user_space().write_val(write_to_addr, &write_val)?;
         }
+        PrctlCmd::PR_GET_AUXV(address, length) => {
+            let vector = ctx
+                .user_space()
+                .vmar()
+                .process_vm()
+                .init_stack()
+                .saved_auxv();
+            let copied = length.min(vector.len());
+            if copied != 0 {
+                ctx.user_space().write_bytes(address, &vector[..copied])?;
+            }
+            return Ok(SyscallReturn::Return(vector.len() as _));
+        }
         PrctlCmd::PR_GET_DUMPABLE => {
             // TODO: When coredump is supported, return the actual value.
             return Ok(SyscallReturn::Return(Dumpable::Disable as _));
@@ -171,6 +184,7 @@ const PR_GET_CHILD_SUBREAPER: i32 = 37;
 const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_GET_NO_NEW_PRIVS: i32 = 39;
 const PR_CAP_AMBIENT: i32 = 47;
+const PR_GET_AUXV: i32 = 0x41555856;
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -178,6 +192,7 @@ enum PrctlCmd {
     PR_SET_PDEATHSIG(SigNum),
     PR_GET_PDEATHSIG(Vaddr),
     PR_GET_DUMPABLE,
+    PR_GET_AUXV(Vaddr, usize),
     PR_SET_DUMPABLE(Dumpable),
     PR_GET_KEEPCAPS,
     PR_SET_KEEPCAPS(u32),
@@ -220,6 +235,15 @@ impl PrctlCmd {
                 Ok(PrctlCmd::PR_SET_PDEATHSIG(signum))
             }
             PR_GET_PDEATHSIG => Ok(PrctlCmd::PR_GET_PDEATHSIG(arg2 as _)),
+            PR_GET_AUXV => {
+                if arg4 != 0 || arg5 != 0 {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "unused PR_GET_AUXV arguments are not zero"
+                    );
+                }
+                Ok(PrctlCmd::PR_GET_AUXV(arg2 as _, arg3 as _))
+            }
             PR_GET_DUMPABLE => Ok(PrctlCmd::PR_GET_DUMPABLE),
             PR_SET_DUMPABLE => Ok(PrctlCmd::PR_SET_DUMPABLE(Dumpable::try_from(arg2)?)),
             PR_GET_KEEPCAPS => Ok(PrctlCmd::PR_GET_KEEPCAPS),

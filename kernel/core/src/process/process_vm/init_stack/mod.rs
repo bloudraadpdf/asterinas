@@ -106,6 +106,7 @@ pub(crate) struct InitStack {
     /// After initialization, `pos` points to the top of the process stack.
     pos: AtomicUsize,
     auxv_range: SpinLock<Range<Vaddr>>,
+    saved_auxv: SpinLock<Vec<u8>>,
     argv_range: SpinLock<Range<Vaddr>>,
     envp_range: SpinLock<Range<Vaddr>>,
 }
@@ -117,6 +118,7 @@ impl Clone for InitStack {
             max_size: self.max_size,
             pos: AtomicUsize::new(self.pos.load(Ordering::Relaxed)),
             auxv_range: SpinLock::new(self.auxv_range.lock().clone()),
+            saved_auxv: SpinLock::new(self.saved_auxv.lock().clone()),
             argv_range: SpinLock::new(self.argv_range.lock().clone()),
             envp_range: SpinLock::new(self.envp_range.lock().clone()),
         }
@@ -146,6 +148,7 @@ impl InitStack {
             max_size,
             pos: AtomicUsize::new(initial_top),
             auxv_range: SpinLock::new(0..0),
+            saved_auxv: SpinLock::new(Vec::new()),
             argv_range: SpinLock::new(0..0),
             envp_range: SpinLock::new(0..0),
         }
@@ -177,6 +180,7 @@ impl InitStack {
         argv: Vec<CString>,
         envp: Vec<CString>,
         auxvec: AuxVec,
+        execfn: CString,
     ) -> Result<()> {
         self.set_uninitialized();
 
@@ -196,19 +200,31 @@ impl InitStack {
 
         let writer = InitStackWriter {
             pos: &self.pos,
-            vmo,
+            vmo: vmo.clone(),
             argv,
             envp,
             auxvec,
+            execfn,
             map_addr: self.initial_top - self.max_size,
         };
         let (auxv_range, argv_range, envp_range) = writer.write()?;
 
+        let mut saved_auxv = vec![0; auxv_range.len()];
+        vmo.read(
+            auxv_range.start - (self.initial_top - self.max_size),
+            &mut VmWriter::from(saved_auxv.as_mut_slice()).to_fallible(),
+        )?;
+        *self.saved_auxv.lock() = saved_auxv;
         *self.auxv_range.lock() = auxv_range;
         *self.argv_range.lock() = argv_range;
         *self.envp_range.lock() = envp_range;
 
         Ok(())
+    }
+
+    /// Returns the auxiliary vector saved at exec time.
+    pub(crate) fn saved_auxv(&self) -> Vec<u8> {
+        self.saved_auxv.lock().clone()
     }
 
     /// Constructs a reader to parse the content of an `InitStack`.
@@ -245,6 +261,7 @@ struct InitStackWriter<'a> {
     argv: Vec<CString>,
     envp: Vec<CString>,
     auxvec: AuxVec,
+    execfn: CString,
     /// The mapping address of the `InitStack`.
     map_addr: usize,
 }
@@ -256,6 +273,9 @@ impl InitStackWriter<'_> {
     fn write(mut self) -> Result<(Range<Vaddr>, Range<Vaddr>, Range<Vaddr>)> {
         // FIXME: Some OSes may put the first page of the executable file here
         // for interpreting ELF headers.
+
+        let execfn_pointer = self.write_cstring(&self.execfn)?;
+        self.auxvec.set(AuxKey::AT_EXECFN, execfn_pointer);
 
         // Write envp strings.
         let envp_end = self.pos();

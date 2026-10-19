@@ -141,8 +141,10 @@ impl ProcessVm {
         argv: Vec<CString>,
         envp: Vec<CString>,
         aux_vec: AuxVec,
+        execfn: CString,
     ) -> Result<()> {
-        self.init_stack().map_and_write(vmar, argv, envp, aux_vec)
+        self.init_stack()
+            .map_and_write(vmar, argv, envp, aux_vec, execfn)
     }
 
     /// Maps and initializes the heap virtual memory.
