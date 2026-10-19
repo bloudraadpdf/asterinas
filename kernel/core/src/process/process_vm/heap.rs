@@ -10,7 +10,7 @@ use crate::{
     util::random::getrandom,
     vm::{
         perms::VmPerms,
-        vmar::{VMAR_CAP_ADDR, Vmar, VmarMapOffset},
+        vmar::{VMAR_CAP_ADDR, VmarMapOffset},
     },
 };
 
@@ -49,13 +49,8 @@ impl Heap {
         }
     }
 
-    /// Initializes and maps the heap virtual memory.
-    pub(super) fn map_and_init_heap(
-        &self,
-        vmar: &Vmar,
-        data_segment_size: usize,
-        heap_base: Vaddr,
-    ) -> Result<()> {
+    /// Initializes the heap bounds without committing memory.
+    pub(super) fn init_heap(&self, data_segment_size: usize, heap_base: Vaddr) -> Result<()> {
         let mut inner = self.inner.lock();
 
         let nr_pages_padding = {
@@ -69,22 +64,14 @@ impl Heap {
         };
 
         let heap_start = heap_base.align_up(PAGE_SIZE) + nr_pages_padding * PAGE_SIZE;
-        let heap_end = heap_start + PAGE_SIZE;
-        if heap_end > VMAR_CAP_ADDR {
+        if heap_start > VMAR_CAP_ADDR {
             return_errno_with_message!(Errno::ENOMEM, "the mapping address is too large");
         }
-
-        let vmar_map_options = {
-            let perms = VmPerms::READ | VmPerms::WRITE;
-            vmar.new_map(PAGE_SIZE, perms)
-                .offset(VmarMapOffset::FixedNoReplace(heap_start))
-        };
-        vmar_map_options.build()?;
 
         debug_assert!(inner.is_none());
         *inner = Some(HeapInner {
             data_segment_size,
-            heap_range: heap_start..heap_end,
+            heap_range: heap_start..heap_start,
         });
 
         Ok(())

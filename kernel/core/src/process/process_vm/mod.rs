@@ -148,15 +148,9 @@ impl ProcessVm {
             .map_and_write(vmar, argv, envp, aux_vec, execfn, perms)
     }
 
-    /// Maps and initializes the heap virtual memory.
-    pub(super) fn map_and_init_heap(
-        &self,
-        vmar: &Vmar,
-        data_segment_size: usize,
-        heap_base: Vaddr,
-    ) -> Result<()> {
-        self.heap()
-            .map_and_init_heap(vmar, data_segment_size, heap_base)
+    /// Initializes the heap bounds.
+    pub(super) fn init_heap(&self, data_segment_size: usize, heap_base: Vaddr) -> Result<()> {
+        self.heap().init_heap(data_segment_size, heap_base)
     }
 
     /// Updates the code range from the executable file.
