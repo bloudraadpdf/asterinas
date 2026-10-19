@@ -73,6 +73,8 @@ impl InodeHandle {
             // in `/proc/[pid]/fdinfo/[n]`).
             access_mode = AccessMode::O_RDONLY;
             None
+        } else if inode.type_() == InodeType::Socket {
+            return_errno_with_message!(Errno::ENXIO, "a socket inode cannot be opened as a file");
         } else if inode.type_() == InodeType::Dir && access_mode.is_writable() {
             return_errno_with_message!(Errno::EISDIR, "a directory cannot be opened writable");
         } else {

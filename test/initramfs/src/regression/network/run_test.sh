@@ -46,3 +46,5 @@ sleep 0.2
 ./netlink_route
 ./rtnl_err
 ./uevent_err
+
+./unix_pathname
