@@ -7,27 +7,24 @@ use core::{
 
 use ostd::sync::WaitQueue;
 
+use super::buffer::PipeBuffer;
 use crate::{
     dispatch_ioctl,
     events::IoEvents,
     fs::{
         file::{AccessMode, PerOpenFileOps, SettableStatusFlags, StatusFlags},
-        utils::{Endpoint, EndpointState},
         vfs::{inode::FileOps, path::Path},
     },
     prelude::*,
     process::{
         posix_thread::AsPosixThread,
         signal::{
-            PollHandle, Pollable,
+            PollHandle, Pollable, Pollee,
             constants::SIGPIPE,
             signals::user::{UserSignal, UserSignalKind},
         },
     },
-    util::{
-        ioctl::RawIoctl,
-        ring_buffer::{ConsumerU8Ext, ProducerU8Ext, RbConsumer, RbProducer, RingBuffer},
-    },
+    util::ioctl::RawIoctl,
 };
 
 /// A handle for a pipe that implements `PerOpenFileOps`.
@@ -36,30 +33,42 @@ use crate::{
 /// not be dropped.
 pub(in crate::fs) struct PipeHandle {
     inner: Arc<PipeObj>,
+    owner: Arc<Mutex<PipeInner>>,
     access_mode: AccessMode,
+    writer_generation: Option<usize>,
 }
 
 impl PipeHandle {
-    fn new(inner: Arc<PipeObj>, access_mode: AccessMode) -> Box<Self> {
-        Box::new(Self { inner, access_mode })
+    fn new(
+        inner: Arc<PipeObj>,
+        owner: Arc<Mutex<PipeInner>>,
+        access_mode: AccessMode,
+        writer_generation: Option<usize>,
+    ) -> Box<Self> {
+        Box::new(Self {
+            inner,
+            owner,
+            access_mode,
+            writer_generation,
+        })
     }
 
     fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
         // `InodeHandle` checks the access mode before calling methods in `PerOpenFileOps`.
         debug_assert!(self.access_mode.is_readable());
 
-        self.inner.reader.try_read(writer)
+        self.inner.try_read(writer)
     }
 
-    fn try_write(&self, reader: &mut VmReader) -> Result<usize> {
+    fn try_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
         // `InodeHandle` checks the access mode before calling methods in `PerOpenFileOps`.
         debug_assert!(self.access_mode.is_writable());
 
-        self.inner.writer.try_write(reader)
+        self.inner.try_write(reader, status_flags)
     }
 
     fn bytes_to_read(&self) -> usize {
-        self.inner.reader.buffer_len()
+        self.inner.buffer.lock().len()
     }
 }
 
@@ -68,11 +77,21 @@ impl Pollable for PipeHandle {
         let mut events = IoEvents::empty();
 
         if self.access_mode.is_readable() {
-            events |= self.inner.reader.poll(mask, poller.as_deref_mut());
+            events |= self
+                .inner
+                .read_pollee
+                .poll_with(mask, poller.as_deref_mut(), || self.inner.read_events());
+            if self.writer_generation == Some(self.inner.writer_generation.load(Ordering::Relaxed))
+            {
+                events.remove(IoEvents::HUP);
+            }
         }
 
         if self.access_mode.is_writable() {
-            events |= self.inner.writer.poll(mask, poller);
+            events |= self
+                .inner
+                .write_pollee
+                .poll_with(mask, poller, || self.inner.write_events());
         }
 
         events
@@ -81,19 +100,19 @@ impl Pollable for PipeHandle {
 
 impl Drop for PipeHandle {
     fn drop(&mut self) {
+        let mut owner = self.owner.lock();
         if self.access_mode.is_readable() {
-            let old_value = self.inner.num_reader.fetch_sub(1, Ordering::Relaxed);
-            if old_value == 1 {
-                self.inner.reader.peer_shutdown();
-            }
+            self.inner.num_reader.fetch_sub(1, Ordering::Relaxed);
         }
-
         if self.access_mode.is_writable() {
-            let old_value = self.inner.num_writer.fetch_sub(1, Ordering::Relaxed);
-            if old_value == 1 {
-                self.inner.writer.shutdown();
-            }
+            self.inner.num_writer.fetch_sub(1, Ordering::Relaxed);
         }
+        if self.inner.num_reader.load(Ordering::Relaxed) == 0
+            && self.inner.num_writer.load(Ordering::Relaxed) == 0
+        {
+            owner.pipe_obj = Weak::new();
+        }
+        self.inner.notify_endpoints();
     }
 }
 
@@ -130,9 +149,9 @@ impl FileOps for PipeHandle {
         }
 
         if status_flags.contains(StatusFlags::O_NONBLOCK) {
-            self.try_write(reader)
+            self.try_write(reader, status_flags)
         } else {
-            self.wait_events(IoEvents::OUT, None, || self.try_write(reader))
+            self.wait_events(IoEvents::OUT, None, || self.try_write(reader, status_flags))
         }
     }
 }
@@ -161,8 +180,9 @@ impl PerOpenFileOps for PipeHandle {
     }
 
     fn settable_status_flags(&self) -> SettableStatusFlags {
-        // TODO: Support "packet" mode for pipes then `O_DIRECT` can be supported.
-        SettableStatusFlags::minimal().with_o_async()
+        SettableStatusFlags::minimal()
+            .with_o_async()
+            .with_o_direct()
     }
 }
 
@@ -175,7 +195,7 @@ impl PerOpenFileOps for PipeHandle {
 /// A `Pipe` will maintain exactly one **pipe object** that provides actual pipe
 /// functionalities when there is at least one handle opened on it.
 pub(in crate::fs) struct Pipe {
-    pipe: Mutex<PipeInner>,
+    pipe: Arc<Mutex<PipeInner>>,
     wait_queue: WaitQueue,
 }
 
@@ -183,7 +203,7 @@ impl Pipe {
     /// Creates a new pipe.
     pub(crate) fn new() -> Self {
         Self {
-            pipe: Mutex::new(PipeInner::default()),
+            pipe: Arc::new(Mutex::new(PipeInner::default())),
             wait_queue: WaitQueue::new(),
         }
     }
@@ -223,23 +243,25 @@ impl Pipe {
         status_flags: StatusFlags,
         is_named_pipe: bool,
     ) -> Result<Box<dyn PerOpenFileOps>> {
-        check_status_flags(status_flags)?;
-
         let mut pipe = self.pipe.lock();
         let pipe_obj = pipe.get_or_create_pipe_obj();
+        let writer_generation = (is_named_pipe
+            && access_mode == AccessMode::O_RDONLY
+            && status_flags.contains(StatusFlags::O_NONBLOCK)
+            && pipe_obj.num_writer.load(Ordering::Relaxed) == 0)
+            .then(|| pipe_obj.writer_generation.load(Ordering::Relaxed));
 
         let handle = match access_mode {
             AccessMode::O_RDONLY => {
                 pipe.read_count += 1;
 
-                let old_value = pipe_obj.num_reader.fetch_add(1, Ordering::Relaxed);
-                if old_value == 0 {
-                    pipe_obj.reader.peer_activate();
-                    self.wait_queue.wake_all();
-                }
+                pipe_obj.num_reader.fetch_add(1, Ordering::Relaxed);
+                pipe_obj.notify_endpoints();
+                self.wait_queue.wake_all();
 
                 let has_writer = pipe_obj.num_writer.load(Ordering::Relaxed) > 0;
-                let handle = PipeHandle::new(pipe_obj, access_mode);
+                let handle =
+                    PipeHandle::new(pipe_obj, self.pipe.clone(), access_mode, writer_generation);
 
                 // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/pipe.c#L1166-L1175>
                 if is_named_pipe && !status_flags.contains(StatusFlags::O_NONBLOCK) && !has_writer {
@@ -254,19 +276,20 @@ impl Pipe {
             }
             AccessMode::O_WRONLY => {
                 pipe.write_count += 1;
+                pipe_obj.writer_generation.fetch_add(1, Ordering::Relaxed);
 
-                let old_num_writer = pipe_obj.num_writer.fetch_add(1, Ordering::Relaxed);
-                if old_num_writer == 0 {
-                    pipe_obj.writer.activate();
-                    self.wait_queue.wake_all();
-                }
+                pipe_obj.num_writer.fetch_add(1, Ordering::Relaxed);
+                pipe_obj.notify_endpoints();
+                self.wait_queue.wake_all();
 
                 let has_reader = pipe_obj.num_reader.load(Ordering::Relaxed) > 0;
-                let handle = PipeHandle::new(pipe_obj, access_mode);
+                let handle =
+                    PipeHandle::new(pipe_obj, self.pipe.clone(), access_mode, writer_generation);
 
                 // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/pipe.c#L1184-L1195>
                 if is_named_pipe && !has_reader {
                     if status_flags.contains(StatusFlags::O_NONBLOCK) {
+                        drop(pipe);
                         return_errno_with_message!(Errno::ENXIO, "no reader is present");
                     }
 
@@ -282,15 +305,14 @@ impl Pipe {
             AccessMode::O_RDWR => {
                 pipe.read_count += 1;
                 pipe.write_count += 1;
+                pipe_obj.writer_generation.fetch_add(1, Ordering::Relaxed);
 
-                let old_num_reader = pipe_obj.num_reader.fetch_add(1, Ordering::Relaxed);
-                let old_num_writer = pipe_obj.num_writer.fetch_add(1, Ordering::Relaxed);
-                if old_num_reader == 0 || old_num_writer == 0 {
-                    self.wait_queue.wake_all();
-                    pipe_obj.writer.activate();
-                }
+                pipe_obj.num_reader.fetch_add(1, Ordering::Relaxed);
+                pipe_obj.num_writer.fetch_add(1, Ordering::Relaxed);
+                pipe_obj.notify_endpoints();
+                self.wait_queue.wake_all();
 
-                PipeHandle::new(pipe_obj, access_mode)
+                PipeHandle::new(pipe_obj, self.pipe.clone(), access_mode, writer_generation)
             }
         };
 
@@ -298,48 +320,90 @@ impl Pipe {
     }
 }
 
-pub(in crate::fs) fn check_status_flags(status_flags: StatusFlags) -> Result<()> {
-    if status_flags.contains(StatusFlags::O_DIRECT) {
-        // TODO: Support "packet" mode for pipes.
-        //
-        // The `O_DIRECT` flag indicates that the pipe should operate in "packet" mode.
-        // "O_DIRECT .. Older kernels that do not support this flag will indicate this via an
-        // EINVAL error."
-        //
-        // See <https://man7.org/linux/man-pages/man2/pipe.2.html>.
-        return_errno_with_message!(Errno::EINVAL, "the `O_DIRECT` flag is not supported");
-    }
-
-    // TODO: Setting most of the other flags will succeed on Linux, but their effects need to be
-    // validated.
-
-    Ok(())
-}
-
 struct PipeObj {
-    reader: PipeReader,
-    writer: PipeWriter,
+    buffer: Mutex<PipeBuffer>,
+    read_pollee: Pollee,
+    write_pollee: Pollee,
     num_reader: AtomicUsize,
     num_writer: AtomicUsize,
+    writer_generation: AtomicUsize,
 }
 
 impl PipeObj {
     fn new() -> Arc<Self> {
-        let (reader, writer) = new_pair();
         Arc::new(Self {
-            reader,
-            writer,
+            buffer: Mutex::new(PipeBuffer::new()),
+            read_pollee: Pollee::new(),
+            write_pollee: Pollee::new(),
             num_reader: AtomicUsize::new(0),
             num_writer: AtomicUsize::new(0),
+            writer_generation: AtomicUsize::new(0),
         })
+    }
+
+    fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
+        let has_writers = self.num_writer.load(Ordering::Relaxed) != 0;
+        let count = self.buffer.lock().read(writer)?;
+        if count != 0 {
+            self.read_pollee.invalidate();
+            self.write_pollee.notify(IoEvents::OUT);
+        } else if has_writers {
+            return_errno_with_message!(Errno::EAGAIN, "the pipe is empty");
+        }
+        Ok(count)
+    }
+
+    fn try_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
+        if self.num_reader.load(Ordering::Relaxed) == 0 {
+            if let Some(posix_thread) = current_thread!().as_posix_thread() {
+                posix_thread.enqueue_signal(Box::new(UserSignal::new(
+                    SIGPIPE,
+                    UserSignalKind::Kill,
+                    posix_thread.process().pid_identity().clone(),
+                    posix_thread.credentials().ruid(),
+                )));
+            }
+            return_errno_with_message!(Errno::EPIPE, "the pipe has no readers");
+        }
+        let count = self.buffer.lock().write(reader, status_flags)?;
+        if count == 0 {
+            return_errno_with_message!(Errno::EAGAIN, "the pipe is full");
+        }
+        self.write_pollee.invalidate();
+        self.read_pollee.notify(IoEvents::IN);
+        Ok(count)
+    }
+
+    fn read_events(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
+        if self.num_writer.load(Ordering::Relaxed) == 0 {
+            events |= IoEvents::HUP;
+        }
+        if self.buffer.lock().len() != 0 {
+            events |= IoEvents::IN;
+        }
+        events
+    }
+
+    fn write_events(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
+        if self.num_reader.load(Ordering::Relaxed) == 0 {
+            events |= IoEvents::ERR;
+        }
+        if self.buffer.lock().is_writable() {
+            events |= IoEvents::OUT;
+        }
+        events
+    }
+
+    fn notify_endpoints(&self) {
+        self.read_pollee.notify(IoEvents::IN | IoEvents::HUP);
+        self.write_pollee.notify(IoEvents::OUT | IoEvents::ERR);
     }
 }
 
 #[derive(Default)]
 struct PipeInner {
-    // Holding a weak reference here ensures that the pipe object (including
-    // the buffer data) will be dropped when no handle is open on the pipe.
-    // This is consistent with Linux behavior.
     pipe_obj: Weak<PipeObj>,
     read_count: Wrapping<usize>,
     write_count: Wrapping<usize>,
@@ -355,164 +419,6 @@ impl PipeInner {
         self.pipe_obj = Arc::downgrade(&pipe_obj);
 
         pipe_obj
-    }
-}
-
-#[cfg(not(ktest))]
-const DEFAULT_PIPE_BUF_SIZE: usize = 65536;
-#[cfg(ktest)]
-const DEFAULT_PIPE_BUF_SIZE: usize = 2;
-
-/// Maximum number of bytes guaranteed to be written to a pipe atomically.
-///
-/// If the number of bytes to be written is less than the threshold, the write must be atomic.
-/// A non-blocking atomic write may fail with `EAGAIN`, even if there is room for a partial write.
-/// In other words, a partial write is not allowed for an atomic write.
-///
-/// For more details, see the description of `PIPE_BUF` in
-/// <https://man7.org/linux/man-pages/man7/pipe.7.html>.
-#[cfg(not(ktest))]
-const PIPE_BUF: usize = 4096;
-#[cfg(ktest)]
-const PIPE_BUF: usize = 2;
-
-fn new_pair() -> (PipeReader, PipeWriter) {
-    new_pair_with_capacity(DEFAULT_PIPE_BUF_SIZE)
-}
-
-fn new_pair_with_capacity(capacity: usize) -> (PipeReader, PipeWriter) {
-    let (producer, consumer) = RingBuffer::new(capacity).split();
-    let (producer_state, consumer_state) =
-        Endpoint::new_pair(EndpointState::default(), EndpointState::default());
-
-    (
-        PipeReader::new(consumer, consumer_state),
-        PipeWriter::new(producer, producer_state),
-    )
-}
-
-struct PipeReader {
-    consumer: Mutex<RbConsumer<u8>>,
-    state: Endpoint<EndpointState>,
-}
-
-impl PipeReader {
-    fn new(consumer: RbConsumer<u8>, state: Endpoint<EndpointState>) -> Self {
-        Self {
-            consumer: Mutex::new(consumer),
-            state,
-        }
-    }
-
-    fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
-        let read = || {
-            let mut consumer = self.consumer.lock();
-            consumer.read_fallible(writer)
-        };
-
-        let read_len = self.state.read_with(read)?;
-        if read_len > 0 {
-            self.state.notify_read();
-        }
-
-        Ok(read_len)
-    }
-
-    fn buffer_len(&self) -> usize {
-        self.consumer.lock().len()
-    }
-
-    fn peer_shutdown(&self) {
-        self.state.peer_shutdown();
-    }
-
-    fn peer_activate(&self) {
-        self.state.peer_activate();
-    }
-
-    fn check_io_events(&self) -> IoEvents {
-        let mut events = IoEvents::empty();
-        if self.state.is_peer_shutdown() {
-            events |= IoEvents::HUP;
-        }
-        if !self.consumer.lock().is_empty() {
-            events |= IoEvents::IN;
-        }
-        events
-    }
-}
-
-impl Pollable for PipeReader {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.state
-            .poll_with(mask, poller, || self.check_io_events())
-    }
-}
-
-struct PipeWriter {
-    producer: Mutex<RbProducer<u8>>,
-    state: Endpoint<EndpointState>,
-}
-
-impl PipeWriter {
-    fn new(producer: RbProducer<u8>, state: Endpoint<EndpointState>) -> Self {
-        Self {
-            producer: Mutex::new(producer),
-            state,
-        }
-    }
-
-    fn try_write(&self, reader: &mut VmReader) -> Result<usize> {
-        let write = || {
-            let mut producer = self.producer.lock();
-            if reader.remain() <= PIPE_BUF && producer.free_len() < reader.remain() {
-                // No sufficient space for an atomic write
-                return Ok(0);
-            }
-            producer.write_fallible(reader)
-        };
-
-        let res = self.state.write_with(write);
-        if res.is_ok() {
-            self.state.notify_write();
-        }
-        if res.is_err_and(|e| e.error() == Errno::EPIPE)
-            && let Some(posix_thread) = current_thread!().as_posix_thread()
-        {
-            posix_thread.enqueue_signal(Box::new(UserSignal::new(
-                SIGPIPE,
-                UserSignalKind::Kill,
-                posix_thread.process().pid_identity().clone(),
-                posix_thread.credentials().ruid(),
-            )));
-        }
-
-        res
-    }
-
-    fn shutdown(&self) {
-        self.state.shutdown();
-    }
-
-    fn activate(&self) {
-        self.state.activate();
-    }
-
-    fn check_io_events(&self) -> IoEvents {
-        if self.state.is_shutdown() {
-            IoEvents::ERR | IoEvents::OUT
-        } else if self.producer.lock().free_len() >= PIPE_BUF {
-            IoEvents::OUT
-        } else {
-            IoEvents::empty()
-        }
-    }
-}
-
-impl Pollable for PipeWriter {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.state
-            .poll_with(mask, poller, || self.check_io_events())
     }
 }
 
