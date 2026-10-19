@@ -20,6 +20,7 @@ pub(super) struct TcpOptionSet {
     congestion: CongestionControl,
     user_timeout: u32,
     receive_inq: bool,
+    fast_open_backlog: u32,
 }
 
 // Reference: <https://elixir.bootlin.com/linux/v6.13/source/include/net/tcp.h>
@@ -44,6 +45,7 @@ impl TcpOptionSet {
             congestion: CongestionControl::Reno,
             user_timeout: 0,
             receive_inq: false,
+            fast_open_backlog: 0,
         }
     }
 }

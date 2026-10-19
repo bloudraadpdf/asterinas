@@ -247,7 +247,9 @@ x86 = "0.52.0"
 # i.e. `-Ctarget-cpu=sandybridge -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3`.
 # This suggests that `Asterinas` should support saving and restoring the `FPU` state within the kernel context,
 # a capability it currently lacks.
+aes = { version = "0.7.5", features = ["force-soft"] }
 aes-gcm = { version = "0.9.4", features = ["force-soft"] }
+subtle = { version = "2.4.1", default-features = false }
 bittle = "0.5.6"
 chrono = { version = "0.4.38", default-features = false }
 const_format = "0.2.35"
@@ -262,7 +264,7 @@ lru = "0.16.3"
 owo-colors = "4.2.2"
 paste = "1.0.15"
 postcard = "1.0.6"
-smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2026-08-11_1b7629c", default-features = false, features = [
+smoltcp = { git = "ssh://git@git.bloudraad.io/external/smoltcp.git", rev = "0a99ac220d9650e7a2c6c4ecd71d465a6fc4e3f4", default-features = false, features = [
     "alloc",
     "log",
     "medium-ethernet",

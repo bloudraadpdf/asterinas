@@ -4,16 +4,27 @@
 
 use core::sync::atomic::Ordering;
 
-use super::{AccessMode, AtomicStatusFlags, FileLike, StatusFlags, file_handle::StatusFlagsUpdate};
+use super::{
+    AccessMode, AtomicStatusFlags, FileLike, StatusFlags, file_handle::StatusFlagsUpdate,
+    flock::FlockItem,
+};
 use crate::{
     events::{IoEvents, Observer},
-    fs::vfs::{notify, path::Path},
+    fs::vfs::{
+        inode_ext::InodeExt,
+        notify,
+        path::Path,
+        range_lock::{RangeLockItem, RangeLockOwner, RangeLockType},
+    },
     prelude::*,
     process::{
         Pid, PidIdentity, PidNamespace, Process,
         signal::{PollAdaptor, constants::SIGIO},
     },
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileDescriptionId(usize);
 
 /// Common fields for a file description.
 ///
@@ -24,6 +35,7 @@ pub(crate) struct FileCommon {
     access_mode: AccessMode,
     status_flags: AtomicStatusFlags,
     owner: FileOwner,
+    lock_identity: Arc<()>,
 }
 
 impl FileCommon {
@@ -34,6 +46,7 @@ impl FileCommon {
             access_mode,
             status_flags: AtomicStatusFlags::new(status_flags),
             owner: FileOwner::new(),
+            lock_identity: Arc::new(()),
         }
     }
 
@@ -82,6 +95,114 @@ impl FileCommon {
             });
     }
 
+    pub(crate) fn description_id(&self) -> FileDescriptionId {
+        FileDescriptionId(Arc::as_ptr(&self.lock_identity) as usize)
+    }
+
+    pub(crate) fn test_range_lock(&self, mut lock: RangeLockItem) -> Result<RangeLockItem> {
+        if self.status_flags().contains(StatusFlags::O_PATH) {
+            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
+        }
+
+        let Some(range_lock_list) = self
+            .path()
+            .inode()
+            .fs_lock_context()
+            .map(|c| c.range_lock_list())
+        else {
+            // The lock list is not present. So nothing is locked.
+            lock.set_type(RangeLockType::Unlock);
+            return Ok(lock);
+        };
+
+        let req_lock = range_lock_list.test_lock(lock);
+        Ok(req_lock)
+    }
+
+    pub(crate) fn set_range_lock(&self, lock: &RangeLockItem, is_nonblocking: bool) -> Result<()> {
+        match lock.type_() {
+            RangeLockType::ReadLock => {
+                if self.status_flags().contains(StatusFlags::O_PATH)
+                    || !self.access_mode().is_readable()
+                {
+                    return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
+                }
+            }
+            RangeLockType::WriteLock => {
+                if self.status_flags().contains(StatusFlags::O_PATH)
+                    || !self.access_mode().is_writable()
+                {
+                    return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
+                }
+            }
+            RangeLockType::Unlock => {
+                if self.status_flags().contains(StatusFlags::O_PATH) {
+                    return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
+                }
+            }
+        }
+
+        if RangeLockType::Unlock == lock.type_() {
+            self.unlock_range_lock(lock);
+            return Ok(());
+        }
+
+        let range_lock_list = self
+            .path()
+            .inode()
+            .fs_lock_context_or_init()
+            .range_lock_list();
+        range_lock_list.set_lock(lock, is_nonblocking)
+    }
+
+    pub(crate) fn release_range_locks(&self, owner: RangeLockOwner) {
+        if let Some(range_lock_list) = self
+            .path()
+            .inode()
+            .fs_lock_context()
+            .map(|context| context.range_lock_list())
+        {
+            range_lock_list.unlock_all(owner);
+        }
+    }
+
+    fn unlock_range_lock(&self, lock: &RangeLockItem) {
+        if let Some(range_lock_list) = self
+            .path()
+            .inode()
+            .fs_lock_context()
+            .map(|c| c.range_lock_list())
+        {
+            range_lock_list.unlock(lock);
+        }
+    }
+
+    pub(crate) fn set_flock(&self, lock: FlockItem, is_nonblocking: bool) -> Result<()> {
+        if self.status_flags().contains(StatusFlags::O_PATH) {
+            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
+        }
+
+        let flock_list = self.path().inode().fs_lock_context_or_init().flock_list();
+        flock_list.set_lock(lock, is_nonblocking)
+    }
+
+    pub(crate) fn unlock_flock(&self) -> Result<()> {
+        if self.status_flags().contains(StatusFlags::O_PATH) {
+            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
+        }
+
+        if let Some(flock_list) = self
+            .path()
+            .inode()
+            .fs_lock_context()
+            .map(|c| c.flock_list())
+        {
+            flock_list.unlock(self.description_id());
+        }
+
+        Ok(())
+    }
+
     /// Returns the asynchronous I/O signal owner.
     pub(crate) fn owner(&self) -> &FileOwner {
         &self.owner
@@ -90,6 +211,8 @@ impl FileCommon {
 
 impl Drop for FileCommon {
     fn drop(&mut self) {
+        self.release_range_locks(RangeLockOwner::FileDescription(self.description_id()));
+        let _ = self.unlock_flock();
         notify::on_close(self);
     }
 }

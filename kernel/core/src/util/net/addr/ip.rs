@@ -14,7 +14,7 @@ use crate::prelude::*;
 /// <https://elixir.bootlin.com/linux/v6.10.2/source/include/uapi/linux/in.h#L256>.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
-pub(super) struct CSocketAddrInet {
+pub(crate) struct CSocketAddrInet {
     /// Address family (AF_INET).
     sin_family: u16,
     /// Port number.

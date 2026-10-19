@@ -25,4 +25,4 @@ pub(crate) use port::addresses_overlap;
 pub use sched::ScheduleNextPoll;
 
 #[cfg(ktest)]
-mod tests;
+pub(crate) mod tests;

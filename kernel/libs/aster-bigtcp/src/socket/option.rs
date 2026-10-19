@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::num::NonZeroU8;
+
 use smoltcp::time::Duration;
 
 use super::{NeedIfacePoll, unbound::RawTcpSocket};
@@ -15,6 +17,9 @@ pub trait RawTcpSetOption {
     ///
     /// Polling the iface is _not_ required after this method succeeds.
     fn set_nagle_enabled(&self, enabled: bool);
+
+    /// Sets the retry budget for a pending passive Fast Open handshake.
+    fn set_fast_open_retries(&self, limit: NonZeroU8);
 }
 
 /// Socket options on a raw socket.
@@ -23,16 +28,22 @@ pub struct RawTcpOption {
     pub keep_alive: Option<Duration>,
     /// Whether Nagle's algorithm is enabled.
     pub is_nagle_enabled: bool,
+    /// Maximum authenticated passive opens awaiting a final handshake ACK.
+    pub fast_open_backlog: usize,
+    /// Retry budget for a pending passive Fast Open handshake.
+    pub fast_open_retries: NonZeroU8,
 }
 
 impl RawTcpOption {
     pub(super) fn apply(&self, socket: &mut RawTcpSocket) {
         socket.set_keep_alive(self.keep_alive);
         socket.set_nagle_enabled(self.is_nagle_enabled);
+        socket.set_fast_open_retries(self.fast_open_retries);
     }
 
     pub(super) fn inherit(from: &RawTcpSocket, to: &mut RawTcpSocket) {
         to.set_keep_alive(from.keep_alive());
         to.set_nagle_enabled(from.nagle_enabled());
+        to.set_fast_open_retries(from.fast_open_retries());
     }
 }

@@ -6,15 +6,11 @@ use unbound::UnboundNetlink;
 use super::{GroupIdSet, NetlinkSocketAddr};
 use crate::{
     events::IoEvents,
-    fs::file::FileCommon,
     net::socket::{
-        Socket,
+        Socket, SocketCommon,
         netlink::{AddMembership, DropMembership, table::SupportedNetlinkProtocol},
         new_socket_common,
-        options::{
-            Error as SocketError, SocketOption,
-            macros::{sock_option_mut, sock_option_ref},
-        },
+        options::{SocketOption, macros::sock_option_ref},
         private::SocketPrivate,
         util::{
             MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
@@ -39,7 +35,7 @@ pub(crate) struct NetlinkSocket<P: SupportedNetlinkProtocol> {
     timeouts: SocketTimeouts,
 
     pollee: Pollee,
-    common: FileCommon,
+    common: SocketCommon,
 }
 
 #[derive(Clone, Debug)]
@@ -194,14 +190,9 @@ where
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                // TODO: Support socket errors for netlink sockets
-                socket_errors.set(None);
-                return Ok(());
-            }
-            _ => (),
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         let inner = self.inner.read();
         let options = self.options.read();
@@ -232,18 +223,14 @@ where
         // Deal with netlink-level options
         do_netlink_setsockopt(option, &mut inner)
     }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
-    }
 }
 
 impl<P: SupportedNetlinkProtocol> SocketPrivate for NetlinkSocket<P>
 where
     BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
 {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 }
 
@@ -252,8 +239,9 @@ where
     BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
 {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
-            .poll_with(mask, poller, || self.inner.read().check_io_events())
+        self.common.error.poll_with(mask, poller, &self.pollee, || {
+            self.inner.read().check_io_events()
+        })
     }
 }
 

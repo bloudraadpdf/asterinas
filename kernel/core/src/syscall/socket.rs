@@ -2,7 +2,10 @@
 
 use super::SyscallReturn;
 use crate::{
-    fs::file::{FileLike, file_table::FdFlags},
+    fs::file::{
+        FileLike,
+        file_table::{FdFlags, RawFileDesc},
+    },
     net::socket::{
         ip::{DatagramSocket, IpAddressFamily, StreamSocket},
         netlink::{
@@ -14,6 +17,16 @@ use crate::{
     prelude::*,
     util::net::{CSocketAddrFamily, Protocol, SOCK_TYPE_MASK, SockFlags, SockType},
 };
+
+pub(super) fn get_socket_file(fd: RawFileDesc, ctx: &Context) -> Result<Arc<dyn FileLike>> {
+    let file = {
+        let file_table = ctx.thread_local.borrow_file_table();
+        let file_table = file_table.unwrap().read();
+        file_table.get_file(fd.try_into()?)?.clone()
+    };
+    file.as_socket_or_err()?;
+    Ok(file)
+}
 
 pub(super) fn sys_socket(
     domain: i32,

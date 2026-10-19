@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::mem::offset_of;
+
 use ostd::mm::VmIo;
 
 use super::SyscallReturn;
 use crate::{
-    fs::file::file_table::{FdFlags, RawFileDesc, get_file_fast},
-    net::socket::util::RecvFlags,
+    fs::file::file_table::{FdFlags, RawFileDesc},
+    net::socket::{Socket, util::RecvFlags},
     prelude::*,
     util::net::CUserMsgHdr,
 };
@@ -16,48 +18,51 @@ pub(super) fn sys_recvmsg(
     flags: i32,
     ctx: &Context,
 ) -> Result<SyscallReturn> {
-    let user_space = ctx.user_space();
-    let mut c_user_msghdr: CUserMsgHdr = user_space.read_val(user_msghdr_ptr)?;
-    let flags = RecvFlags::from_bits_truncate(flags);
-
-    debug!(
-        "sockfd = {}, user_msghdr = {:x?}, flags = {:?}",
-        sockfd, c_user_msghdr, flags
-    );
-
-    let mut file_table = ctx.thread_local.borrow_file_table_mut();
-    let file = get_file_fast!(&mut file_table, sockfd.try_into()?);
+    let file = super::socket::get_socket_file(sockfd, ctx)?;
     let socket = file.as_socket_or_err()?;
+    let flags = RecvFlags::from_bits_truncate(flags);
+    let (len, _) = recv_one_message(socket, user_msghdr_ptr, flags, ctx)?;
+    Ok(SyscallReturn::Return(len as _))
+}
 
-    let (output, message_header) = {
-        let mut io_vec_writer = c_user_msghdr.copy_writer_array_from_user(&user_space)?;
-        socket
-            .recvmsg(&mut io_vec_writer, flags)
-            .map_err(|error| socket.restart_recv_error(error))?
-    };
+pub(super) fn recv_one_message(
+    socket: &dyn Socket,
+    user_msghdr_ptr: Vaddr,
+    flags: RecvFlags,
+    ctx: &Context,
+) -> Result<(usize, RecvFlags)> {
+    let user_space = ctx.user_space();
+    let header: CUserMsgHdr = user_space.read_val(user_msghdr_ptr)?;
+    let mut writers = header.copy_writer_array_from_user(&user_space)?;
+    let (output, message_header) = socket
+        .recvmsg(&mut writers, flags)
+        .map_err(|error| socket.restart_recv_error(error))?;
 
-    // Writing control messages may access the file table, so it should be called after dropping
-    // the file table borrow.
-    drop(file_table);
-
-    let addr = message_header.addr();
-    c_user_msghdr.msg_namelen = c_user_msghdr.write_socket_addr_to_user(addr)?;
-
-    let control_messages = message_header.control_messages();
+    let name_len = header.write_socket_addr_to_user(message_header.addr())?;
+    if header.msg_name != 0 {
+        user_space.write_val(
+            user_msghdr_ptr + offset_of!(CUserMsgHdr, msg_namelen),
+            &name_len,
+        )?;
+    }
     let fd_flags = if flags.contains(RecvFlags::MSG_CMSG_CLOEXEC) {
         FdFlags::CLOEXEC
     } else {
         FdFlags::empty()
     };
-    let (control_len, control_flags) =
-        c_user_msghdr.write_control_messages_to_user(control_messages, fd_flags, &user_space)?;
-    c_user_msghdr.msg_controllen = control_len as _;
-    c_user_msghdr.msg_flags =
-        (output.flags() | control_flags | (flags & RecvFlags::MSG_CMSG_CLOEXEC))
-            .bits()
-            .cast_unsigned();
-
-    user_space.write_val(user_msghdr_ptr, &c_user_msghdr)?;
-
-    Ok(SyscallReturn::Return(output.len() as _))
+    let (control_len, control_flags) = header.write_control_messages_to_user(
+        message_header.control_messages(),
+        fd_flags,
+        &user_space,
+    )?;
+    let output_flags = output.flags() | control_flags | (flags & RecvFlags::MSG_CMSG_CLOEXEC);
+    user_space.write_val(
+        user_msghdr_ptr + offset_of!(CUserMsgHdr, msg_flags),
+        &output_flags.bits().cast_unsigned(),
+    )?;
+    user_space.write_val(
+        user_msghdr_ptr + offset_of!(CUserMsgHdr, msg_controllen),
+        &(control_len as usize),
+    )?;
+    Ok((output.len(), output_flags))
 }

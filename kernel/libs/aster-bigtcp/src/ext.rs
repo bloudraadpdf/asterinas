@@ -25,4 +25,10 @@ pub trait Ext {
 
     /// The type for UDP sockets to observe events.
     type UdpEventObserver: SocketEventObserver;
+
+    /// Returns real time for packet arrival metadata.
+    fn receive_timestamp() -> core::time::Duration;
+
+    /// Fills protocol keys with cryptographically secure random bytes.
+    fn fill_random(bytes: &mut [u8]);
 }

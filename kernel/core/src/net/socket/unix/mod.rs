@@ -5,6 +5,7 @@ mod cred;
 mod ctrl_msg;
 mod datagram;
 mod ns;
+mod send_buffer;
 mod stream;
 
 pub(crate) use addr::UnixSocketAddr;

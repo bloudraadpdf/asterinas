@@ -69,9 +69,19 @@ impl ReadCString for VmReader<'_, Fallible> {
 
 impl ReadCString for VmReaderArray<'_> {
     fn read_cstring_until_nul(&mut self, max_len: usize) -> Result<Option<CString>> {
+        self.readers_mut().read_cstring_until_nul(max_len)
+    }
+
+    fn read_cstring_until_end(&mut self, max_len: usize) -> Result<(CString, usize)> {
+        self.readers_mut().read_cstring_until_end(max_len)
+    }
+}
+
+impl ReadCString for &mut [VmReader<'_>] {
+    fn read_cstring_until_nul(&mut self, max_len: usize) -> Result<Option<CString>> {
         let mut buffer: Vec<u8> = Vec::with_capacity(INIT_ALLOC_SIZE.min(max_len));
 
-        for reader in self.readers_mut() {
+        for reader in self.iter_mut() {
             if read_until_nul_byte(reader, &mut buffer, max_len)? {
                 return Ok(Some(CString::from_vec_with_nul(buffer).unwrap()));
             }
@@ -83,7 +93,7 @@ impl ReadCString for VmReaderArray<'_> {
     fn read_cstring_until_end(&mut self, max_len: usize) -> Result<(CString, usize)> {
         let mut buffer: Vec<u8> = Vec::with_capacity(INIT_ALLOC_SIZE.min(max_len));
 
-        for reader in self.readers_mut() {
+        for reader in self.iter_mut() {
             if read_until_nul_byte(reader, &mut buffer, max_len)? {
                 let buffer_len = buffer.len();
                 return Ok((CString::from_vec_with_nul(buffer).unwrap(), buffer_len));
@@ -173,7 +183,42 @@ mod test {
     use ostd::prelude::*;
 
     use super::*;
-    use crate::util::MultiRead;
+    use crate::util::{LimitedRead, MultiRead};
+
+    #[ktest]
+    fn limited_cstring_preserves_the_following_bytes() {
+        let mut readers = VmReaderArray::new(
+            vec![
+                VmReader::from(&b"ab"[..]).to_fallible(),
+                VmReader::from(&b"c\0tail"[..]).to_fallible(),
+            ]
+            .into_boxed_slice(),
+        );
+        {
+            let mut limited = LimitedRead::new(&mut readers, 3);
+            assert_eq!(limited.read_cstring_until_nul(10).unwrap(), None);
+            assert_eq!(limited.sum_lens(), 0);
+        }
+        assert_eq!(
+            readers
+                .read_cstring_until_nul(1)
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            b""
+        );
+        {
+            let mut limited = LimitedRead::new(&mut readers, 2);
+            let (string, count) = limited.read_cstring_until_end(10).unwrap();
+            assert_eq!(string.as_bytes(), b"ta");
+            assert_eq!(count, 2);
+            assert_eq!(limited.sum_lens(), 0);
+        }
+        assert_eq!(
+            readers.read_cstring_until_end(10).unwrap().0.as_bytes(),
+            b"il"
+        );
+    }
 
     fn init_buffer(cstrs: &[CString]) -> Vec<u8> {
         let mut buffer = vec![255u8; 100];

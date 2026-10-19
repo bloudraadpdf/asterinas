@@ -8,8 +8,8 @@ use ostd::{
 };
 use smoltcp::wire::{
     ArpOperation, ArpRepr, EthernetAddress, EthernetProtocol, EthernetRepr, IpProtocol, IpRepr,
-    Ipv4Address, Ipv4Repr, Ipv6Address, Ipv6Repr, TcpControl, TcpRepr, TcpSeqNumber,
-    TcpTimestampRepr, UdpRepr,
+    Ipv4Address, Ipv4Repr, Ipv6Address, Ipv6Repr, TcpControl, TcpFastOpenCookie, TcpRepr,
+    TcpSeqNumber, TcpTimestampRepr, UdpRepr,
 };
 
 use super::{arp, ether, ip, tcp, udp};
@@ -143,6 +143,7 @@ fn tcp_ipv4_round_trip() {
         sack_permitted: true,
         sack_ranges: [None; 3],
         timestamp: None,
+        fast_open: TcpFastOpenCookie::new(&[0x42; 8]),
         payload: &[],
     };
     let ip_repr = IpRepr::Ipv4(Ipv4Repr {
@@ -182,6 +183,7 @@ fn tcp_ipv6_round_trip() {
         sack_permitted: false,
         sack_ranges: [Some((1000, 2000)), Some((3000, 4500)), None],
         timestamp: Some(TcpTimestampRepr::new(0x1234_5678, 0x9abc_def0)),
+        fast_open: None,
         payload: &[],
     };
     let ip_repr = IpRepr::Ipv6(Ipv6Repr {

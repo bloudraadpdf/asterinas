@@ -107,6 +107,7 @@ use super::{
     readlink::{sys_readlink, sys_readlinkat},
     reboot::sys_reboot,
     recvfrom::sys_recvfrom,
+    recvmmsg::sys_recvmmsg,
     recvmsg::sys_recvmsg,
     removexattr::{sys_fremovexattr, sys_lremovexattr, sys_removexattr},
     rename::{sys_rename, sys_renameat, sys_renameat2},
@@ -409,6 +410,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PWRITEV = 296          => sys_pwritev(args[..5]);
     SYS_PRLIMIT64 = 302        => sys_prlimit64(args[..4]);
     SYS_SYNCFS = 306           => sys_syncfs(args[..1]);
+    SYS_RECVMMSG = 299         => sys_recvmmsg(args[..5]);
     SYS_SENDMMSG = 307         => sys_sendmmsg(args[..4]);
     SYS_SETNS = 308            => sys_setns(args[..2]);
     SYS_GETCPU = 309           => sys_getcpu(args[..3]);

@@ -10,15 +10,10 @@ use super::{
 };
 use crate::{
     events::IoEvents,
-    fs::{
-        file::{FileCommon, FileLike},
-        utils::EndpointState,
-    },
+    fs::{file::FileLike, utils::EndpointState},
     net::socket::{
-        Socket, new_socket_common,
-        options::{
-            Error as SocketError, PeerCred, PeerGroups, SocketOption, macros::sock_option_mut,
-        },
+        Socket, SocketCommon, new_socket_common,
+        options::{PeerCred, PeerGroups, SocketOption, macros::sock_option_mut},
         private::SocketPrivate,
         unix::{CUserCred, UnixSocketAddr, cred::SocketCred, ctrl_msg::AuxiliaryData},
         util::{
@@ -45,7 +40,7 @@ pub(crate) struct UnixStreamSocket {
 
     socket_type: SockType,
     pollee: Pollee,
-    common: FileCommon,
+    common: SocketCommon,
 }
 
 enum State {
@@ -153,6 +148,7 @@ impl OptionSet {
     }
 
     pub(super) fn apply_to_connected(&self, connected: &Connected) {
+        connected.set_send_limit(self.socket.send_buf());
         if self.socket.pass_cred() {
             connected.set_pass_cred(true);
         }
@@ -212,6 +208,7 @@ impl UnixStreamSocket {
         is_nonblocking: bool,
         socket_type: SockType,
     ) -> Arc<Self> {
+        options.apply_to_connected(&connected);
         let cloned_pollee = connected.cloned_pollee();
         Arc::new(Self {
             state: RwMutex::new(Takeable::new(State::Connected(connected))),
@@ -227,10 +224,12 @@ impl UnixStreamSocket {
         &self,
         buf: &mut dyn MultiRead,
         aux_data: &mut AuxiliaryData,
-        _flags: SendFlags,
+        waiting_for_memory: &mut bool,
     ) -> Result<usize> {
         match self.state.read().as_ref() {
-            State::Connected(connected) => connected.try_write(buf, aux_data, self.is_seqpacket()),
+            State::Connected(connected) => {
+                connected.try_write(buf, aux_data, self.is_seqpacket(), waiting_for_memory)
+            }
             State::Init(_) | State::Listen(_) => {
                 return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected")
             }
@@ -309,15 +308,25 @@ pub(super) const SHUT_READ_EVENTS: IoEvents =
 pub(super) const SHUT_WRITE_EVENTS: IoEvents = IoEvents::OUT.union(IoEvents::HUP);
 
 impl Pollable for UnixStreamSocket {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
-            .poll_with(mask, poller, || self.state.read().check_io_events())
+    fn poll(&self, mask: IoEvents, mut poller: Option<&mut PollHandle>) -> IoEvents {
+        let pending = self.common.error.poll(poller.as_deref_mut());
+        let state = self.state.read();
+        let mut events = self
+            .pollee
+            .poll_with(mask, poller.as_deref_mut(), || state.check_io_events());
+        if let State::Connected(connected) = state.as_ref() {
+            let memory = connected.poll_send_buffer(mask, poller);
+            if !state.is_write_shutdown() {
+                events &= !IoEvents::OUT | memory;
+            }
+        }
+        pending | events
     }
 }
 
 impl SocketPrivate for UnixStreamSocket {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 }
 
@@ -425,14 +434,9 @@ impl Socket for UnixStreamSocket {
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                // TODO: Support socket errors for UNIX sockets
-                socket_errors.set(None);
-                return Ok(());
-            }
-            _ => (),
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         let state = self.state.read();
 
@@ -461,6 +465,12 @@ impl Socket for UnixStreamSocket {
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         let state = self.state.read();
         let mut options = self.options.write();
+        if let Some((send, bytes)) = options.socket.set_unix_buffer_option(option)? {
+            if send && let State::Connected(connected) = state.as_ref() {
+                connected.set_send_limit(bytes);
+            }
+            return Ok(());
+        }
         match options
             .socket
             .set_option(option, &(state.as_ref(), &self.timeouts))
@@ -483,6 +493,9 @@ impl Socket for UnixStreamSocket {
         message_header: MessageHeader,
         flags: SendFlags,
     ) -> Result<usize> {
+        if flags.contains(SendFlags::MSG_OOB) {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "UNIX out-of-band data is unsupported");
+        }
         // TODO: Deal with flags
         flags.warn_if_unsupported();
 
@@ -507,13 +520,24 @@ impl Socket for UnixStreamSocket {
             }
         }
         let mut auxiliary_data = AuxiliaryData::from_control(control_messages)?;
+        let mut waiting_for_memory = false;
 
-        self.block_on(
+        let mut sent = 0;
+        let result = self.block_on(
             IoEvents::OUT,
             self.timeouts.send_timeout(),
             flags.contains(SendFlags::MSG_DONTWAIT),
-            || self.try_send(reader, &mut auxiliary_data, flags),
-        )
+            || loop {
+                sent += self.try_send(reader, &mut auxiliary_data, &mut waiting_for_memory)?;
+                if self.is_seqpacket() || reader.is_empty() {
+                    return Ok(sent);
+                }
+            },
+        );
+        match result {
+            Err(_) if sent != 0 => Ok(sent),
+            result => result,
+        }
     }
 
     fn recvmsg(
@@ -521,6 +545,9 @@ impl Socket for UnixStreamSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
+        if flags.contains(RecvFlags::MSG_OOB) {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "UNIX out-of-band data is unsupported");
+        }
         // TODO: Deal with flags
         flags.warn_if_unsupported();
 
@@ -532,10 +559,6 @@ impl Socket for UnixStreamSocket {
         let message_header = MessageHeader::new(None, control_messages);
 
         Ok((output, message_header))
-    }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
     }
 }
 

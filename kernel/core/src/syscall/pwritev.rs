@@ -90,40 +90,8 @@ fn do_sys_pwritev(
     let user_space = ctx.user_space();
     let mut reader_array = VmReaderArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)?;
 
-    // Probe with a zero-length write so that unsupported files (e.g., pipes)
-    // still return the correct errno even when all buffers are empty.
-    if reader_array.readers_mut().is_empty() {
-        let empty = [0u8; 0];
-        let mut reader = VmReader::from(empty.as_slice()).to_fallible();
-        file.write_at(offset as usize, &mut reader)?;
-        return Ok(0);
-    }
+    let total_len = file.writev_at(offset as usize, &mut reader_array)?;
 
-    let mut total_len: usize = 0;
-    let mut cur_offset = offset as usize;
-
-    for reader in reader_array.readers_mut() {
-        debug_assert!(reader.has_remain());
-
-        // TODO: According to the man page
-        // at <https://man7.org/linux/man-pages/man2/readv.2.html>,
-        // writev must be atomic,
-        // but the current implementation does not ensure atomicity.
-        // A suitable fix would be to add a `writev` method for the `FileLike` trait,
-        // allowing each subsystem to implement atomicity.
-        match file.write_at(cur_offset, reader) {
-            Ok(write_len) => {
-                total_len += write_len;
-                cur_offset += write_len;
-            }
-            Err(_) if total_len > 0 => break,
-            Err(err) => return Err(err),
-        }
-        if reader.has_remain() {
-            // Partial write, maybe errors in the middle
-            break;
-        }
-    }
     if total_len > 0 {
         fs::vfs::notify::on_modify(&file);
     }
@@ -145,37 +113,20 @@ fn do_sys_writev(
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
 
-    let mut total_len = 0;
-
     let user_space = ctx.user_space();
     let mut reader_array = VmReaderArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)?;
-    for reader in reader_array.readers_mut() {
-        debug_assert!(reader.has_remain());
+    let total_len = file.writev(&mut reader_array).map_err(|error| {
+        if error.error() == Errno::EINTR
+            && file
+                .as_socket()
+                .is_none_or(|socket| socket.send_timeout().is_none())
+        {
+            Error::new(Errno::ERESTARTSYS)
+        } else {
+            error
+        }
+    })?;
 
-        // TODO: According to the man page
-        // at <https://man7.org/linux/man-pages/man2/readv.2.html>,
-        // writev must be atomic,
-        // but the current implementation does not ensure atomicity.
-        // A suitable fix would be to add a `writev` method for the `FileLike` trait,
-        // allowing each subsystem to implement atomicity.
-        match file.write(reader) {
-            Ok(write_len) => total_len += write_len,
-            Err(_) if total_len > 0 => break,
-            Err(err)
-                if err.error() == Errno::EINTR
-                    && file
-                        .as_socket()
-                        .is_none_or(|socket| socket.send_timeout().is_none()) =>
-            {
-                return_errno!(Errno::ERESTARTSYS);
-            }
-            Err(err) => return Err(err),
-        }
-        if reader.has_remain() {
-            // Partial write, maybe errors in the middle
-            break;
-        }
-    }
     if total_len > 0 {
         fs::vfs::notify::on_modify(&file);
     }

@@ -3,8 +3,8 @@
 use super::{RawSocketOption, SocketOption, impl_raw_socket_option};
 use crate::{
     net::socket::ip::stream_options::{
-        Congestion, DeferAccept, Inq, KeepCnt, KeepIdle, KeepIntvl, MaxSegment, NoDelay, SynCnt,
-        UserTimeout, WindowClamp,
+        Congestion, DeferAccept, FastOpen, Inq, KeepCnt, KeepIdle, KeepIntvl, MaxSegment, NoDelay,
+        SynCnt, UserTimeout, WindowClamp,
     },
     prelude::*,
 };
@@ -39,6 +39,8 @@ pub(crate) enum CTcpOptionName {
     CONGESTION = 13,
     /// How long for loss retry before timeout
     USER_TIMEOUT = 18,
+    /// Maximum pending passive Fast Open requests
+    FASTOPEN = 23,
     /// Notify bytes available to read as a cmsg on read
     INQ = 36,
 }
@@ -56,6 +58,7 @@ pub(crate) fn new_tcp_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CTcpOptionName::WINDOW_CLAMP => Ok(Box::new(WindowClamp::new())),
         CTcpOptionName::CONGESTION => Ok(Box::new(Congestion::new())),
         CTcpOptionName::USER_TIMEOUT => Ok(Box::new(UserTimeout::new())),
+        CTcpOptionName::FASTOPEN => Ok(Box::new(FastOpen::new())),
         CTcpOptionName::INQ => Ok(Box::new(Inq::new())),
         _ => return_errno_with_message!(Errno::ENOPROTOOPT, "unsupported tcp-level option"),
     }
@@ -72,3 +75,4 @@ impl_raw_socket_option!(WindowClamp);
 impl_raw_socket_option!(Congestion);
 impl_raw_socket_option!(UserTimeout);
 impl_raw_socket_option!(Inq);
+impl_raw_socket_option!(FastOpen);

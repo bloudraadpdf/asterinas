@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::wire::IpEndpoint;
+use aster_bigtcp::wire::{IpAddress, IpEndpoint};
 use bound::BoundDatagram;
 use unbound::{BindOptions, UnboundDatagram};
 
 use super::{addr::UNSPECIFIED_LOCAL_ENDPOINT, ioctl::ipv4_ioctl};
 use crate::{
     events::IoEvents,
-    fs::file::FileCommon,
     net::{
         route::is_broadcast_endpoint,
         socket::{
-            Socket,
+            Socket, SocketCommon,
             ip::{
                 common::map_unspecified_to_localhost,
                 options::{IpOptionSet, SetIpLevelOption},
             },
             new_socket_common,
-            options::{Error as SocketError, SocketOption, macros::sock_option_mut},
+            options::SocketOption,
             private::SocketPrivate,
             util::{
-                MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
+                ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
+                TimestampOptions,
                 datagram_common::{Bound, Inner, select_remote_and_bind},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
@@ -44,13 +44,14 @@ pub(crate) struct DatagramSocket {
     timeouts: SocketTimeouts,
 
     pollee: Pollee,
-    common: FileCommon,
+    common: SocketCommon,
 }
 
 #[derive(Clone, Debug)]
 struct OptionSet {
     socket: SocketOptionSet,
     ip: IpOptionSet,
+    timestamps: TimestampOptions,
     // TODO: UDP option set
 }
 
@@ -58,7 +59,11 @@ impl OptionSet {
     fn new() -> Self {
         let socket = SocketOptionSet::new_udp();
         let ip = IpOptionSet::new_udp();
-        OptionSet { socket, ip }
+        OptionSet {
+            socket,
+            ip,
+            timestamps: TimestampOptions::default(),
+        }
     }
 }
 
@@ -78,15 +83,32 @@ impl DatagramSocket {
         &self,
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
-    ) -> Result<(RecvOutput, SocketAddr)> {
-        let result = self
-            .inner
-            .read()
-            .try_recv(writer, flags)
-            .map(|(output, remote_endpoint)| (output, remote_endpoint.into()))?;
+    ) -> Result<(RecvOutput, MessageHeader)> {
+        let (output, metadata) = {
+            let inner = self.inner.read();
+            let Inner::Bound(bound) = &*inner else {
+                return_errno_with_message!(Errno::EAGAIN, "the socket is not bound");
+            };
+            bound.recv_packet(writer, flags)?
+        };
         self.pollee.invalidate();
-
-        Ok(result)
+        let options = self.options.read();
+        let mut control = Vec::new();
+        if let Some(timestamp) = options.timestamps.control_message(metadata.timestamp) {
+            control.push(timestamp);
+        }
+        if options.ip.recv_original_destination()
+            && let IpAddress::Ipv4(addr) = metadata.destination.addr
+        {
+            control.push(ControlMessage::OriginalDestination(
+                addr,
+                metadata.destination.port,
+            ));
+        }
+        Ok((
+            output,
+            MessageHeader::new(Some(metadata.endpoint.into()), control),
+        ))
     }
 
     fn try_send(
@@ -125,14 +147,15 @@ impl DatagramSocket {
 
 impl Pollable for DatagramSocket {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
-            .poll_with(mask, poller, || self.inner.read().check_io_events())
+        self.common.error.poll_with(mask, poller, &self.pollee, || {
+            self.inner.read().check_io_events()
+        })
     }
 }
 
 impl SocketPrivate for DatagramSocket {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 
     fn protocol_ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -232,30 +255,21 @@ impl Socket for DatagramSocket {
         // TODO: Deal with flags
         flags.warn_if_unsupported();
 
-        let (output, peer_addr) =
-            self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
-                self.try_recv(writer, flags)
-            })?;
-
-        // TODO: Receive control message
-
-        let message_header = MessageHeader::new(Some(peer_addr), Vec::new());
-
-        Ok((output, message_header))
+        self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
+            self.try_recv(writer, flags)
+        })
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                // TODO: Support socket errors for UDP sockets
-                socket_errors.set(None);
-                return Ok(());
-            }
-            _ => (),
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         let inner = self.inner.read();
         let options = self.options.read();
+        if options.timestamps.get_option(option) {
+            return Ok(());
+        }
 
         // Deal with socket-level options
         match options
@@ -273,6 +287,9 @@ impl Socket for DatagramSocket {
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         let inner = self.inner.read();
         let mut options = self.options.write();
+        if options.timestamps.set_option(option) {
+            return Ok(());
+        }
 
         // Deal with socket-level options
         let need_iface_poll = match options
@@ -307,10 +324,6 @@ impl Socket for DatagramSocket {
         }
 
         Ok(())
-    }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
     }
 }
 

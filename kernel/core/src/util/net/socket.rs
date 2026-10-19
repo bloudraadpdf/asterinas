@@ -98,6 +98,14 @@ pub(crate) struct CUserMsgHdr {
     pub msg_flags: u32,
 }
 
+#[padding_struct]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+pub(crate) struct CUserMMsgHdr {
+    pub msg_hdr: CUserMsgHdr,
+    pub msg_len: u32,
+}
+
 impl CUserMsgHdr {
     pub(crate) fn read_socket_addr_from_user(&self) -> Result<Option<SocketAddr>> {
         if self.msg_name == 0 {

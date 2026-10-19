@@ -13,10 +13,10 @@ use takeable::Takeable;
 
 use crate::{
     events::IoEvents,
-    fs::file::{FileCommon, FileLike},
+    fs::file::FileLike,
     net::socket::{
-        Socket, new_socket_common,
-        options::{Error as SocketError, SocketOption, macros::sock_option_mut},
+        Socket, SocketCommon, new_socket_common,
+        options::SocketOption,
         private::SocketPrivate,
         util::{
             MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr,
@@ -34,7 +34,7 @@ pub(crate) struct VsockStreamSocket {
     // Note that for vsock, all pollee notifications and invalidations live in the transport module
     // (e.g., `super::transport`) rather than in this module.
     pollee: Pollee,
-    common: FileCommon,
+    common: SocketCommon,
     timeouts: SocketTimeouts,
 }
 
@@ -247,14 +247,15 @@ impl VsockStreamSocket {
 
 impl Pollable for VsockStreamSocket {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
-            .poll_with(mask, poller, || self.check_io_events())
+        self.common
+            .error
+            .poll_with(mask, poller, &self.pollee, || self.check_io_events())
     }
 }
 
 impl SocketPrivate for VsockStreamSocket {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 }
 
@@ -363,17 +364,17 @@ impl Socket for VsockStreamSocket {
         return_errno_with_message!(Errno::EOPNOTSUPP, "unknown vsock socket option");
     }
 
+    fn transport_error(&self) -> Option<Error> {
+        self.test_and_clear_error()
+    }
+
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         if self.timeouts.get_option(option) {
             return Ok(());
         }
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                socket_errors.set(self.test_and_clear_error());
-                return Ok(());
-            }
-            _ => {}
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         // TODO: Support getting other socket options
         return_errno_with_message!(Errno::EOPNOTSUPP, "the socket option to be get is unknown");
@@ -438,24 +439,8 @@ impl Socket for VsockStreamSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
-        // TODO: Deal with flags
-        flags.warn_if_unsupported();
-
-        let received_bytes = if flags.contains(RecvFlags::MSG_DONTWAIT) {
-            self.try_recv(writer, flags)?
-        } else {
-            self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
-                self.try_recv(writer, flags)
-            })?
-        };
-
-        // TODO: Receive control message
-        let message_header = MessageHeader::new(None, Vec::new());
-
-        Ok((RecvOutput::new_for_stream(received_bytes), message_header))
-    }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
+        self.recv_stream(flags, self.timeouts.recv_timeout(), || {
+            self.try_recv(writer, flags)
+        })
     }
 }

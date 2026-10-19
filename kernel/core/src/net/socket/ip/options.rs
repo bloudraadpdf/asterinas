@@ -21,6 +21,7 @@ pub(super) struct IpOptionSet {
     ttl: IpTtl,
     hdrincl: bool,
     recverr: bool,
+    recv_original_destination: bool,
 }
 
 const DEFAULT_TTL: u8 = 64;
@@ -33,6 +34,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            recv_original_destination: false,
         }
     }
 
@@ -42,6 +44,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            recv_original_destination: false,
         }
     }
 
@@ -58,6 +61,9 @@ impl IpOptionSet {
             ip_hdrincl @ Hdrincl => {
                 let hdrincl = self.hdrincl();
                 ip_hdrincl.set(hdrincl);
+            }
+            original @ RecvOriginalDestination => {
+                original.set(self.recv_original_destination());
             }
             ip_recverr @ Recverr => {
                 let recverr = self.recverr();
@@ -91,6 +97,9 @@ impl IpOptionSet {
                 socket.set_hdrincl(*hdrincl)?;
                 self.set_hdrincl(*hdrincl);
             }
+            original @ RecvOriginalDestination => {
+                self.set_recv_original_destination(*original.get().unwrap());
+            }
             ip_recverr @ Recverr => {
                 let recverr = ip_recverr.get().unwrap();
                 self.set_recverr(*recverr);
@@ -110,6 +119,7 @@ impl_socket_options!(
     pub(crate) struct Ttl(IpTtl);
     pub(crate) struct Hdrincl(bool);
     pub(crate) struct Recverr(bool);
+    pub(crate) struct RecvOriginalDestination(bool);
 );
 
 #[derive(Clone, Copy, Debug)]

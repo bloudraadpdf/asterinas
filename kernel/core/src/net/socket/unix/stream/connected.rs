@@ -12,14 +12,18 @@ use crate::{
     fs::utils::{Endpoint, EndpointState},
     net::socket::{
         unix::{
-            UnixSocketAddr, addr::UnixSocketAddrBound, cred::SocketCred, ctrl_msg::AuxiliaryData,
+            UnixSocketAddr,
+            addr::UnixSocketAddrBound,
+            cred::SocketCred,
+            ctrl_msg::AuxiliaryData,
+            send_buffer::{SendBuffer, SendCharge},
         },
         util::{ControlMessage, RecvFlags, RecvOutput, SockShutdownCmd},
     },
     prelude::*,
-    process::signal::Pollee,
+    process::signal::{PollHandle, Pollee},
     util::{
-        MultiRead, MultiWrite,
+        LimitedRead, MultiRead, MultiWrite,
         ring_buffer::{ProducerU8Ext, RbConsumer, RbProducer, RingBuffer, RingBufferU8Ext},
     },
 };
@@ -43,6 +47,8 @@ impl Connected {
         let (this_writer, peer_reader) = RingBuffer::new(UNIX_STREAM_DEFAULT_BUF_SIZE).split();
         let (peer_writer, this_reader) = RingBuffer::new(UNIX_STREAM_DEFAULT_BUF_SIZE).split();
 
+        let this_send_buffer = SendBuffer::new(UNIX_STREAM_DEFAULT_BUF_SIZE);
+        let peer_send_buffer = SendBuffer::new(UNIX_STREAM_DEFAULT_BUF_SIZE);
         let this_inner = Inner {
             addr: Once::new(),
             state,
@@ -52,6 +58,7 @@ impl Connected {
             has_aux: AtomicBool::new(false),
             is_pass_cred: AtomicBool::new(false),
             cred,
+            send_buffer: this_send_buffer,
         };
         let peer_inner = Inner {
             addr: Once::new(),
@@ -62,6 +69,7 @@ impl Connected {
             has_aux: AtomicBool::new(false),
             is_pass_cred: AtomicBool::new(false),
             cred: peer_cred,
+            send_buffer: peer_send_buffer,
         };
 
         if let Some(addr) = addr.as_ref() {
@@ -121,7 +129,7 @@ impl Connected {
     ) -> Result<(RecvOutput, Vec<ControlMessage>)> {
         let is_empty = writer.is_empty();
         if is_empty && !is_seqpacket {
-            if self.inner.this_end().reader.lock().is_empty() {
+            if self.inner.this_end().reader.lock().is_empty() && !self.is_read_shutdown() {
                 return_errno_with_message!(Errno::EAGAIN, "the channel is empty");
             }
             return Ok((RecvOutput::new_for_stream(0), Vec::new()));
@@ -230,7 +238,10 @@ impl Connected {
                     trunc_len = aux_len - read_len;
                 }
                 break;
-            } else if read_len < aux_len {
+            } else if read_len < aux_len
+                || writer.is_empty()
+                || (read_len == 0 && aux_front.is_none())
+            {
                 break;
             }
         }
@@ -286,6 +297,7 @@ impl Connected {
         reader: &mut dyn MultiRead,
         aux_data: &mut AuxiliaryData,
         is_seqpacket: bool,
+        waiting_for_memory: &mut bool,
     ) -> Result<usize> {
         let is_empty = reader.is_empty();
         if is_empty {
@@ -297,23 +309,33 @@ impl Connected {
             }
         }
 
-        if is_seqpacket && reader.sum_lens() >= UNIX_STREAM_DEFAULT_BUF_SIZE {
-            return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
+        if self.inner.is_shutdown() {
+            return_errno_with_message!(Errno::EPIPE, "the channel is shut down");
         }
-
         let this_end = self.inner.this_end();
+        let buffer = &this_end.send_buffer;
+        if *waiting_for_memory && !buffer.is_writable() {
+            return_errno_with_message!(Errno::EAGAIN, "waiting for send memory to become writable");
+        }
+        let length = if is_seqpacket {
+            reader.sum_lens()
+        } else {
+            reader.sum_lens().min(buffer.limit().saturating_sub(32))
+        };
+        if is_seqpacket && length >= UNIX_STREAM_DEFAULT_BUF_SIZE {
+            return_errno_with_message!(Errno::EMSGSIZE, "the packet exceeds the channel capacity");
+        }
+        let charge = buffer
+            .charge(length, aux_data.allocated_bytes())
+            .inspect_err(|error| {
+                if error.error() == Errno::EAGAIN {
+                    *waiting_for_memory = true;
+                }
+            })?;
+        *waiting_for_memory = false;
+        let mut reader = LimitedRead::new(reader, length);
         let need_pass_cred = this_end.is_pass_cred.load(Ordering::Relaxed)
             || self.inner.peer_end().is_pass_cred.load(Ordering::Relaxed);
-
-        // Fast path: There are no auxiliary data to transmit.
-        if aux_data.is_empty() && !is_seqpacket && !need_pass_cred {
-            let mut writer = this_end.writer.lock();
-            let write_len = self
-                .inner
-                .write_with(move || writer.write_fallible(reader))?;
-            self.inner.notify_write();
-            return Ok(write_len);
-        }
 
         let mut all_aux = this_end.all_aux.lock();
 
@@ -329,7 +351,7 @@ impl Connected {
                 if is_seqpacket && writer.free_len() < reader.sum_lens() {
                     return Ok(0);
                 }
-                writer.write_fallible(reader)
+                writer.write_fallible(&mut reader)
             });
             (write_start, write_res)
         } else {
@@ -351,6 +373,7 @@ impl Connected {
             data: core::mem::take(aux_data),
             start: write_start,
             end: write_start + Wrapping(write_len),
+            _charge: charge,
         };
         all_aux.push_back(aux_range);
 
@@ -392,7 +415,7 @@ impl Connected {
         let this_end = self.inner.this_end();
         let mut events = IoEvents::empty();
 
-        if !this_end.reader.lock().is_empty() {
+        if !this_end.reader.lock().is_empty() || !self.inner.peer_end().all_aux.lock().is_empty() {
             events |= IoEvents::IN;
         }
 
@@ -401,6 +424,18 @@ impl Connected {
         }
 
         events
+    }
+
+    pub(super) fn set_send_limit(&self, bytes: u32) {
+        self.inner.this_end().send_buffer.set_limit(bytes as usize);
+    }
+
+    pub(super) fn poll_send_buffer(
+        &self,
+        mask: IoEvents,
+        poller: Option<&mut PollHandle>,
+    ) -> IoEvents {
+        self.inner.this_end().send_buffer.poll(mask, poller)
     }
 
     pub(super) fn cloned_pollee(&self) -> Pollee {
@@ -416,6 +451,11 @@ impl Drop for Connected {
     fn drop(&mut self) {
         self.inner.shutdown();
         self.inner.peer_shutdown();
+        let mut reader = self.inner.this_end().reader.lock();
+        let mut incoming = self.inner.peer_end().all_aux.lock();
+        incoming.clear();
+        let remaining = reader.len();
+        reader.commit_read(remaining);
     }
 }
 
@@ -429,6 +469,7 @@ struct Inner {
     has_aux: AtomicBool,
     is_pass_cred: AtomicBool,
     cred: SocketCred,
+    send_buffer: Arc<SendBuffer>,
 }
 
 impl AsRef<EndpointState> for Inner {
@@ -441,6 +482,7 @@ struct RangedAuxiliaryData {
     data: AuxiliaryData,
     start: Wrapping<usize>, // inclusive
     end: Wrapping<usize>,   // exclusive
+    _charge: SendCharge,
 }
 
 pub(in crate::net) const UNIX_STREAM_DEFAULT_BUF_SIZE: usize = 65536;

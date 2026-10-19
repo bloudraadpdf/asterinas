@@ -33,4 +33,8 @@ impl_socket_options!(
     pub(crate) struct SendBufForce(u32);
     pub(crate) struct RecvBufForce(u32);
     pub(crate) struct PeerGroups(Arc<[Gid]>);
+    pub(crate) struct Timestamp(bool);
+    pub(crate) struct TimestampNs(bool);
+    pub(crate) struct TimestampNew(bool);
+    pub(crate) struct TimestampNsNew(bool);
 );

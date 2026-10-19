@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use core::num::NonZeroU8;
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
 use smoltcp::{
     socket::PollAt,
+    storage::SliceLike,
     time::Duration,
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpRepr, TcpRepr},
 };
 
 use super::{
     common::{Inner, NeedIfacePoll, Socket, SocketBg},
+    fast_open::FastOpenQueue,
     tcp_conn::{TcpConnection, TcpConnectionBg, TcpConnectionInner, TcpProcessResult},
 };
 use crate::{
@@ -30,6 +33,7 @@ pub type TcpListener<E> = Socket<TcpListenerInner<E>, E>;
 pub(super) struct TcpBacklog<E: Ext> {
     socket: Box<RawTcpSocket>,
     max_conn: usize,
+    fast_open: FastOpenQueue,
     pub(super) connecting: BTreeMap<ConnectionKey, TcpConnection<E>>,
     pub(super) connected: Vec<TcpConnection<E>>,
 }
@@ -121,6 +125,7 @@ impl<E: Ext> TcpListener<E> {
         Ok(Arc::new(SpinLock::new(TcpBacklog {
             socket,
             max_conn,
+            fast_open: FastOpenQueue::new(option.fast_open_backlog),
             connecting: BTreeMap::new(),
             connected: Vec::new(),
         })))
@@ -211,6 +216,11 @@ impl<E: Ext> TcpListener<E> {
         !self.0.inner.backlog.lock().connected.is_empty()
     }
 
+    /// Changes the limit for subsequent authenticated passive opens.
+    pub fn set_fast_open_backlog(&self, limit: usize) {
+        self.0.inner.backlog.lock().fast_open.set_limit(limit);
+    }
+
     /// Closes the listener.
     ///
     /// Polling the iface is _always_ required after this method succeeds.
@@ -250,6 +260,15 @@ impl<E: Ext> RawTcpSetOption for TcpListener<E> {
         let mut backlog = self.0.inner.backlog.lock();
         backlog.socket.set_nagle_enabled(enabled);
     }
+
+    fn set_fast_open_retries(&self, limit: NonZeroU8) {
+        self.0
+            .inner
+            .backlog
+            .lock()
+            .socket
+            .set_fast_open_retries(limit);
+    }
 }
 
 impl<E: Ext> TcpListenerBg<E> {
@@ -283,6 +302,18 @@ impl<E: Ext> TcpListenerBg<E> {
             return (TcpProcessResult::Processed, None);
         }
 
+        let pending_fast_open = {
+            let TcpBacklog {
+                socket, fast_open, ..
+            } = &mut *backlog;
+            fast_open.prepare::<E>(
+                socket,
+                iface.context_mut().now(),
+                ip_repr.src_addr(),
+                tcp_repr.fast_open,
+                payload.len(),
+            )
+        };
         let result = match backlog
             .socket
             .process(iface.context_mut(), ip_repr, tcp_repr, payload)
@@ -294,6 +325,13 @@ impl<E: Ext> TcpListenerBg<E> {
         if backlog.socket.state() == smoltcp::socket::tcp::State::Listen {
             return (result, None);
         }
+        let early_accept = backlog.socket.fast_open_pending();
+        let pending_fast_open = if early_accept {
+            pending_fast_open
+        } else {
+            None
+        };
+        debug_assert_eq!(early_accept, pending_fast_open.is_some());
 
         let new_socket = {
             let mut socket = new_tcp_socket();
@@ -312,14 +350,20 @@ impl<E: Ext> TcpListenerBg<E> {
                 TcpConnectionInner::new(
                     core::mem::replace(&mut backlog.socket, new_socket),
                     Some(self.clone()),
+                    pending_fast_open,
                     weak,
                 )
             },
         );
         let conn_bg = conn.inner().clone();
 
-        let old_conn = backlog.connecting.insert(*conn_bg.connection_key(), conn);
-        debug_assert!(old_conn.is_none());
+        if early_accept {
+            backlog.connected.push(conn);
+            self.notify_events(crate::socket::SocketEvents::CAN_RECV);
+        } else {
+            let old_conn = backlog.connecting.insert(*conn_bg.connection_key(), conn);
+            debug_assert!(old_conn.is_none());
+        }
 
         iface.update_next_poll_at_ms(&conn_bg, PollAt::Now);
 

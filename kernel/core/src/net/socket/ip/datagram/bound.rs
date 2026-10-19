@@ -2,6 +2,7 @@
 
 use aster_bigtcp::{
     errors::udp::{RecvError, SendError},
+    socket::UdpReceiveMetadata,
     wire::IpEndpoint,
 };
 
@@ -29,6 +30,36 @@ impl BoundDatagram {
         Self {
             bound_socket,
             remote_endpoint: None,
+        }
+    }
+
+    pub(super) fn recv_packet(
+        &self,
+        writer: &mut dyn MultiWrite,
+        flags: RecvFlags,
+    ) -> Result<(RecvOutput, UdpReceiveMetadata)> {
+        let result = self
+            .bound_socket
+            .recv(flags.receive_behavior(), |packet, udp_metadata| {
+                let message_len = packet.len();
+                let copied_res = writer
+                    .write(&mut VmReader::from(packet))
+                    .map_err(Into::into);
+                (copied_res, udp_metadata, message_len)
+            });
+
+        match result {
+            Ok((Ok(copied_len), metadata, message_len)) => {
+                let output = RecvOutput::new_for_packet(flags, copied_len, message_len);
+                Ok((output, metadata))
+            }
+            Ok((Err(e), _, _)) => Err(e),
+            Err(RecvError::Exhausted) => {
+                return_errno_with_message!(Errno::EAGAIN, "the receive buffer is empty")
+            }
+            Err(RecvError::Truncated) => {
+                unreachable!("`recv` should never fail with `RecvError::Truncated`")
+            }
         }
     }
 
@@ -77,30 +108,8 @@ impl datagram_common::Bound for BoundDatagram {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, Self::Endpoint)> {
-        let result = self
-            .bound_socket
-            .recv(flags.receive_behavior(), |packet, udp_metadata| {
-                let message_len = packet.len();
-                let copied_res = writer
-                    .write(&mut VmReader::from(packet))
-                    .map_err(Into::into);
-                let endpoint = udp_metadata.endpoint;
-                (copied_res, endpoint, message_len)
-            });
-
-        match result {
-            Ok((Ok(copied_len), endpoint, message_len)) => {
-                let output = RecvOutput::new_for_packet(flags, copied_len, message_len);
-                Ok((output, endpoint))
-            }
-            Ok((Err(e), _, _)) => Err(e),
-            Err(RecvError::Exhausted) => {
-                return_errno_with_message!(Errno::EAGAIN, "the receive buffer is empty")
-            }
-            Err(RecvError::Truncated) => {
-                unreachable!("`recv` should never fail with `RecvError::Truncated`")
-            }
-        }
+        self.recv_packet(writer, flags)
+            .map(|(output, metadata)| (output, metadata.endpoint))
     }
 
     fn try_send(

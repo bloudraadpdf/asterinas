@@ -105,6 +105,7 @@ macro_rules! import_generic_syscall_entries {
             readlink::sys_readlinkat,
             reboot::sys_reboot,
             recvfrom::sys_recvfrom,
+            recvmmsg::sys_recvmmsg,
             recvmsg::sys_recvmsg,
             removexattr::{sys_fremovexattr, sys_lremovexattr, sys_removexattr},
             rename::sys_renameat2,
@@ -392,6 +393,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_MSYNC = 227                  => sys_msync(args[..3]);
             SYS_MADVISE = 233                => sys_madvise(args[..3]);
             SYS_ACCEPT4 = 242                => sys_accept4(args[..4]);
+            SYS_RECVMMSG = 243               => sys_recvmmsg(args[..5]);
             SYS_WAIT4 = 260                  => sys_wait4(args[..4]);
             SYS_PRLIMIT64 = 261              => sys_prlimit64(args[..4]);
             SYS_SYNCFS = 267                 => sys_syncfs(args[..1]);

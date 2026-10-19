@@ -5,7 +5,7 @@ use core::{
     ops::{Deref, Range},
 };
 
-use ostd::mm::io::util::HasVmReaderWriter;
+use ostd::{Error as OstdError, mm::io::util::HasVmReaderWriter};
 pub(crate) use ring_buffer::{Consumer, Producer, RbConsumer, RbProducer, RingBuffer};
 
 use super::{MultiRead, MultiWrite};
@@ -43,24 +43,11 @@ impl<R: Deref<Target = RingBuffer<u8>>> ProducerU8Ext for Producer<u8, R> {
         let tail = self.tail();
         let offset = tail.0 & (self.capacity() - 1);
 
-        let write_len = if offset + free_len > self.capacity() {
-            // Write into two separate parts
-            let mut write_len = 0;
-
+        let write_len = copy_ring_range(offset, free_len, self.capacity(), |offset, length| {
             let mut writer = self.segment().writer();
-            writer.skip(offset).limit(self.capacity() - offset);
-            write_len += reader.read(&mut writer)?;
-
-            let mut writer = self.segment().writer();
-            writer.limit(free_len - (self.capacity() - offset));
-            write_len += reader.read(&mut writer)?;
-
-            write_len
-        } else {
-            let mut writer = self.segment().writer();
-            writer.skip(offset).limit(free_len);
-            reader.read(&mut writer)?
-        };
+            writer.skip(offset).limit(length);
+            reader.read(&mut writer)
+        })?;
 
         self.commit_write(write_len);
         Ok(write_len)
@@ -88,24 +75,11 @@ impl RingBufferU8Ext for RingBuffer<u8> {
         let len = (range.end - range.start).0;
         let offset = range.start.0 & (self.capacity() - 1);
 
-        if offset + len > self.capacity() {
-            // Read from two separate parts
-            let mut read_len = 0;
-
+        copy_ring_range(offset, len, self.capacity(), |offset, length| {
             let mut reader = self.segment().reader();
-            reader.skip(offset).limit(self.capacity() - offset);
-            read_len += writer.write(&mut reader)?;
-
-            let mut reader = self.segment().reader();
-            reader.limit(len - (self.capacity() - offset));
-            read_len += writer.write(&mut reader)?;
-
-            Ok(read_len)
-        } else {
-            let mut reader = self.segment().reader();
-            reader.skip(offset).limit(len);
-            Ok(writer.write(&mut reader)?)
-        }
+            reader.skip(offset).limit(length);
+            writer.write(&mut reader)
+        })
     }
 }
 
@@ -114,6 +88,7 @@ pub(crate) trait ConsumerU8Ext {
     /// Reads up to `max_len` bytes from the ring buffer into `writer`.
     ///
     /// Returns the number of bytes read.
+    /// A fault leaves the buffer queued, including bytes copied before the fault.
     fn read_fallible_with_max_len(
         &mut self,
         writer: &mut dyn MultiWrite,
@@ -127,14 +102,48 @@ impl<R: Deref<Target = RingBuffer<u8>>> ConsumerU8Ext for Consumer<u8, R> {
         writer: &mut dyn MultiWrite,
         max_len: usize,
     ) -> Result<usize> {
-        let len = self.len().min(max_len);
+        let len = self.len().min(max_len).min(writer.sum_lens());
         let head = self.head();
         let read_len = self
             .ring_buffer()
             .pick_fallible(head..head + Wrapping(len), writer)?;
+        if read_len != len {
+            return_errno_with_message!(Errno::EFAULT, "the buffer copy was incomplete");
+        }
         self.commit_read(read_len);
         Ok(read_len)
     }
+}
+
+fn copy_ring_range(
+    offset: usize,
+    length: usize,
+    capacity: usize,
+    mut copy: impl FnMut(usize, usize) -> Result<usize, (OstdError, usize)>,
+) -> Result<usize> {
+    let first = length.min(capacity - offset);
+    let mut total = 0;
+    for (offset, length) in [(offset, first), (0, length - first)] {
+        if length == 0 {
+            continue;
+        }
+        match copy(offset, length) {
+            Ok(count) => {
+                total += count;
+                if count < length {
+                    break;
+                }
+            }
+            Err((error, count)) => {
+                total += count;
+                if total == 0 {
+                    return Err(error.into());
+                }
+                break;
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(ktest)]
@@ -144,6 +153,30 @@ mod test {
     use ostd::prelude::*;
 
     use super::*;
+
+    #[ktest]
+    fn ring_copy_preserves_partial_fault_progress() {
+        assert_eq!(
+            copy_ring_range(3, 3, 4, |offset, _| {
+                if offset == 3 {
+                    Ok(1)
+                } else {
+                    Err((OstdError::PageFault, 1))
+                }
+            })
+            .unwrap(),
+            2
+        );
+        assert!(copy_ring_range(0, 2, 4, |_, _| Err((OstdError::PageFault, 0))).is_err());
+        assert_eq!(
+            copy_ring_range(3, 3, 4, |offset, _| {
+                assert_eq!(offset, 3);
+                Ok(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
 
     #[ktest]
     fn rb_write_read_one_with_ext() {

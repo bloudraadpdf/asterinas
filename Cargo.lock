@@ -80,6 +80,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 name = "aster-bigtcp"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aster-softirq",
  "aster-util",
  "bitflags 1.3.2",
@@ -90,6 +91,7 @@ dependencies = [
  "ostd-pod",
  "smoltcp",
  "spin",
+ "subtle",
  "takeable",
  "zerocopy",
 ]
@@ -1808,7 +1810,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 [[package]]
 name = "smoltcp"
 version = "0.11.0"
-source = "git+https://github.com/asterinas/smoltcp?tag=r_2026-08-11_1b7629c#56ab83798451a91dad5faa3314e5dc592c675d94"
+source = "git+ssh://git@git.bloudraad.io/external/smoltcp.git?rev=0a99ac220d9650e7a2c6c4ecd71d465a6fc4e3f4#0a99ac220d9650e7a2c6c4ecd71d465a6fc4e3f4"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",

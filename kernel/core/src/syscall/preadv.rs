@@ -89,40 +89,7 @@ fn do_sys_preadv(
     let user_space = ctx.user_space();
     let mut writer_array = VmWriterArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)?;
 
-    // Probe with a zero-length read so that unsupported files (e.g., pipes)
-    // still return the correct errno even when all buffers are empty.
-    if writer_array.writers_mut().is_empty() {
-        let mut empty = [0u8; 0];
-        let mut writer = VmWriter::from(empty.as_mut_slice()).to_fallible();
-        file.read_at(offset as usize, &mut writer)?;
-        return Ok(0);
-    }
-
-    let mut total_len: usize = 0;
-    let mut cur_offset = offset as usize;
-
-    for writer in writer_array.writers_mut() {
-        debug_assert!(writer.has_avail());
-
-        // TODO: According to the man page
-        // at <https://man7.org/linux/man-pages/man2/readv.2.html>,
-        // readv must be atomic,
-        // but the current implementation does not ensure atomicity.
-        // A suitable fix would be to add a `readv` method for the `FileLike` trait,
-        // allowing each subsystem to implement atomicity.
-        match file.read_at(cur_offset, writer) {
-            Ok(read_len) => {
-                total_len += read_len;
-                cur_offset += read_len;
-            }
-            Err(_) if total_len > 0 => break,
-            Err(err) => return Err(err),
-        }
-        if writer.has_avail() {
-            // End of file reached or no more data to read
-            break;
-        }
-    }
+    let total_len = file.readv_at(offset as usize, &mut writer_array)?;
 
     if total_len > 0 {
         fs::vfs::notify::on_access(&file);
@@ -149,37 +116,19 @@ fn do_sys_readv(
         return Ok(0);
     }
 
-    let mut total_len = 0;
-
     let user_space = ctx.user_space();
     let mut writer_array = VmWriterArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)?;
-    for writer in writer_array.writers_mut() {
-        debug_assert!(writer.has_avail());
-
-        // TODO: According to the man page
-        // at <https://man7.org/linux/man-pages/man2/readv.2.html>,
-        // readv must be atomic,
-        // but the current implementation does not ensure atomicity.
-        // A suitable fix would be to add a `readv` method for the `FileLike` trait,
-        // allowing each subsystem to implement atomicity.
-        match file.read(writer) {
-            Ok(read_len) => total_len += read_len,
-            Err(_) if total_len > 0 => break,
-            Err(err)
-                if err.error() == Errno::EINTR
-                    && file
-                        .as_socket()
-                        .is_none_or(|socket| socket.recv_timeout().is_none()) =>
-            {
-                return_errno!(Errno::ERESTARTSYS);
-            }
-            Err(err) => return Err(err),
+    let total_len = file.readv(&mut writer_array).map_err(|error| {
+        if error.error() == Errno::EINTR
+            && file
+                .as_socket()
+                .is_none_or(|socket| socket.recv_timeout().is_none())
+        {
+            Error::new(Errno::ERESTARTSYS)
+        } else {
+            error
         }
-        if writer.has_avail() {
-            // End of file reached or no more data to read
-            break;
-        }
-    }
+    })?;
 
     if total_len > 0 {
         fs::vfs::notify::on_access(&file);

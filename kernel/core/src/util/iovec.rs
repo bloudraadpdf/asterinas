@@ -242,9 +242,21 @@ pub(crate) trait MultiWrite {
 
 impl MultiRead for VmReaderArray<'_> {
     fn read(&mut self, writer: &mut VmWriter<'_, Infallible>) -> Result<usize, (OstdError, usize)> {
+        self.0.as_mut().read(writer)
+    }
+    fn sum_lens(&self) -> usize {
+        self.0.as_ref().iter().map(VmReader::remain).sum()
+    }
+    fn skip_some(&mut self, nbytes: usize) {
+        self.0.as_mut().skip_some(nbytes);
+    }
+}
+
+impl MultiRead for &mut [VmReader<'_>] {
+    fn read(&mut self, writer: &mut VmWriter<'_, Infallible>) -> Result<usize, (OstdError, usize)> {
         let mut total_len = 0;
 
-        for reader in &mut self.0 {
+        for reader in self.iter_mut() {
             let copied_len = reader
                 .read_fallible(writer)
                 .map_err(|(err, copied_len)| (err, total_len + copied_len))?;
@@ -257,11 +269,11 @@ impl MultiRead for VmReaderArray<'_> {
     }
 
     fn sum_lens(&self) -> usize {
-        self.0.iter().map(|vm_reader| vm_reader.remain()).sum()
+        self.iter().map(|vm_reader| vm_reader.remain()).sum()
     }
 
     fn skip_some(&mut self, mut nbytes: usize) {
-        for reader in &mut self.0 {
+        for reader in self.iter_mut() {
             let bytes_to_skip = reader.remain().min(nbytes);
             reader.skip(bytes_to_skip);
             nbytes -= bytes_to_skip;
@@ -306,9 +318,24 @@ impl MultiWrite for VmWriterArray<'_> {
         &mut self,
         reader: &mut VmReader<'_, Infallible>,
     ) -> Result<usize, (OstdError, usize)> {
+        self.0.as_mut().write(reader)
+    }
+    fn sum_lens(&self) -> usize {
+        self.0.as_ref().iter().map(VmWriter::avail).sum()
+    }
+    fn skip_some(&mut self, nbytes: usize) {
+        self.0.as_mut().skip_some(nbytes);
+    }
+}
+
+impl MultiWrite for &mut [VmWriter<'_>] {
+    fn write(
+        &mut self,
+        reader: &mut VmReader<'_, Infallible>,
+    ) -> Result<usize, (OstdError, usize)> {
         let mut total_len = 0;
 
-        for writer in &mut self.0 {
+        for writer in self.iter_mut() {
             let copied_len = writer
                 .write_fallible(reader)
                 .map_err(|(err, copied_len)| (err, total_len + copied_len))?;
@@ -321,11 +348,11 @@ impl MultiWrite for VmWriterArray<'_> {
     }
 
     fn sum_lens(&self) -> usize {
-        self.0.iter().map(|vm_writer| vm_writer.avail()).sum()
+        self.iter().map(|vm_writer| vm_writer.avail()).sum()
     }
 
     fn skip_some(&mut self, mut nbytes: usize) {
-        for writer in &mut self.0 {
+        for writer in self.iter_mut() {
             let bytes_to_skip = writer.avail().min(nbytes);
             writer.skip(bytes_to_skip);
             nbytes -= bytes_to_skip;
@@ -361,5 +388,91 @@ impl dyn MultiWrite + '_ {
         // `_nbytes` may be smaller than the value size. We ignore it to truncate the value.
 
         Ok(())
+    }
+}
+
+pub(crate) fn io_vectors<T>(
+    buffers: &mut [T],
+    mut operation: impl FnMut(usize, &mut T) -> Result<usize>,
+    remaining: impl Fn(&T) -> usize,
+) -> Result<usize> {
+    let mut total = 0;
+    for buffer in buffers {
+        let available = remaining(buffer);
+        if available == 0 {
+            continue;
+        }
+        match operation(total, buffer) {
+            Ok(count) => {
+                total += count;
+                if count < available {
+                    break;
+                }
+            }
+            Err(_) if total != 0 => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(total)
+}
+
+pub(crate) struct LimitedRead<'a> {
+    reader: &'a mut dyn MultiRead,
+    remaining: usize,
+}
+
+impl<'a> LimitedRead<'a> {
+    pub(crate) fn new(reader: &'a mut dyn MultiRead, limit: usize) -> Self {
+        let remaining = reader.sum_lens().min(limit);
+        Self { reader, remaining }
+    }
+
+    fn read_string<T>(
+        &mut self,
+        max_len: usize,
+        read_fn: impl FnOnce(&mut dyn MultiRead, usize) -> Result<T>,
+    ) -> Result<T> {
+        let before = self.reader.sum_lens();
+        let result = read_fn(self.reader, max_len.min(self.remaining));
+        self.remaining -= before - self.reader.sum_lens();
+        result
+    }
+}
+
+impl ReadCString for LimitedRead<'_> {
+    fn read_cstring_until_nul(&mut self, max_len: usize) -> Result<Option<CString>> {
+        self.read_string(max_len, |reader, limit| {
+            reader.read_cstring_until_nul(limit)
+        })
+    }
+
+    fn read_cstring_until_end(&mut self, max_len: usize) -> Result<(CString, usize)> {
+        self.read_string(max_len, |reader, limit| {
+            reader.read_cstring_until_end(limit)
+        })
+    }
+}
+
+impl MultiRead for LimitedRead<'_> {
+    fn read(&mut self, writer: &mut VmWriter<'_, Infallible>) -> Result<usize, (OstdError, usize)> {
+        let result = {
+            let mut bounded = writer.clone_exclusive();
+            bounded.limit(self.remaining);
+            self.reader.read(&mut bounded)
+        };
+        let count = match &result {
+            Ok(count) | Err((_, count)) => *count,
+        };
+        self.remaining -= count;
+        writer.skip(count);
+        result
+    }
+    fn sum_lens(&self) -> usize {
+        self.remaining
+    }
+    fn skip_some(&mut self, nbytes: usize) {
+        let count = nbytes.min(self.remaining);
+        self.reader.skip_some(count);
+        self.remaining -= count;
     }
 }

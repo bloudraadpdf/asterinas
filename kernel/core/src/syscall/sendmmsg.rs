@@ -7,7 +7,7 @@ use crate::{
     net::socket::{Socket, util::SendFlags},
     prelude::*,
     syscall::{SyscallReturn, sendmsg::send_one_message},
-    util::net::CUserMsgHdr,
+    util::net::CUserMMsgHdr,
 };
 
 pub(super) fn sys_sendmmsg(
@@ -29,13 +29,7 @@ pub(super) fn sys_sendmmsg(
         warn!("sendmmsg flags {:?} are not supported", flags);
     }
 
-    let file = {
-        // Reading control messages may access the file table,
-        // so we have to clone the file and drop the file table reference here.
-        let file_table = ctx.thread_local.borrow_file_table();
-        let file_table_locked = file_table.unwrap().read();
-        file_table_locked.get_file(sockfd.try_into()?)?.clone()
-    };
+    let file = super::socket::get_socket_file(sockfd, ctx)?;
     let socket = file.as_socket_or_err()?;
 
     let mut sent_msgs = 0;
@@ -44,14 +38,6 @@ pub(super) fn sys_sendmmsg(
         Err(e) if sent_msgs == 0 => Err(e),
         _ => Ok(SyscallReturn::Return(sent_msgs as _)),
     }
-}
-
-#[padding_struct]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod)]
-struct CMmsgHdr {
-    msg_hdr: CUserMsgHdr,
-    msg_len: u32,
 }
 
 fn send_mmsg_hdrs(
@@ -65,8 +51,8 @@ fn send_mmsg_hdrs(
     let user_space = ctx.user_space();
 
     for i in 0..count {
-        let addr = mmsghdrs_addr + size_of::<CMmsgHdr>() * i;
-        let mut mmsghdr = user_space.read_val::<CMmsgHdr>(addr)?;
+        let addr = mmsghdrs_addr + size_of::<CUserMMsgHdr>() * i;
+        let mut mmsghdr = user_space.read_val::<CUserMMsgHdr>(addr)?;
 
         let sent_bytes = send_one_message(socket, &mmsghdr.msg_hdr, &user_space, flags)?;
 

@@ -16,7 +16,7 @@ pub(crate) use file_attr::{
     access_mode::AccessMode, creation_flags::CreationFlags, open_args::OpenArgs,
     status_flags::AtomicStatusFlags,
 };
-pub(crate) use file_common::FileCommon;
+pub(crate) use file_common::{FileCommon, FileDescriptionId};
 pub(crate) use file_handle::{FileLike, StatusFlagsUpdate};
 pub use file_handle::{Mappable, MappableObject, MappedObject, SyncMode};
 pub(crate) use fs_config_file::{DetachedMountFile, FsConfigFile};

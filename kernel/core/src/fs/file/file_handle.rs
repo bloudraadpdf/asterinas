@@ -15,7 +15,7 @@ use crate::{
     net::socket::Socket,
     prelude::*,
     process::{PidNamespace, Process, signal::Pollable},
-    util::ioctl::RawIoctl,
+    util::{VmReaderArray, VmWriterArray, io_vectors, ioctl::RawIoctl},
     vm::{
         page_cache::Vmo,
         vmar::{FileMmapRequest, MapHandle},
@@ -42,6 +42,54 @@ pub(crate) trait FileLike: Pollable + Send + Sync + Any {
             return_errno_with_message!(Errno::EBADF, "the file is not opened for reading");
         }
         return_errno_with_message!(Errno::EINVAL, "read is not supported for this file type");
+    }
+
+    fn readv(&self, writers: &mut VmWriterArray) -> Result<usize> {
+        io_vectors(
+            writers.writers_mut(),
+            |_, writer| self.read(writer),
+            VmWriter::avail,
+        )
+    }
+
+    fn writev(&self, readers: &mut VmReaderArray) -> Result<usize> {
+        io_vectors(
+            readers.readers_mut(),
+            |_, reader| self.write(reader),
+            VmReader::remain,
+        )
+    }
+
+    fn readv_at(&self, offset: usize, writers: &mut VmWriterArray) -> Result<usize> {
+        if writers.writers_mut().is_empty() {
+            return self.read_at(offset, &mut VmWriter::from(&mut [][..]).to_fallible());
+        }
+        io_vectors(
+            writers.writers_mut(),
+            |count, writer| {
+                let position = offset
+                    .checked_add(count)
+                    .ok_or_else(|| Error::new(Errno::EOVERFLOW))?;
+                self.read_at(position, writer)
+            },
+            VmWriter::avail,
+        )
+    }
+
+    fn writev_at(&self, offset: usize, readers: &mut VmReaderArray) -> Result<usize> {
+        if readers.readers_mut().is_empty() {
+            return self.write_at(offset, &mut VmReader::from(&[][..]).to_fallible());
+        }
+        io_vectors(
+            readers.readers_mut(),
+            |count, reader| {
+                let position = offset
+                    .checked_add(count)
+                    .ok_or_else(|| Error::new(Errno::EOVERFLOW))?;
+                self.write_at(position, reader)
+            },
+            VmReader::remain,
+        )
     }
 
     /// Writes data to this file.

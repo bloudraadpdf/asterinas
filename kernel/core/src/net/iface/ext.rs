@@ -18,4 +18,12 @@ impl aster_bigtcp::ext::Ext for BigtcpExt {
         observer.accept_timeouts()
     }
     type UdpEventObserver = DatagramObserver;
+
+    fn receive_timestamp() -> core::time::Duration {
+        crate::time::SystemTime::realtime_at(aster_time::read_monotonic_time())
+    }
+
+    fn fill_random(bytes: &mut [u8]) {
+        crate::util::random::getrandom(bytes);
+    }
 }

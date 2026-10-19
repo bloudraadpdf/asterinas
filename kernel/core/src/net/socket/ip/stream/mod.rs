@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::num::NonZeroU8;
+
 use aster_bigtcp::{
     socket::{NeedIfacePoll, RawTcpOption, RawTcpSetOption},
     time::Duration,
@@ -11,8 +13,8 @@ use init::InitStream;
 use listen::ListenStream;
 use observer::StreamObserver;
 use options::{
-    Congestion, DeferAccept, Inq, KeepCnt, KeepIdle, KeepIntvl, MaxSegment, NoDelay, SynCnt,
-    UserTimeout, WindowClamp,
+    Congestion, DeferAccept, FastOpen, Inq, KeepCnt, KeepIdle, KeepIntvl, MaxSegment, NoDelay,
+    SynCnt, UserTimeout, WindowClamp,
 };
 use ostd::sync::{PreemptDisabled, RwLockReadGuard, RwLockWriteGuard};
 use takeable::Takeable;
@@ -25,13 +27,13 @@ use super::{
 };
 use crate::{
     events::IoEvents,
-    fs::file::{FileCommon, FileLike},
+    fs::file::FileLike,
     net::{
         iface::Iface,
         socket::{
-            Socket, new_socket_common,
+            Socket, SocketCommon, new_socket_common,
             options::{
-                Error as SocketError, SocketOption,
+                SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
             },
             private::SocketPrivate,
@@ -67,7 +69,7 @@ pub(crate) struct StreamSocket {
     timeouts: Arc<SocketTimeouts>,
 
     pollee: Pollee,
-    common: FileCommon,
+    common: SocketCommon,
 }
 
 enum State {
@@ -102,6 +104,8 @@ impl OptionSet {
         RawTcpOption {
             keep_alive: self.socket.keep_alive().then_some(keep_alive_interval),
             is_nagle_enabled: !self.tcp.no_delay(),
+            fast_open_backlog: self.tcp.fast_open_backlog() as usize,
+            fast_open_retries: NonZeroU8::new(self.tcp.syn_cnt()).unwrap(),
         }
     }
 }
@@ -450,14 +454,15 @@ impl StreamSocket {
 
 impl Pollable for StreamSocket {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
-            .poll_with(mask, poller, || self.check_io_events())
+        self.common
+            .error
+            .poll_with(mask, poller, &self.pollee, || self.check_io_events())
     }
 }
 
 impl SocketPrivate for StreamSocket {
-    fn is_nonblocking(&self) -> bool {
-        self.common.is_nonblocking()
+    fn socket_common(&self) -> &SocketCommon {
+        &self.common
     }
 
     fn protocol_ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -650,31 +655,19 @@ impl Socket for StreamSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
-        // TODO: Deal with flags
-        flags.warn_if_unsupported();
+        self.recv_stream(flags, self.timeouts.recv_timeout(), || {
+            self.try_recv(writer, flags).map(|(count, _)| count)
+        })
+    }
 
-        let (received_bytes, _) =
-            self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
-                self.try_recv(writer, flags)
-            })?;
-
-        // TODO: Receive control message
-
-        // According to <https://elixir.bootlin.com/linux/v6.0.9/source/net/ipv4/tcp.c#L2645>,
-        // peer address is ignored for connected socket.
-        let message_header = MessageHeader::new(None, Vec::new());
-
-        Ok((RecvOutput::new_for_stream(received_bytes), message_header))
+    fn transport_error(&self) -> Option<Error> {
+        self.test_and_clear_error()
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option {
-            socket_errors @ SocketError => {
-                socket_errors.set(self.test_and_clear_error());
-                return Ok(());
-            }
-            _ => (),
-        });
+        if self.get_error_option(option) {
+            return Ok(());
+        }
 
         let state = self.read_updated_state();
         let options = self.options.read();
@@ -754,6 +747,9 @@ impl Socket for StreamSocket {
                 let inq = options.tcp.receive_inq();
                 tcp_inq.set(inq);
             }
+            tcp_fast_open @ FastOpen => {
+                tcp_fast_open.set(options.tcp.fast_open_backlog() as i32);
+            }
             _ => return_errno_with_message!(
                 Errno::ENOPROTOOPT,
                 "the socket option to get is unknown"
@@ -799,10 +795,6 @@ impl Socket for StreamSocket {
         }
 
         Ok(())
-    }
-
-    fn common(&self) -> &FileCommon {
-        &self.common
     }
 }
 
@@ -881,6 +873,7 @@ fn do_tcp_setsockopt(
                 return_errno_with_message!(Errno::EINVAL, "the SYN count is out of bounds");
             }
             options.tcp.set_syn_cnt(*syncnt);
+            state.set_raw_option(|raw| raw.set_fast_open_retries(NonZeroU8::new(*syncnt).unwrap()));
         }
         tcp_defer_accept @ DeferAccept => {
             let mut seconds = *(tcp_defer_accept.get().unwrap());
@@ -913,6 +906,28 @@ fn do_tcp_setsockopt(
         tcp_inq @ Inq => {
             let inq = tcp_inq.get().unwrap();
             options.tcp.set_receive_inq(*inq);
+        }
+        tcp_fast_open @ FastOpen => {
+            let accepts_fast_open = match state {
+                State::Init(_) | State::Listen(_) => true,
+                State::Connected(connected) => connected.raw_with(|raw| raw.is_closed()),
+                State::Connecting(_) => false,
+            };
+            if !accepts_fast_open {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "Fast Open requires a closed or listening socket"
+                );
+            }
+            let backlog = u32::try_from(*tcp_fast_open.get().unwrap())
+                .map_err(|_| {
+                    Error::with_message(Errno::EINVAL, "the Fast Open backlog is negative")
+                })?
+                .min(listen::MAX_LISTEN_BACKLOG as u32);
+            options.tcp.set_fast_open_backlog(backlog);
+            if let State::Listen(listener) = state {
+                listener.set_fast_open_backlog(backlog as usize);
+            }
         }
         _ =>
             return_errno_with_message!(Errno::ENOPROTOOPT, "the socket option to be set is unknown"),

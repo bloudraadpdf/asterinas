@@ -3,7 +3,9 @@
 use int_to_c_enum::TryFromInt;
 use ostd::mm::{Infallible, VmReader, VmWriter};
 use ostd_pod::IntoBytes;
-use smoltcp::wire::{IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber, TcpTimestampRepr};
+use smoltcp::wire::{
+    IpProtocol, IpRepr, TcpControl, TcpFastOpenCookie, TcpRepr, TcpSeqNumber, TcpTimestampRepr,
+};
 
 use crate::{
     iface::wire::utils::{Be16, Be32, Checksum},
@@ -72,6 +74,7 @@ pub(in crate::iface) fn parse(
         sack_permitted: false,
         sack_ranges: [None; 3],
         timestamp: None,
+        fast_open: None,
         payload: &[],
     };
 
@@ -142,6 +145,16 @@ fn parse_options(mut options: VmReader<Infallible>, repr: &mut TcpRepr<'static>)
                 repr.timestamp = Some(TcpTimestampRepr::new(tsval, tsecr));
             }
             (Some(OptionKind::Timestamp), _) => return false,
+
+            (Some(OptionKind::FastOpen), len) => {
+                if repr.control == TcpControl::Syn && len <= 18 {
+                    let mut bytes = [0; 16];
+                    options.read(&mut VmWriter::from(&mut bytes[..len - 2]));
+                    repr.fast_open = TcpFastOpenCookie::new(&bytes[..len - 2]);
+                } else {
+                    options.skip(len - 2);
+                }
+            }
 
             (Some(OptionKind::End | OptionKind::Nop), _) => unreachable!(),
             (None, len) => {
@@ -246,6 +259,16 @@ fn emit_options(mut writer: VmWriter<Infallible>, repr: &TcpRepr<'_>) {
         writer.write_val(&Be32::from(timestamp.tsecr)).unwrap();
     }
 
+    if let Some(cookie) = repr.fast_open {
+        writer
+            .write_val(&[
+                OptionKind::FastOpen as u8,
+                (cookie.as_bytes().len() + 2) as u8,
+            ])
+            .unwrap();
+        writer.write(&mut VmReader::from(cookie.as_bytes()));
+    }
+
     let padding_len = writer.avail();
     writer.fill_zeros(padding_len);
 }
@@ -293,4 +316,5 @@ enum OptionKind {
     SackPermitted = 4,
     SackRange = 5,
     Timestamp = 8,
+    FastOpen = 34,
 }

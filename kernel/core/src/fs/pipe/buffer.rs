@@ -3,7 +3,10 @@
 use crate::{
     fs::file::StatusFlags,
     prelude::*,
-    util::ring_buffer::{ConsumerU8Ext, ProducerU8Ext, RbConsumer, RbProducer, RingBuffer},
+    util::{
+        MultiRead, MultiWrite,
+        ring_buffer::{ConsumerU8Ext, ProducerU8Ext, RbConsumer, RbProducer, RingBuffer},
+    },
 };
 
 #[cfg(not(ktest))]
@@ -46,9 +49,9 @@ impl PipeBuffer {
         self.segments.len() < PIPE_SLOTS
     }
 
-    pub(super) fn read(&mut self, writer: &mut VmWriter) -> Result<usize> {
+    pub(super) fn read(&mut self, writer: &mut dyn MultiWrite) -> Result<usize> {
         let mut total = 0;
-        while writer.has_avail() {
+        while !writer.is_empty() {
             let Some(segment) = self.segments.front_mut() else {
                 break;
             };
@@ -78,9 +81,13 @@ impl PipeBuffer {
         Ok(total)
     }
 
-    pub(super) fn write(&mut self, reader: &mut VmReader, flags: StatusFlags) -> Result<usize> {
+    pub(super) fn write(
+        &mut self,
+        reader: &mut dyn MultiRead,
+        flags: StatusFlags,
+    ) -> Result<usize> {
         let mut total = 0;
-        let remainder = reader.remain() % PIPE_BUF;
+        let remainder = reader.sum_lens() % PIPE_BUF;
         if let Some(tail) = self.segments.back_mut()
             && !tail.is_packet
             && remainder != 0
@@ -93,7 +100,7 @@ impl PipeBuffer {
             total += count;
         }
 
-        while reader.has_remain() && self.is_writable() {
+        while !reader.is_empty() && self.is_writable() {
             let count = match self.producer.write_fallible_with_max_len(reader, PIPE_BUF) {
                 Ok(count) => count,
                 Err(_) if total != 0 => break,
