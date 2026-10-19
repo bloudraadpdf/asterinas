@@ -4,7 +4,7 @@ use ostd::task::Task;
 
 use crate::{
     fs::{
-        file::{InodeType, Permission, mkmod},
+        file::{InodeMode, InodeType, Permission, mkmod},
         vfs::path::{FsPath, Path},
     },
     prelude::*,
@@ -21,10 +21,10 @@ pub(crate) fn lookup_socket_file(path: &str) -> Result<Path> {
 
     if path
         .inode()
-        .check_permission(Permission::MAY_READ | Permission::MAY_WRITE)
+        .check_permission(Permission::MAY_WRITE)
         .is_err()
     {
-        return_errno_with_message!(Errno::EACCES, "the socket file cannot be read or written")
+        return_errno_with_message!(Errno::EACCES, "the socket file cannot be written")
     }
 
     if path.type_() != InodeType::Socket {
@@ -48,7 +48,8 @@ pub(crate) fn create_socket_file(path_name: &str) -> Result<Path> {
             .lookup_unresolved_no_follow(&fs_path)?
             .into_parent_and_filename()?;
 
-        parent.new_child(&file_name, InodeType::Socket, mkmod!(u+rw))
+        let mode = InodeMode::from_bits_truncate(mkmod!(a+rwx).bits() & !fs_ref.umask().get());
+        parent.new_child(&file_name, InodeType::Socket, mode)
     })();
 
     result.map_err(|err| {
