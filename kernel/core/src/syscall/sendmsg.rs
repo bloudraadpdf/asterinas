@@ -57,9 +57,5 @@ pub(super) fn send_one_message(
 
     socket
         .sendmsg(&mut io_vec_reader, message_header, flags)
-        .map_err(|err| match err.error() {
-            // FIXME: `sendmsg` should not be restarted if a timeout has been set on the socket using `setsockopt`.
-            Errno::EINTR => Error::new(Errno::ERESTARTSYS),
-            _ => err,
-        })
+        .map_err(|error| socket.restart_send_error(error))
 }

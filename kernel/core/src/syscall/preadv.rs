@@ -165,6 +165,14 @@ fn do_sys_readv(
         match file.read(writer) {
             Ok(read_len) => total_len += read_len,
             Err(_) if total_len > 0 => break,
+            Err(err)
+                if err.error() == Errno::EINTR
+                    && file
+                        .as_socket()
+                        .is_none_or(|socket| socket.recv_timeout().is_none()) =>
+            {
+                return_errno!(Errno::ERESTARTSYS);
+            }
             Err(err) => return Err(err),
         }
         if writer.has_avail() {

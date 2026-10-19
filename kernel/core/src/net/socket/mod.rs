@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::fmt::Display;
+use core::{fmt::Display, time::Duration};
 
-use options::SocketOption;
+use options::{RecvTimeout, SendTimeout, SocketOption};
 use util::{MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr};
 
 use crate::{
@@ -162,6 +162,30 @@ pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
         return_errno_with_message!(Errno::EOPNOTSUPP, "setsockopt() is not supported");
     }
 
+    /// Returns the receive timeout; None permits signal restart.
+    fn recv_timeout(&self) -> Option<Duration> {
+        let mut option = RecvTimeout::new();
+        self.get_option(&mut option).ok()?;
+        option.get()?.duration()
+    }
+
+    /// Returns the send timeout; None permits signal restart.
+    fn send_timeout(&self) -> Option<Duration> {
+        let mut option = SendTimeout::new();
+        self.get_option(&mut option).ok()?;
+        option.get()?.duration()
+    }
+
+    /// Marks interrupted receives restartable when no receive timeout applies.
+    fn restart_recv_error(&self, error: Error) -> Error {
+        restart_error(error, self.recv_timeout())
+    }
+
+    /// Marks interrupted sends restartable when no send timeout applies.
+    fn restart_send_error(&self, error: Error) -> Error {
+        restart_error(error, self.send_timeout())
+    }
+
     /// Sends a message on the socket.
     fn sendmsg(
         &self,
@@ -261,4 +285,11 @@ fn new_socket_common(is_nonblocking: bool) -> FileCommon {
     };
     // Reference: <https://elixir.bootlin.com/linux/v7.0/source/net/socket.c#L483>.
     FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags)
+}
+
+fn restart_error(error: Error, timeout: Option<Duration>) -> Error {
+    match error.error() {
+        Errno::EINTR if timeout.is_none() => Error::new(Errno::ERESTARTSYS),
+        _ => error,
+    }
 }
