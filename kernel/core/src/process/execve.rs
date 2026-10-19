@@ -15,14 +15,14 @@ use crate::{
     fs::vfs::path::{Path, PerMountFlags},
     prelude::*,
     process::{
-        ContextUnshareAdminApi, Credentials, Process,
+        ContextUnshareAdminApi, Credentials, Process, ResourceType,
         credentials::{ExecCred, FileCapabilities},
         pid_table,
         posix_thread::{
             AsPosixThread, ContextPthreadAdminApi, ThreadLocal, ThreadName, ptrace::PtraceEvent,
             sigkill_other_threads,
         },
-        process_vm::{MAX_LEN_STRING_ARG, MAX_NR_STRING_ARGS, ProcessVm},
+        process_vm::{INIT_STACK_SIZE, MAX_LEN_STRING_ARG, MAX_NR_STRING_ARGS, ProcessVm},
         program_loader::{ProgramToLoad, UndetectedExecutable, elf::ElfLoadInfo},
         signal::{
             HandlePendingSignal, PauseReason, SigStack, constants::SIGCHLD,
@@ -40,13 +40,39 @@ pub(crate) fn do_execve(
     ctx: &Context,
     user_context: &mut UserContext,
 ) -> Result<()> {
-    // FIXME: A malicious user could cause a kernel panic by exhausting available memory.
-    // Currently, the implementation reads up to `MAX_NR_STRING_ARGS` arguments, each up to
-    // `MAX_LEN_STRING_ARG` in length, without first verifying the total combined size.
-    // To prevent excessive memory allocation, a preliminary check should sum the lengths
-    // of all strings to enforce a sensible overall limit.
-    let argv = read_cstring_vec(argv_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
-    let envp = read_cstring_vec(envp_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
+    // Linux bounds argv/envp strings and their pointers together before copying them.
+    // Reference: <https://github.com/torvalds/linux/blob/v6.18/fs/exec.c#L398>.
+    let stack_limit = ctx
+        .process
+        .resource_limits()
+        .get_rlimit(ResourceType::RLIMIT_STACK)
+        .get_cur();
+    let limit = (stack_limit / 4)
+        .min((INIT_STACK_SIZE / 4 * 3) as u64)
+        .max(MAX_LEN_STRING_ARG as u64)
+        .min(stack_limit) as usize;
+    let mut remaining = limit;
+    let mut argv = read_cstring_vec(
+        argv_ptr_ptr,
+        MAX_NR_STRING_ARGS,
+        MAX_LEN_STRING_ARG,
+        &mut remaining,
+        ctx,
+    )?;
+    if argv.is_empty() {
+        remaining = remaining
+            .checked_sub(size_of::<Vaddr>() + 1)
+            .ok_or_else(|| Error::new(Errno::E2BIG))?;
+        argv.try_reserve(1).map_err(|_| Error::new(Errno::ENOMEM))?;
+        argv.push(CString::new("").unwrap());
+    }
+    let envp = read_cstring_vec(
+        envp_ptr_ptr,
+        MAX_NR_STRING_ARGS,
+        MAX_LEN_STRING_ARG,
+        &mut remaining,
+        ctx,
+    )?;
 
     let fs_ref = ctx.thread_local.borrow_fs();
     let path_resolver = fs_ref.resolver().read();
@@ -111,6 +137,7 @@ fn read_cstring_vec(
     array_ptr: Vaddr,
     max_string_number: usize,
     max_string_len: usize,
+    remaining: &mut usize,
     ctx: &Context,
 ) -> Result<Vec<CString>> {
     // On Linux, argv pointer and envp pointer can be specified as NULL.
@@ -124,14 +151,22 @@ fn read_cstring_vec(
     let user_space = ctx.user_space();
     for _ in 0..max_string_number {
         let cstring_ptr = user_space.read_val::<usize>(read_addr)?;
-        read_addr += 8;
+        read_addr = read_addr
+            .checked_add(size_of::<Vaddr>())
+            .ok_or_else(|| Error::new(Errno::EFAULT))?;
 
         if cstring_ptr == 0 {
             return Ok(res);
         }
 
+        *remaining = remaining
+            .checked_sub(size_of::<Vaddr>())
+            .ok_or_else(|| Error::new(Errno::E2BIG))?;
+        if *remaining == 0 {
+            return_errno!(Errno::E2BIG);
+        }
         let cstring = user_space
-            .read_cstring(cstring_ptr, max_string_len)
+            .read_cstring(cstring_ptr, max_string_len.min(*remaining))
             .map_err(|err| {
                 if err.error() == Errno::ENAMETOOLONG {
                     Error::with_message(Errno::E2BIG, "there are too many bytes in the argument")
@@ -139,6 +174,8 @@ fn read_cstring_vec(
                     err
                 }
             })?;
+        *remaining -= cstring.as_bytes_with_nul().len();
+        res.try_reserve(1).map_err(|_| Error::new(Errno::ENOMEM))?;
         res.push(cstring);
     }
 
