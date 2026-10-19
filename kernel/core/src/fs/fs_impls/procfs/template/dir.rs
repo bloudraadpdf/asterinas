@@ -115,6 +115,10 @@ impl<D: ProcDirOps + 'static> FileOps for ProcDir<D> {
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+        if self.inner.is_removed() {
+            return Ok(0);
+        }
+
         /// Returns the always-present `.` and `..` entries for a procfs directory.
         fn special_entries<D: ProcDirOps + 'static>(
             dir: &ProcDir<D>,
@@ -261,6 +265,11 @@ impl<D: ProcDirOps + 'static> Inode for ProcDir<D> {
 }
 
 pub(in procfs) trait ProcDirOps: Sync + Send + Sized {
+    /// Returns whether the directory's backing entity has been removed.
+    fn is_removed(&self) -> bool {
+        false
+    }
+
     /// Returns the thread whose credentials own this procfs inode.
     fn owner_thread(&self) -> Option<Arc<Thread>> {
         None

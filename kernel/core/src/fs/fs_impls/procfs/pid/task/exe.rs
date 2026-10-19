@@ -30,7 +30,7 @@ impl ProcSymOps for ExeSymOps {
 
     fn read_link(&self) -> Result<SymbolicLink> {
         let Some(process) = self.0.process() else {
-            return_errno_with_message!(Errno::ESRCH, "the process does not exist");
+            return_errno_with_message!(Errno::ENOENT, "the process does not exist");
         };
 
         let vmar_guard = process.lock_vmar();
