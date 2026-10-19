@@ -193,9 +193,7 @@ impl Socket for DatagramSocket {
         flags: SendFlags,
     ) -> Result<usize> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         let MessageHeader {
             addr,
@@ -232,12 +230,10 @@ impl Socket for DatagramSocket {
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         let (output, peer_addr) =
-            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+            self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
                 self.try_recv(writer, flags)
             })?;
 

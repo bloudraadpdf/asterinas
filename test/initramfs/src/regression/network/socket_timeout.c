@@ -43,3 +43,18 @@ FN_TEST(timeout_values)
 	TEST_SUCC(close(pair[1]));
 }
 END_TEST()
+
+FN_TEST(nonblocking_is_per_call)
+{
+	const int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	for (unsigned i = 0; i < sizeof(types) / sizeof(*types); ++i) {
+		int pair[2];
+		char byte;
+		TEST_SUCC(socketpair(AF_UNIX, types[i], 0, pair));
+		TEST_ERRNO(recv(pair[0], &byte, 1, MSG_DONTWAIT), EAGAIN);
+		TEST_RES(fcntl(pair[0], F_GETFL), (_ret & O_NONBLOCK) == 0);
+		TEST_SUCC(close(pair[0]));
+		TEST_SUCC(close(pair[1]));
+	}
+}
+END_TEST()

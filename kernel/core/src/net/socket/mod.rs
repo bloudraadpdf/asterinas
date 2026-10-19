@@ -29,6 +29,7 @@ pub(crate) mod vsock;
 mod private {
     use core::time::Duration;
 
+    use super::util::RecvFlags;
     use crate::{events::IoEvents, prelude::*, process::signal::Pollable, util::ioctl::RawIoctl};
 
     /// Common methods for sockets, but private to the network module.
@@ -50,13 +51,14 @@ mod private {
             &self,
             events: IoEvents,
             timeout: Option<Duration>,
+            nonblocking: bool,
             mut try_op: F,
         ) -> Result<R>
         where
             Self: Sized,
             F: FnMut() -> Result<R>,
         {
-            if self.is_nonblocking() {
+            if self.is_nonblocking() || nonblocking {
                 try_op()
             } else {
                 self.wait_events(events, timeout.as_ref(), try_op)
@@ -67,6 +69,24 @@ mod private {
                         _ => err,
                     })
             }
+        }
+
+        fn block_on_recv<F, R>(
+            &self,
+            flags: RecvFlags,
+            timeout: Option<Duration>,
+            try_op: F,
+        ) -> Result<R>
+        where
+            Self: Sized,
+            F: FnMut() -> Result<R>,
+        {
+            self.block_on(
+                IoEvents::IN,
+                timeout,
+                flags.contains(RecvFlags::MSG_DONTWAIT),
+                try_op,
+            )
         }
 
         fn wait_for_connect(

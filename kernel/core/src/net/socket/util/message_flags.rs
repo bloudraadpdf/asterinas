@@ -23,13 +23,15 @@ bitflags! {
         const MSG_ZEROCOPY  = 0x4000000;
         const MSG_FASTOPEN  = 0x20000000;
 
-        const SUPPORTED     = 0x0;
+        const SUPPORTED     = Self::MSG_DONTWAIT.bits;
     }
 }
 
 impl SendFlags {
-    pub(crate) const fn is_all_supported(self) -> bool {
-        Self::SUPPORTED.contains(self)
+    pub(crate) fn warn_if_unsupported(self) {
+        if !Self::SUPPORTED.contains(self) {
+            ostd::warn!("unsupported flags: {:?}", self);
+        }
     }
 }
 
@@ -50,13 +52,15 @@ bitflags! {
         const MSG_SOCK_DEVMEM  = 0x2000000;
         const MSG_CMSG_CLOEXEC = 0x40000000;
 
-        const SUPPORTED        = RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits | RecvFlags::MSG_CMSG_CLOEXEC.bits;
+        const SUPPORTED        = RecvFlags::MSG_DONTWAIT.bits | RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits | RecvFlags::MSG_CMSG_CLOEXEC.bits;
     }
 }
 
 impl RecvFlags {
-    pub(crate) const fn is_all_supported(self) -> bool {
-        Self::SUPPORTED.contains(self)
+    pub(crate) fn warn_if_unsupported(self) {
+        if !Self::SUPPORTED.contains(self) {
+            ostd::warn!("unsupported flags: {:?}", self);
+        }
     }
 
     /// Returns whether receive operations should consume or peek data.
