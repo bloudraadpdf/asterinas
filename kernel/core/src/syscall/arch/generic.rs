@@ -133,7 +133,7 @@ macro_rules! import_generic_syscall_entries {
             sendto::sys_sendto,
             set_ioprio::sys_ioprio_set,
             set_priority::sys_set_priority,
-            set_robust_list::sys_set_robust_list,
+            set_robust_list::{sys_get_robust_list, sys_set_robust_list},
             set_tid_address::sys_set_tid_address,
             setdomainname::sys_setdomainname,
             setfsgid::sys_setfsgid,
@@ -294,6 +294,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_UNSHARE = 97                 => sys_unshare(args[..1]);
             SYS_FUTEX = 98                   => sys_futex(args[..6]);
             SYS_SET_ROBUST_LIST = 99         => sys_set_robust_list(args[..2]);
+    SYS_GET_ROBUST_LIST = 100 => sys_get_robust_list(args[..3]);
             SYS_NANOSLEEP = 101              => sys_nanosleep(args[..2]);
             SYS_GETITIMER = 102              => sys_getitimer(args[..2]);
             SYS_SETITIMER = 103              => sys_setitimer(args[..3]);

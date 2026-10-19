@@ -39,8 +39,8 @@ impl RobustListHead {
     ///
     /// The futex referred to by `list_op_pending`, if any, will be returned as
     /// the last item.
-    pub(crate) fn futexes(&self) -> FutexIter<'_> {
-        FutexIter::new(self)
+    pub(crate) fn futexes(&self, head_addr: Vaddr) -> FutexIter<'_> {
+        FutexIter::new(self, head_addr)
     }
 
     /// Return the pending futex address if exist
@@ -48,7 +48,7 @@ impl RobustListHead {
         if self.list_op_pending == 0 {
             None
         } else {
-            self.futex_addr(self.list_op_pending)
+            self.futex_addr(self.list_op_pending & !1)
         }
     }
 
@@ -63,14 +63,16 @@ impl RobustListHead {
 pub(crate) struct FutexIter<'a> {
     robust_list: &'a RobustListHead,
     entry_ptr: Vaddr,
+    head_addr: Vaddr,
     count: isize,
 }
 
 impl<'a> FutexIter<'a> {
-    pub(crate) fn new(robust_list: &'a RobustListHead) -> Self {
+    pub(crate) fn new(robust_list: &'a RobustListHead, head_addr: Vaddr) -> Self {
         Self {
             robust_list,
-            entry_ptr: robust_list.list.next,
+            entry_ptr: robust_list.list.next & !1,
+            head_addr,
             count: 0,
         }
     }
@@ -97,15 +99,14 @@ impl Iterator for FutexIter<'_> {
             return None;
         }
 
-        let end_ptr = self.robust_list.list.next;
-        while self.entry_ptr != end_ptr || self.count == 0 {
+        while self.entry_ptr != self.head_addr {
             if self.count == ROBUST_LIST_LIMIT {
                 break;
             }
             if self.entry_ptr == 0 {
                 return None;
             }
-            let futex_addr = if self.entry_ptr != self.robust_list.list_op_pending {
+            let futex_addr = if self.entry_ptr != (self.robust_list.list_op_pending & !1) {
                 self.robust_list.futex_addr(self.entry_ptr)
             } else {
                 None
@@ -114,7 +115,7 @@ impl Iterator for FutexIter<'_> {
             else {
                 return None;
             };
-            self.entry_ptr = robust_list.next;
+            self.entry_ptr = robust_list.next & !1;
             self.count += 1;
             if futex_addr.is_some() {
                 return futex_addr;

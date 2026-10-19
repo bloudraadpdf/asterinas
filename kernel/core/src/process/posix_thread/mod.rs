@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use aster_rights::{ReadDupOp, ReadOp, ReadWriteOp};
 use aster_util::fixed_str::FixedCStr;
@@ -51,6 +51,8 @@ pub struct PosixThread {
     // Immutable part
     process: Weak<Process>,
     task: Weak<Task>,
+
+    robust_list: AtomicUsize,
 
     // Mutable part
     identity: Rcu<Arc<PidIdentity>>,
@@ -109,6 +111,10 @@ pub struct PosixThread {
 }
 
 impl PosixThread {
+    pub(crate) fn robust_list(&self) -> &AtomicUsize {
+        &self.robust_list
+    }
+
     pub(crate) fn process(&self) -> Arc<Process> {
         self.process.upgrade().unwrap()
     }
