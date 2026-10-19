@@ -30,6 +30,39 @@ FN_TEST(getcwd_small_buffer_returns_erange)
 }
 END_TEST()
 
+FN_TEST(getcwd_syscall_rejects_path_longer_than_page)
+{
+	char segment[201];
+	char buffer[8192];
+	memset(segment, 'a', sizeof(segment) - 1);
+	segment[sizeof(segment) - 1] = '\0';
+	TEST_SUCC(mkdir("/tmp/getcwd_deep", 0700));
+	TEST_SUCC(chdir("/tmp/getcwd_deep"));
+	for (int i = 0; i < 22; ++i) {
+		TEST_SUCC(mkdir(segment, 0700));
+		TEST_SUCC(chdir(segment));
+	}
+	TEST_ERRNO(syscall(SYS_getcwd, buffer, sizeof(buffer)), ENAMETOOLONG);
+	for (int i = 0; i < 22; ++i) {
+		TEST_SUCC(chdir(".."));
+		TEST_SUCC(rmdir(segment));
+	}
+	TEST_SUCC(chdir("/"));
+	TEST_SUCC(rmdir("/tmp/getcwd_deep"));
+}
+END_TEST()
+
+FN_TEST(getcwd_removed_directory_returns_enoent)
+{
+	char buffer[4096];
+	TEST_SUCC(mkdir("/tmp/getcwd_removed", 0700));
+	TEST_SUCC(chdir("/tmp/getcwd_removed"));
+	TEST_SUCC(rmdir("/tmp/getcwd_removed"));
+	TEST_ERRNO(syscall(SYS_getcwd, buffer, sizeof(buffer)), ENOENT);
+	TEST_SUCC(chdir("/"));
+}
+END_TEST()
+
 FN_TEST(getcwd_after_detaching_parent_with_child)
 {
 	TEST_SUCC(unshare(CLONE_NEWNS));

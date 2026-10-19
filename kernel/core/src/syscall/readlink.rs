@@ -5,7 +5,7 @@ use ostd::mm::VmIo;
 use super::SyscallReturn;
 use crate::{
     fs::{
-        file::file_table::RawFileDesc,
+        file::{InodeType, file_table::RawFileDesc},
         vfs::{
             inode::SymbolicLink,
             path::{AT_FDCWD, EmptyPathStr, FsPath},
@@ -41,9 +41,25 @@ pub(super) fn sys_readlinkat(
         let fs_path = FsPath::from_fd_at(dirfd, &path_name, EmptyPathStr::Allow)?;
         let path = path_resolver.lookup_no_follow(&fs_path)?;
 
+        if path_name.is_empty() && path.inode().type_() != InodeType::SymLink {
+            return_errno_with_message!(
+                Errno::ENOENT,
+                "the empty path does not refer to a symbolic link"
+            );
+        }
+
         match path.inode().read_link()? {
             SymbolicLink::Plain(s) => s,
-            SymbolicLink::Path(path) => path_resolver.make_abs_path(&path).into_string(),
+            SymbolicLink::Path(path) => {
+                let link = path_resolver.make_abs_path(&path).into_string();
+                if link.len() >= MAX_FILENAME_LEN {
+                    return_errno_with_message!(
+                        Errno::ENAMETOOLONG,
+                        "the symbolic link path exceeds the syscall path limit"
+                    );
+                }
+                link
+            }
         }
     };
 
