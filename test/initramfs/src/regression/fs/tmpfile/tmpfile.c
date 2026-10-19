@@ -68,6 +68,20 @@ FN_TEST(tmpfile_open_succeeds)
 }
 END_TEST()
 
+FN_TEST(directory_cookies_resume_after_each_entry)
+{
+	DIR *directory = TEST_RES(opendir(TEST_DIR), _ret != NULL);
+	struct dirent *entry;
+	long previous = 0;
+	while ((entry = readdir(directory)) != NULL) {
+		TEST_RES(entry->d_off, _ret > previous);
+		previous = entry->d_off;
+		TEST_RES(telldir(directory), _ret == previous);
+	}
+	TEST_SUCC(closedir(directory));
+}
+END_TEST()
+
 FN_TEST(tmpfile_status_flags_survive_setfl)
 {
 	int fd =
