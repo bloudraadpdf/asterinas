@@ -23,13 +23,10 @@ pub(super) fn sys_capset(
     let user_space = ctx.user_space();
     let cap_user_header = user_space.read_val::<CUserCapHeader>(cap_user_header_addr)?;
 
-    if cap_user_header.version != LINUX_CAPABILITY_VERSION_3 {
+    let Some(words) = CUserCapHeader::data_words(cap_user_header.version) else {
         // Write the supported version back to userspace.
         user_space.write_val(cap_user_header_addr, &LINUX_CAPABILITY_VERSION_3)?;
-        return_errno_with_message!(
-            Errno::EINVAL,
-            "capability versions other than v3 are not supported"
-        );
+        return_errno_with_message!(Errno::EINVAL, "unsupported capability version");
     };
 
     // The ability to set capabilities of any other thread has been deprecated.
@@ -44,8 +41,15 @@ pub(super) fn sys_capset(
     }
 
     let caps_lo = user_space.read_val::<CUserCapData>(cap_user_data_addr)?;
-    let caps_hi =
-        user_space.read_val::<CUserCapData>(cap_user_data_addr + size_of::<CUserCapData>())?;
+    let caps_hi = if words == 2 {
+        user_space.read_val::<CUserCapData>(cap_user_data_addr + size_of::<CUserCapData>())?
+    } else {
+        CUserCapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }
+    };
 
     // Convert the 32-bit capability fields to the 64-bit capability value.
     let permitted_capset = CapSet::from_lo_hi(caps_lo.permitted, caps_hi.permitted);

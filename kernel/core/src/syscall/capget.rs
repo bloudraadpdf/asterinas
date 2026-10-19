@@ -18,24 +18,23 @@ pub(super) fn sys_capget(
     ctx: &Context,
 ) -> Result<SyscallReturn> {
     let user_space = ctx.user_space();
-    let cap_user_header = user_space.read_val::<CUserCapHeader>(cap_user_header_addr)?;
+    let version = user_space.read_val::<u32>(cap_user_header_addr)?;
 
-    if cap_user_header.version != LINUX_CAPABILITY_VERSION_3 {
+    let Some(words) = CUserCapHeader::data_words(version) else {
         // Write the supported version back to userspace.
         user_space.write_val(cap_user_header_addr, &LINUX_CAPABILITY_VERSION_3)?;
         // If the data pointer is null, return success per Linux behavior.
         if cap_user_data_addr == 0 {
             return Ok(SyscallReturn::Return(0));
         }
-        return_errno_with_message!(
-            Errno::EINVAL,
-            "capability versions other than v3 are not supported"
-        );
+        return_errno_with_message!(Errno::EINVAL, "unsupported capability version");
     };
 
     if cap_user_data_addr == 0 {
         return Ok(SyscallReturn::Return(0));
     }
+
+    let cap_user_header = user_space.read_val::<CUserCapHeader>(cap_user_header_addr)?;
 
     if cap_user_header.pid.cast_signed() < 0 {
         return_errno_with_message!(Errno::EINVAL, "negative PIDs are not valid");
@@ -70,7 +69,9 @@ pub(super) fn sys_capget(
     };
 
     user_space.write_val(cap_user_data_addr, &caps_lo)?;
-    user_space.write_val(cap_user_data_addr + size_of::<CUserCapData>(), &caps_hi)?;
+    if words == 2 {
+        user_space.write_val(cap_user_data_addr + size_of::<CUserCapData>(), &caps_hi)?;
+    }
 
     Ok(SyscallReturn::Return(0))
 }

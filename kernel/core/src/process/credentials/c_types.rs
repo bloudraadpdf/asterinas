@@ -23,4 +23,16 @@ pub(crate) struct CUserCapData {
     pub inheritable: u32,
 }
 
+pub(crate) const LINUX_CAPABILITY_VERSION_1: u32 = 0x19980330;
+pub(crate) const LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
 pub(crate) const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+
+impl CUserCapHeader {
+    pub(crate) fn data_words(version: u32) -> Option<usize> {
+        match version {
+            LINUX_CAPABILITY_VERSION_1 => Some(1),
+            LINUX_CAPABILITY_VERSION_2 | LINUX_CAPABILITY_VERSION_3 => Some(2),
+            _ => None,
+        }
+    }
+}
