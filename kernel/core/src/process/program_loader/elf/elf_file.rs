@@ -13,12 +13,15 @@ use crate::{
     vm::{perms::VmPerms, vmar::VMAR_CAP_ADDR},
 };
 
+const PT_GNU_STACK: u32 = 0x6474e551;
+
 /// A wrapper for the [`xmas_elf`] ELF parser.
 pub(crate) struct ElfHeaders {
     elf_header: ElfHeader,
     loadable_phdrs: Vec<LoadablePhdr>,
     max_load_align: usize,
     interp_phdr: Option<InterpPhdr>,
+    stack_perms: VmPerms,
 }
 
 impl ElfHeaders {
@@ -63,6 +66,7 @@ impl ElfHeaders {
         let mut loadable_phdrs = Vec::with_capacity(ph_count as usize);
         let mut max_load_align = PAGE_SIZE;
         let mut interp_phdr = None;
+        let mut stack_perms = VmPerms::READ | VmPerms::WRITE;
         for index in 0..ph_count {
             let program_header =
                 program::parse_program_header(input, header, index).map_err(|_| {
@@ -90,6 +94,9 @@ impl ElfHeaders {
                     // Like Linux, we only handle the first interpreter program header.
                     interp_phdr = Some(InterpPhdr::parse(&ph64)?);
                 }
+                Ok(program::Type::OsSpecific(PT_GNU_STACK)) => {
+                    stack_perms.set(VmPerms::EXEC, ph64.flags.is_execute());
+                }
                 _ => (),
             }
         }
@@ -102,6 +109,7 @@ impl ElfHeaders {
             loadable_phdrs,
             max_load_align,
             interp_phdr,
+            stack_perms,
         })
     }
 
@@ -137,6 +145,10 @@ impl ElfHeaders {
     /// It is guaranteed that the alignment is a power of two and is at least [`PAGE_SIZE`].
     pub(super) fn max_load_align(&self) -> usize {
         self.max_load_align
+    }
+
+    pub(super) fn stack_perms(&self) -> VmPerms {
+        self.stack_perms
     }
 
     /// Returns a reference to the interpreter program header.

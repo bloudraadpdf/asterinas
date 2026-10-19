@@ -142,9 +142,10 @@ impl ProcessVm {
         envp: Vec<CString>,
         aux_vec: AuxVec,
         execfn: CString,
+        perms: crate::vm::perms::VmPerms,
     ) -> Result<()> {
         self.init_stack()
-            .map_and_write(vmar, argv, envp, aux_vec, execfn)
+            .map_and_write(vmar, argv, envp, aux_vec, execfn, perms)
     }
 
     /// Maps and initializes the heap virtual memory.

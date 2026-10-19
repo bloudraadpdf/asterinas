@@ -181,6 +181,7 @@ impl InitStack {
         envp: Vec<CString>,
         auxvec: AuxVec,
         execfn: CString,
+        perms: VmPerms,
     ) -> Result<()> {
         self.set_uninitialized();
 
@@ -189,7 +190,6 @@ impl InitStack {
             vmo_options.alloc()?
         };
         let vmar_map_options = {
-            let perms = VmPerms::READ | VmPerms::WRITE;
             let map_addr = self.initial_top - self.max_size;
             debug_assert!(map_addr.is_multiple_of(PAGE_SIZE));
             vmar.new_map(self.max_size, perms)
