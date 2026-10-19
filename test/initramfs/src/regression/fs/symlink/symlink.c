@@ -30,6 +30,19 @@ FN_SETUP(prepare)
 }
 END_SETUP()
 
+FN_TEST(readlink_empty_path_requires_symlink)
+{
+	char buffer[32];
+	int fd = TEST_SUCC(open("/tmp", O_PATH | O_DIRECTORY));
+	TEST_ERRNO(readlinkat(fd, "", buffer, sizeof(buffer)), ENOENT);
+	TEST_SUCC(close(fd));
+	TEST_ERRNO(readlinkat(AT_FDCWD, "", buffer, sizeof(buffer)), ENOENT);
+	fd = TEST_SUCC(open(DIRECTORY_SYMLINK, O_PATH | O_NOFOLLOW));
+	TEST_RES(readlinkat(fd, "", buffer, sizeof(buffer)), _ret == 3);
+	TEST_SUCC(close(fd));
+}
+END_TEST()
+
 FN_TEST(symlink_trailing_slash_nofollow)
 {
 	// `dir_link` points to a directory, so the trailing slash forces directory

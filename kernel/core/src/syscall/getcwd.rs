@@ -2,13 +2,16 @@
 
 use ostd::mm::VmIo;
 
-use super::SyscallReturn;
+use super::{SyscallReturn, constants::MAX_FILENAME_LEN};
 use crate::{fs::vfs::path::AbsPathResult, prelude::*};
 
 pub(super) fn sys_getcwd(buf: Vaddr, len: usize, ctx: &Context) -> Result<SyscallReturn> {
     let abs_path = {
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
+        if path_resolver.cwd().inode().metadata()?.nr_hard_links == 0 {
+            return_errno_with_message!(Errno::ENOENT, "the current directory has been removed");
+        }
         path_resolver.make_abs_path(path_resolver.cwd())
     };
 
@@ -27,6 +30,12 @@ pub(super) fn sys_getcwd(buf: Vaddr, len: usize, ctx: &Context) -> Result<Syscal
 
     let cwd = CString::new(abs_path)?;
     let bytes = cwd.as_bytes_with_nul();
+    if bytes.len() > MAX_FILENAME_LEN {
+        return_errno_with_message!(
+            Errno::ENAMETOOLONG,
+            "the CWD exceeds the syscall path limit"
+        );
+    }
     if bytes.len() > len {
         return_errno_with_message!(Errno::ERANGE, "the CWD buffer is too small");
     }
