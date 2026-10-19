@@ -40,9 +40,7 @@ impl datagram_common::Bound for BoundNetlinkUevent {
         flags: SendFlags,
     ) -> Result<usize> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         if *remote != NetlinkSocketAddr::new_unspecified() {
             return_errno_with_message!(
@@ -62,9 +60,7 @@ impl datagram_common::Bound for BoundNetlinkUevent {
         flags: RecvFlags,
     ) -> Result<(RecvOutput, Self::Endpoint)> {
         // TODO: Deal with other flags.
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         let mut receive_queue = self.receive_queue.lock();
 

@@ -182,7 +182,7 @@ where
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
-        let (output, addr) = self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+        let (output, addr) = self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
             self.try_recv(writer, flags)
         })?;
 

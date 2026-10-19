@@ -388,7 +388,7 @@ impl Socket for UnixStreamSocket {
     }
 
     fn accept(&self, is_nonblocking: bool) -> Result<(Arc<dyn FileLike>, SocketAddr)> {
-        self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+        self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), false, || {
             self.try_accept(is_nonblocking)
         })
     }
@@ -484,9 +484,7 @@ impl Socket for UnixStreamSocket {
         flags: SendFlags,
     ) -> Result<usize> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         let MessageHeader {
             control_messages,
@@ -510,9 +508,12 @@ impl Socket for UnixStreamSocket {
         }
         let mut auxiliary_data = AuxiliaryData::from_control(control_messages)?;
 
-        self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
-            self.try_send(reader, &mut auxiliary_data, flags)
-        })
+        self.block_on(
+            IoEvents::OUT,
+            self.timeouts.send_timeout(),
+            flags.contains(SendFlags::MSG_DONTWAIT),
+            || self.try_send(reader, &mut auxiliary_data, flags),
+        )
     }
 
     fn recvmsg(
@@ -521,12 +522,10 @@ impl Socket for UnixStreamSocket {
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
-            warn!("unsupported flags: {:?}", flags);
-        }
+        flags.warn_if_unsupported();
 
         let (output, control_messages) =
-            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+            self.block_on_recv(flags, self.timeouts.recv_timeout(), || {
                 self.try_recv(writer, flags)
             })?;
 
