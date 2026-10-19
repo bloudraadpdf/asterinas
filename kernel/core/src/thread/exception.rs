@@ -10,7 +10,7 @@ use crate::{
     prelude::*,
     process::signal::{
         constants::{BUS_ADRERR, SIGBUS},
-        signals::fault::FaultSignal,
+        signals::{fault::FaultSignal, kernel::KernelSignal},
     },
     thread::kernel_thread::AsKernelThread,
     vm::vmar::{PageFaultInfo, Vmar},
@@ -24,6 +24,11 @@ pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception:
         let vmar = user_space.vmar();
         match handle_page_fault_from_vmar(vmar, &page_fault_info) {
             Ok(()) => return,
+            Err(error) if error.error() == Errno::ENOMEM => {
+                ctx.posix_thread
+                    .enqueue_signal(Box::new(KernelSignal::new_kill()));
+                return;
+            }
             Err(error) if error.error() == Errno::ENOSPC => {
                 ctx.posix_thread.enqueue_signal(Box::new(FaultSignal::new(
                     SIGBUS,

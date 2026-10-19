@@ -9,7 +9,7 @@ use core::{
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 use ostd::{
     impl_untyped_frame_meta_for,
-    mm::{Frame, FrameAllocOptions, HasPaddr},
+    mm::{AllocationPriority, Frame, FrameAllocOptions, HasPaddr},
     sync::WaitQueue,
 };
 
@@ -159,6 +159,7 @@ pub(crate) trait CachePageExt: Sized {
     fn alloc_uninit() -> Result<CachePage> {
         let meta = CachePageMeta::default();
         let page = FrameAllocOptions::new()
+            .priority(AllocationPriority::Normal)
             .zeroed(false)
             .alloc_frame_with(meta)?;
         Ok(page)
@@ -172,6 +173,7 @@ pub(crate) trait CachePageExt: Sized {
             ..Default::default()
         };
         let page = FrameAllocOptions::new()
+            .priority(AllocationPriority::Normal)
             .zeroed(true)
             .alloc_frame_with(meta)?;
         Ok(page)

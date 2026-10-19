@@ -16,9 +16,19 @@ use crate::{
     util::ops::range_difference,
 };
 
+/// Access to frames reserved for kernel progress under memory pressure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocationPriority {
+    /// Application data, which cannot consume the kernel reserve.
+    Normal,
+    /// Kernel allocations, which may use the reserve after ordinary allocation fails.
+    Kernel,
+}
+
 /// Options for allocating physical memory frames.
 pub struct FrameAllocOptions {
     zeroed: bool,
+    priority: AllocationPriority,
 }
 
 impl Default for FrameAllocOptions {
@@ -30,7 +40,18 @@ impl Default for FrameAllocOptions {
 impl FrameAllocOptions {
     /// Creates new options for allocating the specified number of frames.
     pub fn new() -> Self {
-        Self { zeroed: true }
+        Self {
+            zeroed: true,
+            priority: AllocationPriority::Kernel,
+        }
+    }
+
+    /// Sets whether this allocation may consume the kernel reserve.
+    ///
+    /// The default priority is [`AllocationPriority::Kernel`].
+    pub fn priority(&mut self, priority: AllocationPriority) -> &mut Self {
+        self.priority = priority;
+        self
     }
 
     /// Sets whether the allocated frames should be initialized with zeros.
@@ -54,7 +75,7 @@ impl FrameAllocOptions {
     pub fn alloc_frame_with<M: AnyFrameMeta>(&self, metadata: M) -> Result<Frame<M>> {
         let single_layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
         let frame = get_global_frame_allocator()
-            .alloc(single_layout)
+            .alloc(single_layout, self.priority)
             .map(|paddr| Frame::from_unused(paddr, metadata).unwrap())
             .ok_or(Error::NoMemory)?;
 
@@ -89,7 +110,7 @@ impl FrameAllocOptions {
         }
         let layout = Layout::from_size_align(nframes * PAGE_SIZE, PAGE_SIZE).unwrap();
         let segment = get_global_frame_allocator()
-            .alloc(layout)
+            .alloc(layout, self.priority)
             .map(|start| {
                 Segment::from_unused(start..start + nframes * PAGE_SIZE, metadata_fn).unwrap()
             })
@@ -151,7 +172,8 @@ pub trait GlobalFrameAllocator: Sync {
     /// When any of the allocated memory is not in use, OSTD returns them by
     /// calling [`GlobalFrameAllocator::dealloc`]. If multiple frames are
     /// allocated, they may be returned in any order with any number of calls.
-    fn alloc(&self, layout: Layout) -> Option<Paddr>;
+    /// `Normal` allocations must not consume frames kept for kernel progress.
+    fn alloc(&self, layout: Layout, priority: AllocationPriority) -> Option<Paddr>;
 
     /// Deallocates a contiguous range of frames.
     ///

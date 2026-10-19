@@ -5,7 +5,7 @@
 use core::sync::atomic::AtomicUsize;
 
 use align_ext::AlignExt;
-use ostd::mm::{FrameAllocOptions, Segment};
+use ostd::mm::{AllocationPriority, FrameAllocOptions, Segment};
 use xarray::XArray;
 
 use super::{Vmo, VmoFlags, WritableMappingStatus};
@@ -151,6 +151,7 @@ fn committed_pages_if_continuous(flags: VmoFlags, size: usize) -> Result<XArray<
         // if the vmo is continuous, we need to allocate frames for the vmo
         let frames_num = size / PAGE_SIZE;
         let segment: Segment<CachePageMeta> = FrameAllocOptions::new()
+            .priority(AllocationPriority::Normal)
             .alloc_segment_with(frames_num, |_| CachePageMeta::default())?;
         let committed_pages = XArray::new();
         let mut locked_pages = committed_pages.lock();

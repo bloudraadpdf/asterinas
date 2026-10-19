@@ -31,7 +31,7 @@ use core::fmt::Debug;
 pub use self::{
     frame::{
         Frame,
-        allocator::FrameAllocOptions,
+        allocator::{AllocationPriority, FrameAllocOptions},
         segment::{Segment, USegment},
         unique::UniqueFrame,
         untyped::{AnyUFrameMeta, UFrame},
