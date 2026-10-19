@@ -170,6 +170,7 @@ impl<D: ProcDirOps + 'static> Inode for ProcDir<D> {
     fn set_atime(&self, self_dentry: &Dentry, time: Duration);
     fn mtime(&self) -> Duration;
     fn set_mtime(&self, self_dentry: &Dentry, time: Duration);
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration;
     fn set_ctime(&self, self_dentry: &Dentry, time: Duration);
     fn fs(&self) -> Arc<dyn FileSystem>;

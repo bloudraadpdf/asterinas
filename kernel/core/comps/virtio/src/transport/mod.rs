@@ -6,6 +6,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
+#[cfg(feature = "pci")]
 use aster_pci::cfg_space::BarAccess;
 use aster_util::safe_ptr::SafePtr;
 use ostd::{
@@ -16,13 +17,16 @@ use ostd::{
 };
 use ostd_pod::Pod;
 
-use self::{mmio::virtio_mmio_init, pci::virtio_pci_init};
+use self::mmio::virtio_mmio_init;
+#[cfg(feature = "pci")]
+use self::pci::virtio_pci_init;
 use crate::{
     VirtioDeviceType,
     queue::{AvailRing, Descriptor, UsedRing},
 };
 
 pub(crate) mod mmio;
+#[cfg(feature = "pci")]
 pub(crate) mod pci;
 
 /// The transport of virtio device. Virtio device can use this transport to:
@@ -53,11 +57,13 @@ pub(crate) trait VirtioTransport: Sync + Send + Debug {
     fn device_config_mem(&self) -> Option<IoMem>;
 
     /// Get access to the device config BAR space.
+    #[cfg(feature = "pci")]
     fn device_config_bar(&self) -> Option<(BarAccess, usize)>;
 
     // ====================Virtqueue related APIs====================
 
     /// Get the total number of queues
+    #[cfg(any(feature = "devices", feature = "pci"))]
     fn num_queues(&self) -> u16;
 
     /// Set virtqueue information. Some transport may set other necessary information such as MSI-X vector in PCI transport.
@@ -105,6 +111,7 @@ pub(crate) trait VirtioTransport: Sync + Send + Debug {
 #[derive(Debug)]
 pub(crate) struct ConfigManager<T: Pod> {
     modern_space: Option<SafePtr<T, IoMem>>,
+    #[cfg(feature = "pci")]
     legacy_space: Option<(BarAccess, usize)>,
 }
 
@@ -114,16 +121,18 @@ impl<T: Pod> ConfigManager<T> {
             transport
                 .device_config_mem()
                 .map(|memory| SafePtr::new(memory, 0)),
+            #[cfg(feature = "pci")]
             transport.device_config_bar(),
         )
     }
 
     pub(super) fn new(
         modern_space: Option<SafePtr<T, IoMem>>,
-        legacy_space: Option<(BarAccess, usize)>,
+        #[cfg(feature = "pci")] legacy_space: Option<(BarAccess, usize)>,
     ) -> Self {
         Self {
             modern_space,
+            #[cfg(feature = "pci")]
             legacy_space,
         }
     }
@@ -149,6 +158,7 @@ impl<T: Pod> ConfigManager<T> {
             .map_err(|_| VirtioTransportError::DeviceStatusError)
     }
 
+    #[cfg(feature = "pci")]
     fn read_legacy<V: PodOnce + PortRead>(&self, offset: usize) -> Result<V, VirtioTransportError> {
         let Some((bar, base)) = self.legacy_space.as_ref() else {
             return Err(VirtioTransportError::InvalidArgs);
@@ -167,7 +177,14 @@ impl<T: Pod> ConfigManager<T> {
         if self.is_modern() {
             self.read_modern(offset)
         } else {
-            self.read_legacy(offset)
+            #[cfg(feature = "pci")]
+            {
+                self.read_legacy(offset)
+            }
+            #[cfg(not(feature = "pci"))]
+            {
+                Err(VirtioTransportError::InvalidArgs)
+            }
         }
     }
 
@@ -191,6 +208,7 @@ impl<T: Pod> ConfigManager<T> {
             .map_err(|_| VirtioTransportError::DeviceStatusError)
     }
 
+    #[cfg(feature = "pci")]
     fn write_legacy<V: PodOnce + PortWrite>(
         &self,
         offset: usize,
@@ -214,7 +232,14 @@ impl<T: Pod> ConfigManager<T> {
         if self.is_modern() {
             self.write_modern(offset, value)
         } else {
-            self.write_legacy(offset, value)
+            #[cfg(feature = "pci")]
+            {
+                self.write_legacy(offset, value)
+            }
+            #[cfg(not(feature = "pci"))]
+            {
+                Err(VirtioTransportError::InvalidArgs)
+            }
         }
     }
 }
@@ -318,6 +343,7 @@ impl Drop for DeviceTransport {
 }
 
 pub(super) fn init() {
+    #[cfg(feature = "pci")]
     virtio_pci_init();
     virtio_mmio_init();
 }

@@ -830,6 +830,7 @@ impl Path {
     pub(crate) fn group(&self) -> Result<Gid>;
     pub(crate) fn atime(&self) -> Duration;
     pub(crate) fn mtime(&self) -> Duration;
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn ctime(&self) -> Duration;
     pub(crate) fn list_xattr(
         &self,

@@ -346,6 +346,7 @@ impl Inode for PseudoInode {
         self.metadata.lock().last_modify_at = time;
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.metadata.lock().last_meta_change_at
     }

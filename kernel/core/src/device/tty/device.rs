@@ -10,11 +10,7 @@ use device_id::{DeviceId, MajorId, MinorId};
 use spin::Once;
 
 use crate::{
-    device::{
-        Device, DeviceType,
-        registry::char,
-        tty::{hvc::hvc0_device, serial::serial0_device, vt::active_vt},
-    },
+    device::{Device, DeviceType, registry::char, tty::serial::serial0_device},
     fs::{
         devtmpfs::DevtmpfsNodeMeta,
         file::{PerOpenFileOps, mkmod},
@@ -24,8 +20,10 @@ use crate::{
 
 /// Corresponds to `/dev/tty0` in the file system. This device represents the active virtual
 /// terminal.
+#[cfg(feature = "console_video")]
 pub(crate) struct Tty0Device;
 
+#[cfg(feature = "console_video")]
 impl Device for Tty0Device {
     fn type_(&self) -> DeviceType {
         DeviceType::Char
@@ -40,7 +38,7 @@ impl Device for Tty0Device {
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
-        active_vt().open()
+        super::vt::active_vt().open()
     }
 }
 
@@ -85,31 +83,50 @@ pub(crate) const CONSOLE_DEVICE_ID: DeviceId = DeviceId::new(MajorId::new(5), Mi
 
 impl SystemConsole {
     /// Returns the singleton instance of the console device.
-    pub(crate) fn singleton() -> &'static Arc<SystemConsole> {
+    pub(crate) fn singleton() -> Result<&'static Arc<SystemConsole>> {
         static INSTANCE: Once<Arc<SystemConsole>> = Once::new();
 
-        INSTANCE.call_once(|| {
+        INSTANCE.try_call_once(|| {
             // TODO: Support specifying multiple TTY devices, e.g., "console=hvc0 console=tty0".
             let console_name = CONSOLES
                 .get()
                 .and_then(|consoles| consoles.first().map(|s| s.as_str()))
-                .unwrap_or("tty0");
+                .unwrap_or(if cfg!(feature = "console_video") {
+                    "tty0"
+                } else {
+                    "ttyS0"
+                });
 
             let device = match console_name {
+                #[cfg(feature = "console_video")]
                 "tty0" => Some(Arc::new(Tty0Device) as _),
                 "ttyS0" => serial0_device().cloned().map(|device| device as _),
-                "hvc0" => hvc0_device().cloned().map(|device| device as _),
+                #[cfg(feature = "virtio_devices")]
+                "hvc0" => super::hvc::hvc0_device().cloned().map(|device| device as _),
                 _ => None,
             };
-            let inner = device.unwrap_or_else(|| {
+            let inner = if let Some(device) = device {
+                device
+            } else {
                 warn!(
-                    "'{}' console not found, falling back to 'tty0'",
+                    "'{}' console not found, using the default console",
                     console_name
                 );
-                Arc::new(Tty0Device) as _
-            });
+                #[cfg(feature = "console_video")]
+                {
+                    Arc::new(Tty0Device) as Arc<dyn Device>
+                }
+                #[cfg(not(feature = "console_video"))]
+                {
+                    serial0_device()
+                        .ok_or_else(|| {
+                            Error::with_message(Errno::ENODEV, "serial console is unavailable")
+                        })?
+                        .clone() as Arc<dyn Device>
+                }
+            };
 
-            Arc::new(Self { inner })
+            Ok(Arc::new(Self { inner }))
         })
     }
 }
@@ -133,9 +150,10 @@ impl Device for SystemConsole {
 }
 
 pub(super) fn init_in_first_process() -> Result<()> {
+    #[cfg(feature = "console_video")]
     char::register(Arc::new(Tty0Device))?;
     char::register(Arc::new(TtyDevice))?;
-    char::register(SystemConsole::singleton().clone())?;
+    char::register(SystemConsole::singleton()?.clone())?;
 
     Ok(())
 }

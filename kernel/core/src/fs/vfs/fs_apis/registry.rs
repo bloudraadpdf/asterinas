@@ -8,12 +8,14 @@ use aster_systree::{
 };
 use spin::Once;
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
+use crate::fs::vfs::path::{AT_FDCWD, EmptyPathStr, FsPath};
 use crate::{
     fs::{
         fs_impls::sysfs,
         vfs::{
             file_system::{FileSystem, FsFlags},
-            path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath},
+            path::Dentry,
         },
     },
     prelude::*,
@@ -103,12 +105,17 @@ impl<T: FsType> DynFsType for T {
 ///
 /// This context is used to identify and create a file system instance.
 pub(crate) struct FsCreationCtx<'a> {
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     source: Option<&'a str>,
     flags: FsFlags,
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     args: Option<&'a str>,
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     block_device: BlockDeviceResolution<'a>,
+    lifetime: core::marker::PhantomData<&'a ()>,
 }
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 enum BlockDeviceResolution<'a> {
     Pending(&'a Context<'a>),
     Resolved(Arc<dyn BlockDevice>),
@@ -117,34 +124,43 @@ enum BlockDeviceResolution<'a> {
 impl<'a> FsCreationCtx<'a> {
     /// Creates a file system creation context from syscall inputs.
     pub(crate) fn new(
-        source: Option<&'a str>,
+        _source: Option<&'a str>,
         flags: FsFlags,
-        args: Option<&'a str>,
-        task_ctx: &'a Context<'a>,
+        _args: Option<&'a str>,
+        _task_ctx: &'a Context<'a>,
     ) -> Self {
         Self {
-            source,
+            #[cfg(any(feature = "filesystems_extra", ktest))]
+            source: _source,
             flags,
-            args,
-            block_device: BlockDeviceResolution::Pending(task_ctx),
+            #[cfg(any(feature = "filesystems_extra", ktest))]
+            args: _args,
+            #[cfg(any(feature = "filesystems_extra", ktest))]
+            block_device: BlockDeviceResolution::Pending(_task_ctx),
+            lifetime: core::marker::PhantomData,
         }
     }
 
     /// Creates a file system creation context from an already resolved block device.
     pub(in crate::fs) fn from_block_device(
-        block_device: Arc<dyn BlockDevice>,
+        _block_device: Arc<dyn BlockDevice>,
         flags: FsFlags,
-        args: Option<&'a str>,
+        _args: Option<&'a str>,
     ) -> Self {
         Self {
+            #[cfg(any(feature = "filesystems_extra", ktest))]
             source: None,
             flags,
-            args,
-            block_device: BlockDeviceResolution::Resolved(block_device),
+            #[cfg(any(feature = "filesystems_extra", ktest))]
+            args: _args,
+            #[cfg(any(feature = "filesystems_extra", ktest))]
+            block_device: BlockDeviceResolution::Resolved(_block_device),
+            lifetime: core::marker::PhantomData,
         }
     }
 
     /// Returns the user-supplied mount source.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) fn source(&self) -> Option<&str> {
         self.source
     }
@@ -155,11 +171,13 @@ impl<'a> FsCreationCtx<'a> {
     }
 
     /// Returns the file system specific mount arguments.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) fn args(&self) -> Option<&str> {
         self.args
     }
 
     /// Returns the task context the creation started from; `None` once a block device replaced it.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) fn ctx(&self) -> Option<&'a Context<'a>> {
         match &self.block_device {
             BlockDeviceResolution::Pending(task_ctx) => Some(*task_ctx),
@@ -168,6 +186,7 @@ impl<'a> FsCreationCtx<'a> {
     }
 
     /// Resolves the mount source into a block device.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) fn resolve_block_device(&mut self) -> Result<&Arc<dyn BlockDevice>> {
         if self.block_device().is_none() {
             self.do_resolve_block_device()?;
@@ -176,6 +195,7 @@ impl<'a> FsCreationCtx<'a> {
         Ok(self.block_device().unwrap())
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn block_device(&self) -> Option<&Arc<dyn BlockDevice>> {
         match &self.block_device {
             BlockDeviceResolution::Pending(_) => None,
@@ -183,6 +203,7 @@ impl<'a> FsCreationCtx<'a> {
         }
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn do_resolve_block_device(&mut self) -> Result<()> {
         let task_ctx = match &self.block_device {
             BlockDeviceResolution::Pending(task_ctx) => *task_ctx,
@@ -332,6 +353,7 @@ impl WeakFsAndRoot {
 
 impl<K: Eq + Ord + Clone + Send + Sync + 'static> FsCache<K> {
     /// Creates an empty cache.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(in crate::fs) const fn new() -> Self {
         Self {
             entries: Mutex::new(BTreeMap::new()),

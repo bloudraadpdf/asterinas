@@ -10,9 +10,9 @@ pub mod utils;
 pub mod vfs;
 
 pub use fs_impls::devtmpfs;
-pub(crate) use fs_impls::{
-    cgroupfs, configfs, devpts, exfat, ext2, procfs, pseudofs, ramfs, sysfs, tmpfs,
-};
+pub(crate) use fs_impls::{cgroupfs, devpts, procfs, pseudofs, ramfs, sysfs, tmpfs};
+#[cfg(feature = "filesystems_extra")]
+pub(crate) use fs_impls::{configfs, exfat, ext2};
 
 use crate::{
     fs::{

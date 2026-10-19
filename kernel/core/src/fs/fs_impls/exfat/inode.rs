@@ -1528,6 +1528,7 @@ impl Inode for ExfatInode {
         self.inner.write().mtime = DosTimestamp::from_duration(time).unwrap_or_default();
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.inner.read().ctime.as_duration().unwrap_or_default()
     }

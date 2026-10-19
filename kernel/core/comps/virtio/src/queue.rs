@@ -18,9 +18,7 @@ use ostd::{
 
 use crate::{
     dma_buf::DmaBuf,
-    transport::{
-        ConfigManager, VirtioTransport, VirtioTransportError, pci::legacy::VirtioPciLegacyTransport,
-    },
+    transport::{ConfigManager, VirtioTransport, VirtioTransportError},
 };
 
 /// The mechanism for bulk data transport on virtio devices.
@@ -56,6 +54,7 @@ pub(crate) struct VirtQueue {
     /// The last-served used ring index.
     last_used_idx: u16,
     /// Whether the callback of this queue is enabled.
+    #[cfg(feature = "devices")]
     is_callback_enabled: bool,
 }
 
@@ -102,6 +101,24 @@ struct DescriptorSlot {
 }
 
 impl VirtQueue {
+    const LEGACY_ALIGN: usize = 4096;
+
+    /// Each virtqueue occupies two or more physically-contiguous pages (defined, for
+    /// the purposes of this specification, as 4096 bytes), and consists of three parts:
+    /// +------------------+------------------------------------------------+-----------+
+    /// | Descriptor Table | Available Ring (padding to next 4096 boundary) | Used Ring |
+    /// +------------------+------------------------------------------------+-----------+
+    ///
+    /// More details can be found at <http://ozlabs.org/~rusty/virtio-spec/virtio-0.9.5.pdf>.
+    pub(crate) fn legacy_size(queue_size: usize) -> usize {
+        let align_mask = Self::LEGACY_ALIGN - 1;
+
+        ((size_of::<Descriptor>() * queue_size + size_of::<u16>() * (3 + queue_size) + align_mask)
+            & !align_mask)
+            + ((size_of::<u16>() * 3 + size_of::<UsedElem>() * queue_size + align_mask)
+                & !align_mask)
+    }
+
     /// Creates a new virtqueue.
     pub(crate) fn new(
         idx: u16,
@@ -131,10 +148,8 @@ impl VirtQueue {
             }
 
             let (dma1, dma2) = {
-                let align_size = VirtioPciLegacyTransport::QUEUE_ALIGN_SIZE;
-                let total_frames =
-                    VirtioPciLegacyTransport::calc_virtqueue_size_aligned(device_queue_size)
-                        / align_size;
+                let align_size = Self::LEGACY_ALIGN;
+                let total_frames = Self::legacy_size(device_queue_size) / align_size;
                 let dma =
                     DmaCoherent::alloc(total_frames, true).map_err(CreationError::ResourceAlloc)?;
 
@@ -232,6 +247,7 @@ impl VirtQueue {
             free_head: Some(0),
             avail_idx: 0,
             last_used_idx: 0,
+            #[cfg(feature = "devices")]
             is_callback_enabled: true,
         })
     }
@@ -510,6 +526,7 @@ impl VirtQueue {
     /// Disables registered callbacks.
     ///
     /// That is to say, the queue won't generate interrupts after calling this method.
+    #[cfg(feature = "devices")]
     pub(crate) fn disable_callback(&mut self) {
         if !self.is_callback_enabled {
             return;
@@ -527,6 +544,7 @@ impl VirtQueue {
     /// Enables registered callbacks.
     ///
     /// The queue will generate interrupts if any event comes after calling this method.
+    #[cfg(feature = "devices")]
     pub(crate) fn enable_callback(&mut self) {
         if self.is_callback_enabled {
             return;
@@ -628,3 +646,15 @@ bitflags! {
 }
 
 impl PodOnce for AvailFlags {}
+
+#[cfg(ktest)]
+mod feature_tests {
+    use ostd::prelude::ktest;
+
+    #[ktest]
+    fn legacy_layout_does_not_require_pci() {
+        for (queues, bytes) in [(1, 8192), (128, 8192), (256, 12288), (1024, 32768)] {
+            assert_eq!(super::VirtQueue::legacy_size(queues), bytes);
+        }
+    }
+}

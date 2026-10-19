@@ -24,6 +24,7 @@ use ostd::mm::{VmReader, VmWriter};
 use spin::Once;
 
 /// Registers a new kernel `SysNode`.
+#[cfg(any(feature = "filesystems_extra", ktest))]
 pub(super) fn register(config_obj: Arc<dyn SysNode>) -> crate::prelude::Result<()> {
     KERNEL_SYS_NODE_ROOT.get().unwrap().add_child(config_obj)?;
     Ok(())

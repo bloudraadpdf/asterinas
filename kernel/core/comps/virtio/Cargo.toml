@@ -7,12 +7,12 @@ edition.workspace = true
 
 [dependencies]
 aster-bigtcp.workspace = true
-aster-block.workspace = true
-aster-console.workspace = true
-aster-fuse.workspace = true
-aster-input.workspace = true
+aster-block = { workspace = true, optional = true }
+aster-console = { workspace = true, optional = true }
+aster-fuse = { workspace = true, optional = true }
+aster-input = { workspace = true, optional = true }
 aster-network.workspace = true
-aster-pci.workspace = true
+aster-pci = { workspace = true, optional = true }
 aster-rights.workspace = true
 aster-softirq.workspace = true
 aster-util.workspace = true
@@ -42,7 +42,10 @@ fdt-util.workspace = true
 fdt-util.workspace = true
 
 [features]
-all = ["cvm_guest"]
+default = ["devices", "pci"]
+devices = ["dep:aster-block", "dep:aster-console", "dep:aster-fuse", "dep:aster-input"]
+pci = ["dep:aster-pci"]
+all = ["cvm_guest", "devices", "pci"]
 cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest"]
 
 [lints]

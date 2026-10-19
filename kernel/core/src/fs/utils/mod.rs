@@ -5,11 +5,13 @@
 pub(crate) use dirent_visitor::DirentVisitor;
 pub(crate) use direntry_vec::DirEntryVecExt;
 pub(crate) use endpoint::{Endpoint, EndpointState};
+#[cfg(feature = "filesystems_extra")]
 pub(crate) use id_bitmap::IdBitmap;
 
 mod dirent_visitor;
 mod direntry_vec;
 mod endpoint;
+#[cfg(feature = "filesystems_extra")]
 mod id_bitmap;
 pub(crate) mod systree_inode;
 
@@ -23,5 +25,7 @@ pub(crate) const NAME_MAX: usize = 255;
 pub(crate) const SYMLINKS_MAX: usize = 40;
 
 pub(crate) type CStr256 = aster_util::fixed_str::FixedCStr<256>;
+#[cfg(any(feature = "filesystems_extra", ktest))]
 pub(crate) type Str16 = aster_util::fixed_str::FixedNonTerminatedCStr<16>;
+#[cfg(any(feature = "filesystems_extra", ktest))]
 pub(crate) type Str64 = aster_util::fixed_str::FixedNonTerminatedCStr<64>;

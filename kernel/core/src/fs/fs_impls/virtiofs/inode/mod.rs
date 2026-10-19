@@ -325,6 +325,7 @@ impl Inode for VirtioFsInode {
         self.set_time(TimeField::Modify, time);
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn ctime(&self) -> Duration {
         self.inner.read().metadata.last_meta_change_at
     }

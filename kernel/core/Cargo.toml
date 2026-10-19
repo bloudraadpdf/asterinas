@@ -12,12 +12,12 @@ aster-block.workspace = true
 aster-cmdline.workspace = true
 aster-console.workspace = true
 aster-device.workspace = true
-aster-framebuffer.workspace = true
-aster-fuse.workspace = true
-aster-input.workspace = true
+aster-framebuffer = { workspace = true, optional = true }
+aster-fuse = { workspace = true, optional = true }
+aster-input = { workspace = true, optional = true }
 aster-logger.workspace = true
 aster-network.workspace = true
-aster-nvme.workspace = true
+aster-nvme = { workspace = true, optional = true }
 aster-rights.workspace = true
 aster-rights-proc.workspace = true
 aster-softirq.workspace = true
@@ -77,9 +77,19 @@ loongArch64.workspace = true
 
 [features]
 log_max_level_info = ["ostd/log_max_level_info"]
-default = ["cvm_guest"]
+default = ["cvm_guest", "console_video", "storage_nvme", "filesystems_extra", "virtio_devices", "virtio_pci"]
+console_video = ["dep:aster-framebuffer", "dep:aster-input"]
+storage_nvme = ["dep:aster-nvme"]
+filesystems_extra = ["dep:aster-fuse", "virtio_devices"]
+virtio_devices = ["aster-virtio/devices"]
+virtio_pci = ["aster-virtio/pci"]
 coverage = ["ostd/coverage"]
-cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest", "aster-virtio/cvm_guest"]
+cvm_guest = [
+    "filesystems_extra",
+    "dep:tdx-guest",
+    "ostd/cvm_guest",
+    "aster-virtio/cvm_guest",
+]
 pvh_boot = ["ostd/pvh_boot"]
 pvh_boot_only = ["pvh_boot", "ostd/pvh_boot_only"]
 http_listen = []

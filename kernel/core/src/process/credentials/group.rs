@@ -32,6 +32,7 @@ impl Gid {
         Self(ROOT_GID)
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) const fn is_root(&self) -> bool {
         self.0 == ROOT_GID
     }

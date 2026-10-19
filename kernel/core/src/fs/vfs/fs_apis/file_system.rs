@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+#[cfg(any(feature = "filesystems_extra", ktest))]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicI64, Ordering};
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 use device_id::DeviceId;
 
@@ -161,6 +164,7 @@ impl From<FsFlags> for u32 {
     }
 }
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 define_atomic_version_of_integer_like_type!(FsFlags, {
     /// An atomic version of `FsFlags`.
     #[derive(Debug)]

@@ -134,10 +134,11 @@ impl Device for RestoreDevice {
     }
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
         let state = STATE.get().unwrap().state.clone();
+        let sequence = AtomicU32::new(state.clock.sequence()?);
         Ok(Box::new(RestoreFile {
-            sequence: AtomicU32::new(state.clock.sequence()?),
             state,
             kind: self.kind,
+            sequence,
         }))
     }
 }

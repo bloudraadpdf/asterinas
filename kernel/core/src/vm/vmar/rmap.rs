@@ -4,8 +4,10 @@ use alloc::{collections::btree_map::BTreeMap, sync::Weak, vec::Vec};
 use core::ops::Range;
 
 use keyable_arc::KeyableWeak;
+#[cfg(any(feature = "filesystems_extra", ktest))]
+use ostd::mm::{PageFlags, tlb::TlbFlushOp};
 use ostd::{
-    mm::{PAGE_SIZE, PageFlags, Vaddr, tlb::TlbFlushOp},
+    mm::{PAGE_SIZE, Vaddr},
     task::disable_preempt,
 };
 
@@ -118,6 +120,7 @@ impl Rmap {
     /// # Panics
     ///
     /// This method may panic if the offset range is not aligned to the page boundary.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn freeze(&mut self, offset: Range<usize>) {
         debug_assert!(offset.start.is_multiple_of(PAGE_SIZE));
         debug_assert!(offset.end.is_multiple_of(PAGE_SIZE));

@@ -445,6 +445,7 @@ impl<KInode: SysTreeInodeTy + Send + Sync + 'static> Inode for KInode {
 
     default fn set_mtime(&self, _self_dentry: &VfsDentry, _time: Duration) {}
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     default fn ctime(&self) -> Duration {
         self.metadata().last_meta_change_at
     }

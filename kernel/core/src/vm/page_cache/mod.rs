@@ -109,11 +109,9 @@ use core::{
 };
 
 use align_ext::AlignExt;
-use aster_block::{
-    BlockDevice,
-    bio::{BioCompleteFn, BioDirection, BioSegment, BioStatus},
-    id::Bid,
-};
+use aster_block::bio::{BioCompleteFn, BioDirection, BioSegment, BioStatus};
+#[cfg(any(feature = "filesystems_extra", ktest))]
+use aster_block::{BlockDevice, id::Bid};
 use io_util::batch::IoBatch;
 use ostd::mm::{Segment, VmIo, VmIoFill};
 
@@ -165,6 +163,7 @@ pub(crate) struct PageCache(Arc<Vmo>);
 impl PageCache {
     /// Creates a page cache with a backend and the specified initial capacity
     /// in bytes.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn new_with_backend(
         size: usize,
         backend: Weak<dyn PageCacheBackend>,
@@ -187,6 +186,7 @@ impl PageCache {
     ///
     /// This size is page-aligned and may exceed the file size. The filesystem
     /// remains responsible for tracking EOF separately.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn size(&self) -> usize {
         self.0.size()
     }
@@ -299,6 +299,7 @@ impl PageCache {
     ///
     /// If the given range exceeds the current size of the page cache, only the pages within
     /// the valid range will be flushed.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn flush_range(&self, range: Range<usize>) -> Result<()> {
         let Some(vmo) = self.0.as_backed_vmo() else {
             return Ok(());
@@ -327,6 +328,7 @@ impl PageCache {
     /// This is the standard preparation step before issuing direct I/O that must
     /// bypass the page cache. It uses the same locking requirements as
     /// [`PageCache::flush_range`] and [`PageCache::evict_range`].
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn invalidate_range(&self, range: Range<usize>) -> Result<()> {
         let Some(vmo) = self.0.as_backed_vmo() else {
             return Ok(());
@@ -405,6 +407,7 @@ pub(crate) trait PageCacheBackend: Sync + Send {
     //
     // TODO: Revise this behavior once file truncation and page writeback can
     // happen concurrently.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn write_page_async(
         &self,
         idx: usize,
@@ -416,6 +419,7 @@ pub(crate) trait PageCacheBackend: Sync + Send {
     ///
     /// Backends that can process several pages in one request should override
     /// this method. The default implementation submits each page separately.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn write_pages_async(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         for (idx, locked_page) in pages.into_indexed() {
             self.write_page_async(idx, locked_page, io_batch)?;
@@ -454,6 +458,7 @@ impl Iterator for PageRun<'_> {
 }
 
 impl<'a> PageRun<'a> {
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(super) fn new<I>(start_idx: usize, pages: &'a mut I) -> Self
     where
         I: ExactSizeIterator<Item = LockedCachePage>,
@@ -463,11 +468,13 @@ impl<'a> PageRun<'a> {
     }
 
     /// Returns the first logical page index in the run.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn start_idx(&self) -> usize {
         self.start_idx
     }
 
     /// Returns the number of pages in the run.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn len(&self) -> usize {
         self.pages.len()
     }
@@ -487,6 +494,7 @@ impl<'a> PageRun<'a> {
     /// from wrong blocks.
     ///
     /// `len` must not exceed the number of pages remaining in this run.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn submit_contiguous_read_pages(
         &mut self,
         block_device: &dyn BlockDevice,
@@ -532,6 +540,7 @@ impl<'a> PageRun<'a> {
     /// unrelated blocks.
     ///
     /// `len` must not exceed the number of pages remaining in this run.
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     pub(crate) fn submit_contiguous_write_pages(
         &mut self,
         block_device: &dyn BlockDevice,
@@ -643,6 +652,7 @@ pub(crate) trait BlockAsPageCacheBackend: Sync + Send {
     ///
     /// Implementations should fail with `EINVAL` for an out-of-bounds `idx`.
     /// See also [`PageCacheBackend::write_page_async`].
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn submit_write_bio(
         &self,
         idx: usize,
@@ -658,6 +668,7 @@ pub(crate) trait BlockAsPageCacheBackend: Sync + Send {
     ///
     /// Implementations should fail with `EINVAL` for an out-of-bounds `idx`.
     /// See also [`PageCacheBackend::write_page_async`].
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn submit_write_page_run(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         for (idx, locked_page) in pages.into_indexed() {
             let rollback_page = locked_page.clone();
@@ -689,6 +700,7 @@ impl<T: BlockAsPageCacheBackend> PageCacheBackend for T {
         self.submit_read_page_run(pages, io_batch)
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn write_page_async(
         &self,
         idx: usize,
@@ -710,6 +722,7 @@ impl<T: BlockAsPageCacheBackend> PageCacheBackend for T {
         res
     }
 
+    #[cfg(any(feature = "filesystems_extra", ktest))]
     fn write_pages_async(&self, pages: PageRun<'_>, io_batch: &mut IoBatch) -> Result<()> {
         self.submit_write_page_run(pages, io_batch)
     }
@@ -733,12 +746,14 @@ fn prepare_read_page(locked_page: LockedCachePage) -> (BioSegment, BioCompleteFn
     (bio_segment, complete_fn)
 }
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 fn prepare_write_page(locked_page: LockedCachePage) -> (BioSegment, BioCompleteFn) {
     let (bio_segment, page) = prepare_write_page_segment(locked_page);
     let complete_fn = Box::new(move |status| complete_write_page(&page, status));
     (bio_segment, complete_fn)
 }
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 fn prepare_write_page_segment(locked_page: LockedCachePage) -> (BioSegment, CachePage) {
     locked_page.wait_until_finish_writing_back();
 
@@ -754,6 +769,7 @@ fn prepare_write_page_segment(locked_page: LockedCachePage) -> (BioSegment, Cach
     (bio_segment, page)
 }
 
+#[cfg(any(feature = "filesystems_extra", ktest))]
 fn complete_write_page(page: &CachePage, status: BioStatus) {
     page.clear_writing_back();
     if status != BioStatus::Complete {
