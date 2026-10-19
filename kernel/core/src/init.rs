@@ -274,8 +274,7 @@ fn init_in_first_kthread(path_resolver: &PathResolver) {
 }
 
 fn print_banner() {
-    println!("");
-    println!("{}", logo_ascii_art::get_gradient_color_version());
+    info!("{}", logo_ascii_art::get_gradient_color_version());
 }
 
 static BOOT_SOURCE: AtomicU8 = AtomicU8::new(BootSource::Initramfs as u8);
