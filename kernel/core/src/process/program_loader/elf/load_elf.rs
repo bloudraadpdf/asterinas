@@ -81,8 +81,14 @@ pub(crate) fn load_elf_to_vmar(
         aux_vec.set(AuxKey::AT_SYSINFO_EHDR, vdso_text_base as u64);
     }
 
-    vmar.process_vm()
-        .map_and_write_init_stack(vmar, argv, envp, aux_vec, execfn)?;
+    vmar.process_vm().map_and_write_init_stack(
+        vmar,
+        argv,
+        envp,
+        aux_vec,
+        execfn,
+        elf_headers.stack_perms(),
+    )?;
     vmar.process_vm().map_and_init_heap(
         vmar,
         elf_mapped_info.data_range.len(),
