@@ -6,7 +6,7 @@ use super::{
     AsPosixThread, ThreadLocal,
     futex::{FutexVisibility, futex_wake},
     ptrace::PtraceEvent,
-    robust_list::wake_robust_futex,
+    robust_list::{RobustListHead, wake_robust_futex},
 };
 use crate::{
     context::current_userspace,
@@ -18,7 +18,7 @@ use crate::{
         signal::signals::kernel::KernelSignal,
         task_set::TaskSet,
     },
-    thread::{AsThread, Tid},
+    thread::AsThread,
 };
 
 /// Exits the current POSIX thread.
@@ -98,9 +98,9 @@ fn exit_internal(
         tracer.process().children_wait_queue().wake_all();
     }
 
-    wake_clear_ctid(thread_local);
+    wake_robust_list(posix_thread);
 
-    wake_robust_list(thread_local, posix_thread.namespace_tid());
+    wake_clear_ctid(thread_local);
 
     // According to Linux behavior, the main thread shouldn't be removed from the table until the
     // process is reaped by its parent.
@@ -161,14 +161,20 @@ fn wake_clear_ctid(thread_local: &ThreadLocal) {
 /// Walks the robust futex list, marking futex dead and waking waiters.
 ///
 /// This corresponds to Linux's `exit_robust_list`. Errors are silently ignored.
-fn wake_robust_list(thread_local: &ThreadLocal, tid: Tid) {
-    let list_head = match thread_local.robust_list().borrow_mut().take() {
-        Some(robust_list_head) => robust_list_head,
-        None => return,
+fn wake_robust_list(posix_thread: &super::PosixThread) {
+    let head_addr = posix_thread
+        .robust_list()
+        .swap(0, core::sync::atomic::Ordering::Relaxed);
+    if head_addr == 0 {
+        return;
+    }
+    let Ok(list_head) = current_userspace!().read_val::<RobustListHead>(head_addr) else {
+        return;
     };
+    let tid = posix_thread.namespace_tid();
 
     debug!("exit: wake up the robust list: {:?}", list_head);
-    for futex_addr in list_head.futexes() {
+    for futex_addr in list_head.futexes(head_addr) {
         if let Err(err) = wake_robust_futex(futex_addr, tid) {
             debug!(
                 "exit: cannot wake the robust futex at {:#x}: {:?}",

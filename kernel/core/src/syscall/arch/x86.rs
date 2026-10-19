@@ -137,7 +137,7 @@ use super::{
     sendto::sys_sendto,
     set_ioprio::sys_ioprio_set,
     set_priority::sys_set_priority,
-    set_robust_list::sys_set_robust_list,
+    set_robust_list::{sys_get_robust_list, sys_set_robust_list},
     set_tid_address::sys_set_tid_address,
     setdomainname::sys_setdomainname,
     setfsgid::sys_setfsgid,
@@ -389,6 +389,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PPOLL = 271            => sys_ppoll(args[..5]);
     SYS_UNSHARE = 272          => sys_unshare(args[..1]);
     SYS_SET_ROBUST_LIST = 273  => sys_set_robust_list(args[..2]);
+    SYS_GET_ROBUST_LIST = 274 => sys_get_robust_list(args[..3]);
     SYS_UTIMENSAT = 280        => sys_utimensat(args[..4]);
     SYS_EPOLL_PWAIT = 281      => sys_epoll_pwait(args[..6]);
     SYS_SIGNALFD = 282         => sys_signalfd(args[..3]);

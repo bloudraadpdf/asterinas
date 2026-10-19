@@ -8,7 +8,7 @@ use ostd::{
     arch::cpu::context::FpuContext, irq::DisabledLocalIrqGuard, sync::RwArc, task::CurrentTask,
 };
 
-use super::{RobustListHead, cpu_sync::CpuSync};
+use super::cpu_sync::CpuSync;
 use crate::{
     fs::{file::file_table::FileTable, thread_info::ThreadFsInfo},
     prelude::*,
@@ -29,10 +29,6 @@ pub(crate) struct ThreadLocal {
     // Virtual memory address regions.
     vmar: RefCell<Option<VmarHandle>>,
     page_fault_disabled: Cell<bool>,
-
-    // Robust futexes.
-    // https://man7.org/linux/man-pages/man2/get_robust_list.2.html
-    robust_list: RefCell<Option<RobustListHead>>,
 
     // Files.
     /// File table.
@@ -75,7 +71,6 @@ impl ThreadLocal {
             clear_child_tid: Cell::new(clear_child_tid),
             vmar: RefCell::new(Some(vmar)),
             page_fault_disabled: Cell::new(false),
-            robust_list: RefCell::new(None),
             file_table: RefCell::new(Some(file_table)),
             fs: RefCell::new(fs),
             supp_user_context,
@@ -136,10 +131,6 @@ impl ThreadLocal {
 
     pub(crate) fn is_page_fault_disabled(&self) -> bool {
         self.page_fault_disabled.get()
-    }
-
-    pub(crate) fn robust_list(&self) -> &RefCell<Option<RobustListHead>> {
-        &self.robust_list
     }
 
     pub(crate) fn borrow_file_table(&self) -> FileTableRef<'_> {
