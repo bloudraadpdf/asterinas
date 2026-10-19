@@ -82,7 +82,7 @@ impl FileOps for MapsFileHandle {
         let mut printer = VmPrinter::new_skip(writer, offset);
 
         let Some(process) = self.0.process() else {
-            return_errno_with_message!(Errno::ESRCH, "the process does not exist");
+            return Ok(0);
         };
         let vmar_guard = process.lock_vmar();
         if !vmar_guard.is_same_as(&self.1) {
