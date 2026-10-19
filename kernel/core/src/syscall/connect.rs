@@ -22,11 +22,7 @@ pub(super) fn sys_connect(
 
     socket
         .connect(socket_addr)
-        .map_err(|err| match err.error() {
-            // FIXME: `connect` should not be restarted if a timeout has been set on the socket using `setsockopt`.
-            Errno::EINTR => Error::new(Errno::ERESTARTSYS),
-            _ => err,
-        })?;
+        .map_err(|error| socket.restart_send_error(error))?;
 
     Ok(SyscallReturn::Return(0))
 }

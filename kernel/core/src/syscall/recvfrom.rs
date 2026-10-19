@@ -32,11 +32,7 @@ pub(super) fn sys_recvfrom(
     let (output, message_header) = {
         socket
             .recvmsg(&mut writers, flags)
-            .map_err(|err| match err.error() {
-                // FIXME: `recvfrom` should not be restarted if a timeout has been set on the socket using `setsockopt`.
-                Errno::EINTR => Error::new(Errno::ERESTARTSYS),
-                _ => err,
-            })?
+            .map_err(|error| socket.restart_recv_error(error))?
     };
 
     if let Some(socket_addr) = message_header.addr()

@@ -161,6 +161,14 @@ fn do_sys_writev(
         match file.write(reader) {
             Ok(write_len) => total_len += write_len,
             Err(_) if total_len > 0 => break,
+            Err(err)
+                if err.error() == Errno::EINTR
+                    && file
+                        .as_socket()
+                        .is_none_or(|socket| socket.send_timeout().is_none()) =>
+            {
+                return_errno!(Errno::ERESTARTSYS);
+            }
             Err(err) => return Err(err),
         }
         if reader.has_remain() {
