@@ -146,7 +146,9 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 ./overlayfs/sparse_copyup_consistency
 ./overlayfs/xino_dino_identity
 
+./procfs/deleted_paths
 ./procfs/dentry_cache
+./procfs/directory_inodes
 ./procfs/fd
 ./procfs/getdents
 ./procfs/mountstats
@@ -173,4 +175,5 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 
 ./tmpfile/tmpfile
 
+./utimensat/directory_atime
 ./utimensat/utimensat

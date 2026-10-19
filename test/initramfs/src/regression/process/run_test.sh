@@ -26,6 +26,14 @@ fi
 
 ./exit/exit_code
 ./exit/exit_procfs
+./exit/exec_arguments
+./exit/exec_clear_tid
+./exit/nofile
+./exit/nofile_rights
+./exit/proc_link_lifetime
+./exit/proc_path_mode
+./exit/robust_owner
+./exit/stack_exec
 
 [ "$(uname -m)" = "x86_64" ] && ./fork/fork
 ./fork_c/fork
@@ -36,6 +44,7 @@ fi
 
 ./personality/personality
 
+./prctl/auxv
 ./prctl/capbset
 ./prctl/no_new_privs
 ./prctl/secure_bits
