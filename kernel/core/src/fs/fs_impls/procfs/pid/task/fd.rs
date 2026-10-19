@@ -8,7 +8,7 @@ use super::TidDirOps;
 use crate::{
     fs::{
         file::{
-            AccessMode, FileLike, InodeType, chmod,
+            AccessMode, FileLike, InodeType, StatusFlags, chmod,
             file_table::{FileDesc, RawFileDesc},
             mkmod,
         },
@@ -62,10 +62,11 @@ impl<T: FdOps> ProcDirOps for FdDirOps<T> {
         };
         let posix_thread = thread.as_posix_thread().unwrap();
 
-        let access_mode = if let Some(file_table) = posix_thread.file_table().lock().as_ref()
+        let (access_mode, status_flags) = if let Some(file_table) =
+            posix_thread.file_table().lock().as_ref()
             && let Ok(file) = file_table.read().get_file(file_desc)
         {
-            file.access_mode()
+            (file.access_mode(), file.status_flags())
         } else {
             return_errno_with_message!(Errno::ENOENT, "the file does not exist");
         };
@@ -74,6 +75,7 @@ impl<T: FdOps> ProcDirOps for FdDirOps<T> {
             self.dir.clone(),
             file_desc,
             access_mode,
+            status_flags,
             this_dir.this_weak().clone(),
         ))
     }
@@ -162,6 +164,7 @@ pub(super) trait FdOps: Send + Sync + 'static {
         tid_dir_ops: TidDirOps,
         file_desc: FileDesc,
         access_mode: AccessMode,
+        status_flags: StatusFlags,
         parent: Weak<dyn Inode>,
     ) -> Arc<dyn Inode>;
 
@@ -179,6 +182,7 @@ pub(super) struct FileSymOps {
     tid_dir_ops: TidDirOps,
     file_desc: FileDesc,
     access_mode: AccessMode,
+    is_path_only: bool,
 }
 
 impl FdOps for FileSymOps {
@@ -188,14 +192,16 @@ impl FdOps for FileSymOps {
         tid_dir_ops: TidDirOps,
         file_desc: FileDesc,
         access_mode: AccessMode,
+        status_flags: StatusFlags,
         parent: Weak<dyn Inode>,
     ) -> Arc<dyn Inode> {
         // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/fs/proc/fd.c#L127-L141>
+        let is_path_only = status_flags.contains(StatusFlags::O_PATH);
         let mut mode = mkmod!(a=);
-        if access_mode.is_readable() {
+        if !is_path_only && access_mode.is_readable() {
             mode = chmod!(mode, u+rx);
         }
-        if access_mode.is_writable() {
+        if !is_path_only && access_mode.is_writable() {
             mode = chmod!(mode, u+wx);
         }
 
@@ -204,6 +210,7 @@ impl FdOps for FileSymOps {
                 tid_dir_ops,
                 file_desc,
                 access_mode,
+                is_path_only,
             },
             parent,
             mode,
@@ -222,6 +229,7 @@ impl FdOps for FileSymOps {
         // We'll treat the old entry as valid and reuse it if the access mode is the same,
         // even if the file is different.
         self.access_mode == correspond_file.access_mode()
+            && self.is_path_only == correspond_file.status_flags().contains(StatusFlags::O_PATH)
     }
 
     fn ref_from_inode(inode: &Self::NodeType) -> &Self {
@@ -266,6 +274,7 @@ impl FdOps for FileInfoOps {
         tid_dir_ops: TidDirOps,
         file_desc: FileDesc,
         _access_mode: AccessMode,
+        _status_flags: StatusFlags,
         parent: Weak<dyn Inode>,
     ) -> Arc<dyn Inode> {
         ProcFile::new(
