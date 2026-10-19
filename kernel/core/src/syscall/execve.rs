@@ -116,15 +116,16 @@ fn lookup_and_open_executable_file(
             false
         };
 
-        if is_cloexec {
-            ShebangScriptPath::Inaccessible
+        let path = if filename.is_empty() {
+            format!("/dev/fd/{dfd}")
         } else {
-            let path = if filename.is_empty() {
-                format!("/dev/fd/{dfd}")
-            } else {
-                format!("/dev/fd/{dfd}/{filename}")
-            };
-            ShebangScriptPath::Accessible(CString::new(path).unwrap())
+            format!("/dev/fd/{dfd}/{filename}")
+        };
+        let path = CString::new(path).unwrap();
+        if is_cloexec {
+            ShebangScriptPath::Inaccessible(path)
+        } else {
+            ShebangScriptPath::Accessible(path)
         }
     };
 

@@ -63,7 +63,7 @@ impl UndetectedExecutable {
         // Reference: <https://elixir.bootlin.com/linux/v6.8/source/fs/binfmt_script.c#L93>
         let script_path = match self.script_path {
             ShebangScriptPath::Accessible(path) => path,
-            ShebangScriptPath::Inaccessible => {
+            ShebangScriptPath::Inaccessible(_) => {
                 return_errno_with_message!(
                     Errno::ENOENT,
                     "the script path is inaccessible after closing close-on-exec file descriptors"
@@ -114,7 +114,7 @@ pub(crate) enum ShebangScriptPath {
     /// A path accessible to the interpreter after exec.
     Accessible(CString),
     /// A path inaccessible to the interpreter after exec.
-    Inaccessible,
+    Inaccessible(CString),
 }
 
 /// Represents an executable file that is ready to be loaded into memory and executed.
@@ -124,6 +124,7 @@ pub(crate) enum ShebangScriptPath {
 pub(super) struct ProgramToLoad {
     elf_file: Arc<dyn FileLike>,
     elf_headers: ElfHeaders,
+    execfn: CString,
     argv: Vec<CString>,
     envp: Vec<CString>,
 }
@@ -141,6 +142,11 @@ impl ProgramToLoad {
         //
         // If the interpreter is a shebang, then recursion will be triggered. If it loops, we
         // should fail. We follow the same limit as Linux.
+        let execfn = match &executable.script_path {
+            ShebangScriptPath::Accessible(path) | ShebangScriptPath::Inaccessible(path) => {
+                path.clone()
+            }
+        };
         let mut recursive_limit = 5;
 
         let (elf_file, elf_headers) = loop {
@@ -182,6 +188,7 @@ impl ProgramToLoad {
         Ok(Self {
             elf_file,
             elf_headers,
+            execfn,
             argv,
             envp,
         })
@@ -205,6 +212,7 @@ impl ProgramToLoad {
             self.elf_file,
             path_resolver,
             self.elf_headers,
+            self.execfn,
             self.argv,
             self.envp,
         )

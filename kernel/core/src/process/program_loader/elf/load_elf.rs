@@ -57,6 +57,7 @@ pub(crate) fn load_elf_to_vmar(
     elf_file: Arc<dyn FileLike>,
     path_resolver: &PathResolver,
     elf_headers: ElfHeaders,
+    execfn: CString,
     argv: Vec<CString>,
     envp: Vec<CString>,
 ) -> Result<ElfLoadInfo> {
@@ -81,7 +82,7 @@ pub(crate) fn load_elf_to_vmar(
     }
 
     vmar.process_vm()
-        .map_and_write_init_stack(vmar, argv, envp, aux_vec)?;
+        .map_and_write_init_stack(vmar, argv, envp, aux_vec, execfn)?;
     vmar.process_vm().map_and_init_heap(
         vmar,
         elf_mapped_info.data_range.len(),
