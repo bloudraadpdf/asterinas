@@ -15,9 +15,17 @@ pub(crate) struct SystemTime(PrimitiveDateTime);
 static WALL_OFFSET: Once<SpinLock<Duration>> = Once::new();
 
 pub(super) fn init() {
-    let start_time = convert_system_time(read_start_time()).unwrap();
-    WALL_OFFSET
-        .call_once(|| SpinLock::new(start_time.duration_since(&SystemTime::UNIX_EPOCH).unwrap()));
+    #[cfg(target_arch = "x86_64")]
+    let kvm_offset = ostd::arch::read_kvm_realtime()
+        .and_then(|realtime| realtime.checked_sub(read_monotonic_time()));
+    #[cfg(not(target_arch = "x86_64"))]
+    let kvm_offset = None;
+
+    let offset = kvm_offset.unwrap_or_else(|| {
+        let start_time = convert_system_time(read_start_time()).unwrap();
+        start_time.duration_since(&SystemTime::UNIX_EPOCH).unwrap()
+    });
+    WALL_OFFSET.call_once(|| SpinLock::new(offset));
 }
 
 impl SystemTime {
