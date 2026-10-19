@@ -101,3 +101,45 @@ FN_TEST(timed_receive_is_not_restarted)
 	}
 }
 END_TEST()
+
+FN_TEST(accept_inherits_at_connection_time)
+{
+	int listener = TEST_SUCC(socket(AF_INET, SOCK_STREAM, 0));
+	int client = TEST_SUCC(socket(AF_INET, SOCK_STREAM, 0));
+	struct sockaddr_in address = {
+		.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)
+	};
+	TEST_SUCC(bind(listener, (struct sockaddr *)&address, sizeof(address)));
+	socklen_t length = sizeof(address);
+	TEST_SUCC(getsockname(listener, (struct sockaddr *)&address, &length));
+	TEST_SUCC(listen(listener, 1));
+	struct timeval timeout = { .tv_sec = 1 };
+	TEST_SUCC(setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+			     sizeof(timeout)));
+	TEST_SUCC(setsockopt(listener, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+			     sizeof(timeout)));
+	TEST_SUCC(
+		connect(client, (struct sockaddr *)&address, sizeof(address)));
+	timeout.tv_sec = 2;
+	TEST_SUCC(setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+			     sizeof(timeout)));
+	TEST_SUCC(setsockopt(listener, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+			     sizeof(timeout)));
+	int accepted = TEST_SUCC(accept(listener, NULL, NULL));
+	const int names[] = { SO_RCVTIMEO, SO_SNDTIMEO };
+	for (unsigned i = 0; i < sizeof(names) / sizeof(*names); ++i) {
+		length = sizeof(timeout);
+		TEST_SUCC(getsockopt(accepted, SOL_SOCKET, names[i], &timeout,
+				     &length));
+		TEST_RES(timeout.tv_sec,
+			 timeout.tv_sec == 1 && timeout.tv_usec == 0);
+		TEST_SUCC(getsockopt(listener, SOL_SOCKET, names[i], &timeout,
+				     &length));
+		TEST_RES(timeout.tv_sec,
+			 timeout.tv_sec == 2 && timeout.tv_usec == 0);
+	}
+	TEST_SUCC(close(accepted));
+	TEST_SUCC(close(client));
+	TEST_SUCC(close(listener));
+}
+END_TEST()

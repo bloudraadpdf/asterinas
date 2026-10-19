@@ -64,7 +64,7 @@ pub(crate) struct StreamSocket {
     state: RwLock<Takeable<State>>,
     family: IpAddressFamily,
     options: RwLock<OptionSet>,
-    timeouts: SocketTimeouts,
+    timeouts: Arc<SocketTimeouts>,
 
     pollee: Pollee,
     common: FileCommon,
@@ -113,7 +113,7 @@ impl StreamSocket {
             state: RwLock::new(Takeable::new(State::Init(init_stream))),
             family,
             options: RwLock::new(OptionSet::new()),
-            timeouts: SocketTimeouts::new(),
+            timeouts: Arc::new(SocketTimeouts::new()),
             pollee: Pollee::new(),
             common: new_socket_common(is_nonblocking),
         })
@@ -123,7 +123,6 @@ impl StreamSocket {
         connected_stream: ConnectedStream,
         family: IpAddressFamily,
         listener_options: &OptionSet,
-        listener_timeouts: &SocketTimeouts,
         is_nonblocking: bool,
     ) -> Arc<Self> {
         let options = connected_stream.raw_with(|raw_tcp_socket| {
@@ -157,14 +156,15 @@ impl StreamSocket {
             options
         });
 
+        let timeouts = Arc::new(connected_stream.accept_timeouts().clone());
         let pollee = Pollee::new();
-        connected_stream.init_observer(StreamObserver::new(pollee.clone()));
+        connected_stream.init_observer(StreamObserver::new(pollee.clone(), timeouts.clone()));
 
         Arc::new(Self {
             state: RwLock::new(Takeable::new(State::Connected(connected_stream))),
             family,
             options: RwLock::new(options),
-            timeouts: listener_timeouts.clone(),
+            timeouts,
             pollee,
             common: new_socket_common(is_nonblocking),
         })
@@ -271,7 +271,7 @@ impl StreamSocket {
                 self.family,
                 &raw_option,
                 options.socket.reuse_addr(),
-                StreamObserver::new(self.pollee.clone()),
+                StreamObserver::new(self.pollee.clone(), self.timeouts.clone()),
             ) {
                 Ok(connecting_stream) => {
                     let iface_to_poll = connecting_stream.iface().clone();
@@ -340,7 +340,6 @@ impl StreamSocket {
                 connected_stream,
                 self.family,
                 &listener_options,
-                &self.timeouts,
                 is_nonblocking,
             );
             (accepted_socket as _, remote_endpoint.into())
@@ -526,7 +525,7 @@ impl Socket for StreamSocket {
                 options.socket.reuse_addr(),
                 backlog,
                 &raw_option,
-                StreamObserver::new(self.pollee.clone()),
+                StreamObserver::new(self.pollee.clone(), self.timeouts.clone()),
             ) {
                 Ok(listen_stream) => listen_stream,
                 Err((err, init_stream)) => {
@@ -683,7 +682,7 @@ impl Socket for StreamSocket {
         // Deal with socket-level options
         match options
             .socket
-            .get_option(option, &(state.as_ref(), &self.timeouts))
+            .get_option(option, &(state.as_ref(), self.timeouts.as_ref()))
         {
             Err(err) if err.error() == Errno::ENOPROTOOPT => (),
             res => return res,
@@ -771,7 +770,7 @@ impl Socket for StreamSocket {
         // Deal with socket-level options
         let socket_option_result = {
             let OptionSet { socket, tcp, .. } = &mut *options;
-            socket.set_option(option, &(state.as_ref(), &*tcp, &self.timeouts))
+            socket.set_option(option, &(state.as_ref(), &*tcp, self.timeouts.as_ref()))
         };
 
         let need_iface_poll = match socket_option_result {

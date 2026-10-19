@@ -48,7 +48,7 @@ pub trait Inner<E: Ext> {
 pub struct SocketBg<T: Inner<E>, E: Ext> {
     pub(super) bound: T::BoundPort,
     pub(super) inner: T,
-    observer: Once<T::Observer>,
+    pub(super) observer: Once<T::Observer>,
 }
 
 impl<T: Inner<E>, E: Ext> Drop for Socket<T, E> {
