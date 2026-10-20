@@ -257,15 +257,19 @@ impl PageCache {
         let vmo = &self.0;
         assert!(vmo.flags.contains(VmoFlags::RESIZABLE));
 
-        if new_file_size < old_file_size && !new_file_size.is_multiple_of(PAGE_SIZE) {
-            let fill_zero_end = old_file_size.min(new_file_size.align_up(PAGE_SIZE));
+        if new_file_size <= old_file_size && !new_file_size.is_multiple_of(PAGE_SIZE) {
+            let fill_zero_end = if vmo.backend.is_none() {
+                new_file_size.align_up(PAGE_SIZE)
+            } else {
+                old_file_size.min(new_file_size.align_up(PAGE_SIZE))
+            };
             self.fill_zeros(new_file_size..fill_zero_end)?;
         } else if new_file_size > old_file_size && !old_file_size.is_multiple_of(PAGE_SIZE) {
             let fill_zero_end = new_file_size.min(old_file_size.align_up(PAGE_SIZE));
             self.fill_zeros(old_file_size..fill_zero_end)?;
         }
 
-        let rmap = if new_file_size < old_file_size {
+        let rmap = if new_file_size <= old_file_size {
             Some(vmo.rmap.lock())
         } else {
             None
@@ -274,21 +278,45 @@ impl PageCache {
         let new_cache_size = new_file_size.align_up(PAGE_SIZE);
         let locked_pages = vmo.pages.lock();
         let old_cache_size = vmo.size();
-        if new_cache_size == old_cache_size {
+        if new_cache_size == old_cache_size && (rmap.is_none() || vmo.backend.is_some()) {
             return Ok(());
         }
 
         vmo.size.store(new_cache_size, Ordering::Release);
 
         if let Some(locked_rmap) = rmap {
-            let decommit_range = new_cache_size..old_cache_size;
             if let Some(backed_vmo) = vmo.as_backed_vmo() {
+                let decommit_range = new_cache_size..old_cache_size;
                 backed_vmo.decommit_pages(locked_rmap, locked_pages, &decommit_range)?;
             } else {
+                // Keep-size preallocation can own pages beyond the accessible VMO range.
+                let decommit_range = new_cache_size..usize::MAX.align_down(PAGE_SIZE);
                 vmo.decommit_anon_pages(locked_rmap, locked_pages, decommit_range)?;
             }
         }
 
+        Ok(())
+    }
+
+    /// Allocates anonymous pages without changing the accessible file size.
+    pub(crate) fn preallocate(&mut self, range: Range<usize>) -> Result<()> {
+        self.check_anonymous_range(&range)?;
+        self.0.preallocate_anonymous(range)
+    }
+
+    /// Releases full anonymous pages and zeroes partial pages in a hole.
+    pub(crate) fn punch_hole(&mut self, range: Range<usize>) -> Result<()> {
+        self.check_anonymous_range(&range)?;
+        self.0.punch_anonymous(range)
+    }
+
+    fn check_anonymous_range(&self, range: &Range<usize>) -> Result<()> {
+        if self.0.backend.is_some() {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        if range.start >= range.end || range.end > usize::MAX.align_down(PAGE_SIZE) {
+            return_errno!(Errno::EINVAL);
+        }
         Ok(())
     }
 

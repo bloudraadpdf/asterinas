@@ -17,6 +17,20 @@ use crate::{prelude::*, thread::kernel_thread::ThreadOptions};
 mod utils;
 mod writeback;
 
+#[ktest]
+fn resident_count_tracks_backend_eviction_and_truncation() {
+    let backend = MockPageCacheBackend::new(2);
+    let mut cache = new_backend_page_cache(&backend, 2);
+    assert_eq!(cache.as_vmo().committed_pages(), 0);
+    assert_eq!(cache.read_val::<u8>(0).unwrap(), 0);
+    assert_eq!(cache.read_val::<u8>(PAGE_SIZE).unwrap(), 0);
+    assert_eq!(cache.as_vmo().committed_pages(), 2);
+    cache.evict_range(0..PAGE_SIZE).unwrap();
+    assert_eq!(cache.as_vmo().committed_pages(), 1);
+    cache.resize(0, 2 * PAGE_SIZE).unwrap();
+    assert_eq!(cache.as_vmo().committed_pages(), 0);
+}
+
 /// Creates a page cache with `num_pages` backend pages for test scenarios.
 fn new_backend_page_cache(backend: &Arc<MockPageCacheBackend>, num_pages: usize) -> PageCache {
     let backend_dyn: Arc<dyn PageCacheBackend> = backend.clone();
@@ -305,8 +319,12 @@ fn concurrent_commit_and_truncate() {
         vmo.commit_on(1, VmoMapMode::SharedRead)
             .unwrap_err()
             .error(),
-        Errno::EINVAL
+        Errno::ENXIO
     );
+    assert!(matches!(
+        vmo.try_commit_page(PAGE_SIZE, VmoMapMode::SharedRead),
+        Err(VmoCommitError::Err(error)) if error.error() == Errno::ENXIO
+    ));
 
     let mut read_buffer = vec![0; PAGE_SIZE];
     page_cache

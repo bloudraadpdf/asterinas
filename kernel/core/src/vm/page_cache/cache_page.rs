@@ -89,6 +89,8 @@ pub(crate) struct CachePageMeta {
     /// cleared without the page lock only from the BIO completion callback after
     /// the VMO writeback path has handed off the writeback state.
     is_writing_back: AtomicBool,
+    /// An unfinished preallocation may remove this page until a user commits it.
+    preallocation_pending: AtomicBool,
     _charge: SpinLock<Option<QuotaCharge>>,
     // TODO: Add a reverse mapping from the page to VMO for eviction.
 }
@@ -99,6 +101,7 @@ impl Default for CachePageMeta {
             state: AtomicPageState::new(PageState::Uninit),
             lock: AtomicBool::new(false),
             is_writing_back: AtomicBool::new(false),
+            preallocation_pending: AtomicBool::new(false),
             _charge: SpinLock::new(None),
         }
     }
@@ -177,6 +180,26 @@ pub(crate) trait CachePageExt: Sized {
             .zeroed(true)
             .alloc_frame_with(meta)?;
         Ok(page)
+    }
+
+    fn alloc_preallocated(charge: Option<QuotaCharge>) -> Result<CachePage> {
+        let page = Self::alloc_zero(charge)?;
+        page.metadata()
+            .preallocation_pending
+            .store(true, Ordering::Relaxed);
+        Ok(page)
+    }
+
+    fn preallocation_pending(&self) -> bool {
+        self.metadata()
+            .preallocation_pending
+            .load(Ordering::Relaxed)
+    }
+
+    fn finish_preallocation(&self) {
+        self.metadata()
+            .preallocation_pending
+            .store(false, Ordering::Relaxed);
     }
 
     /// Releases a reservation after removal from the VMO and its mappings.

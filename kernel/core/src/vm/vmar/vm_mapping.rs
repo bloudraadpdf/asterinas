@@ -705,29 +705,22 @@ impl VmMapping {
         vm_space: &VmSpace,
         page_aligned_addr: Vaddr,
         required_perms: VmPerms,
-        mut rss_delta: &mut RssDelta,
+        rss_delta: &mut RssDelta,
     ) -> Result<()> {
+        self.handle_single_page_fault(vm_space, page_aligned_addr, required_perms, rss_delta)?;
+
         const SURROUNDING_PAGE_NUM: usize = 16;
         const SURROUNDING_PAGE_ADDR_MASK: usize = !(SURROUNDING_PAGE_NUM * PAGE_SIZE - 1);
-
         let vmo = self.vmo().unwrap();
         let around_page_addr = page_aligned_addr & SURROUNDING_PAGE_ADDR_MASK;
         let size = min(vmo.valid_size(), self.map_size.get());
-        let mut start_addr = max(around_page_addr, self.map_to_addr);
+        let start_addr = max(around_page_addr, self.map_to_addr);
         let end_addr = min(
             start_addr + SURROUNDING_PAGE_NUM * PAGE_SIZE,
             self.map_to_addr + size,
         );
-
-        // The page fault address falls outside the VMO bounds.
-        // Only a single page fault is handled in this situation.
         if end_addr <= page_aligned_addr {
-            return self.handle_single_page_fault(
-                vm_space,
-                page_aligned_addr,
-                required_perms,
-                rss_delta,
-            );
+            return Ok(());
         }
 
         let vm_perms = self.perms - VmPerms::WRITE;
@@ -736,45 +729,24 @@ impl VmMapping {
         } else {
             VmoMapMode::SharedRead
         };
-
-        'retry: loop {
-            let preempt_guard = disable_preempt();
-            let mut cursor = vm_space.cursor_mut(&preempt_guard, &(start_addr..end_addr))?;
-
-            let rss_delta_ref = &mut rss_delta;
-            let operate =
-                move |commit_fn: &mut dyn FnMut() -> Result<(usize, CachePage), VmoCommitError>| {
-                    if let (_, None) = cursor.query().unwrap() {
-                        // We regard all the surrounding pages as accessed, no matter
-                        // if it is really so. Then the hardware won't bother to update
-                        // the accessed bit of the page table on following accesses.
-                        let page_flags = PageFlags::from(vm_perms) | PageFlags::ACCESSED;
-                        let page_prop = PageProperty::new_user(page_flags, CachePolicy::Writeback);
-                        let (_, frame) = commit_fn()?;
-                        cursor.map(frame.into(), page_prop);
-                        rss_delta_ref.add(self.rss_type(), 1);
-                    } else {
-                        let next_addr = cursor.virt_addr() + PAGE_SIZE;
-                        if next_addr < end_addr {
-                            let _ = cursor.jump(next_addr);
-                        }
-                    }
-                    Ok(())
-                };
-
-            let start_offset = start_addr - self.map_to_addr;
-            let end_offset = end_addr - self.map_to_addr;
-            match vmo.try_operate_on_range(&(start_offset..end_offset), operate, mode) {
-                Ok(_) => return Ok(()),
-                Err(err) => {
-                    let index = err.pending_index()?;
-                    drop(preempt_guard);
-                    vmo.commit_on(index, mode)?;
-                    start_addr = (index * PAGE_SIZE - vmo.offset()) + self.map_to_addr;
-                    continue 'retry;
+        let preempt_guard = disable_preempt();
+        let mut cursor = vm_space.cursor_mut(&preempt_guard, &(start_addr..end_addr))?;
+        let range = start_addr - self.map_to_addr..end_addr - self.map_to_addr;
+        vmo.for_each_resident_page(
+            &range,
+            |index, frame| {
+                let address = self.map_to_addr + index * PAGE_SIZE - vmo.offset();
+                cursor.jump(address)?;
+                if let (_, None) = cursor.query().unwrap() {
+                    let page_flags = PageFlags::from(vm_perms) | PageFlags::ACCESSED;
+                    let page_prop = PageProperty::new_user(page_flags, CachePolicy::Writeback);
+                    cursor.map(frame.into(), page_prop);
+                    rss_delta.add(self.rss_type(), 1);
                 }
-            }
-        }
+                Ok(())
+            },
+            mode,
+        )
     }
 }
 
@@ -1057,26 +1029,20 @@ impl MappedVmo {
         self.vmo.commit_on(page_idx, map_mode)
     }
 
-    /// Traverses the indices within a specified range of a VMO sequentially.
+    /// Visits resident pages without allocating or loading missing neighbors.
     ///
-    /// For each index position, you have the option to commit the page as well as
-    /// perform other operations.
-    ///
-    /// Once a commit operation needs to perform I/O, it will return a
-    /// [`VmoCommitError::NeedIo`].
-    fn try_operate_on_range<F>(
+    /// The page-table lock must be held while `operate` maps each page.
+    fn for_each_resident_page<F>(
         &self,
         range: &Range<usize>,
         operate: F,
         map_mode: VmoMapMode,
-    ) -> Result<(), VmoCommitError>
+    ) -> Result<()>
     where
-        F: FnMut(
-            &mut dyn FnMut() -> Result<(usize, CachePage), VmoCommitError>,
-        ) -> Result<(), VmoCommitError>,
+        F: FnMut(usize, CachePage) -> Result<()>,
     {
         let range = self.offset + range.start..self.offset + range.end;
-        self.vmo.try_operate_on_range(&range, operate, map_mode)
+        self.vmo.for_each_resident_page(&range, operate, map_mode)
     }
 
     /// Gets a reference to the underlying VMO.

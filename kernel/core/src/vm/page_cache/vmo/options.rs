@@ -133,6 +133,11 @@ fn alloc_vmo(
 ) -> Result<Vmo> {
     let size = size.align_up(PAGE_SIZE);
     let pages = committed_pages_if_continuous(flags, size)?;
+    let committed_pages = if flags.contains(VmoFlags::CONTIGUOUS) {
+        size / PAGE_SIZE
+    } else {
+        0
+    };
     let writable_mapping_status = WritableMappingStatus::default();
     let rmap = Rmap::new();
     Ok(Vmo {
@@ -140,6 +145,7 @@ fn alloc_vmo(
         flags,
         quota,
         pages,
+        committed_pages: AtomicUsize::new(committed_pages),
         size: AtomicUsize::new(size),
         writable_mapping_status,
         rmap: Mutex::new(rmap),
@@ -178,11 +184,13 @@ mod test {
     fn alloc_vmo() {
         let vmo = VmoOptions::new(PAGE_SIZE).alloc().unwrap();
         assert_eq!(vmo.size(), PAGE_SIZE);
+        assert_eq!(vmo.committed_pages(), 0);
         // the vmo is zeroed once allocated
         let mut read_buffer = [0; size_of::<usize>()];
         let mut writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
         vmo.read(0, &mut writer).unwrap();
         assert_eq!(usize::from_ne_bytes(read_buffer), 0);
+        assert_eq!(vmo.committed_pages(), 1);
     }
 
     #[ktest]
@@ -192,6 +200,7 @@ mod test {
             .alloc()
             .unwrap();
         assert_eq!(vmo.size(), 10 * PAGE_SIZE);
+        assert_eq!(vmo.committed_pages(), 10);
     }
 
     #[ktest]
@@ -228,7 +237,71 @@ mod test {
         assert_eq!(page_cache.size(), 2 * PAGE_SIZE);
         assert_eq!(page_cache.read_val::<u8>(10).unwrap(), 42);
         page_cache.write_val(PAGE_SIZE + 20, &123u8).unwrap();
+        assert_eq!(page_cache.as_vmo().committed_pages(), 2);
         page_cache.resize(PAGE_SIZE, page_cache.size()).unwrap();
+        assert_eq!(page_cache.as_vmo().committed_pages(), 1);
         assert_eq!(page_cache.read_val::<u8>(10).unwrap(), 42);
+    }
+
+    #[ktest]
+    fn preallocation_preserves_eof_and_same_size_truncate_releases_it() {
+        use crate::vm::page_cache::{PageCache, VmoCommitError, VmoMapMode};
+
+        let mut cache = PageCache::new_anon(PAGE_SIZE, None).unwrap();
+        cache.preallocate(2 * PAGE_SIZE..4 * PAGE_SIZE).unwrap();
+        assert_eq!(cache.as_vmo().size(), PAGE_SIZE);
+        assert_eq!(cache.as_vmo().committed_pages(), 2);
+        assert!(matches!(
+            cache
+                .as_vmo()
+                .try_commit_page(2 * PAGE_SIZE, VmoMapMode::SharedRead),
+            Err(VmoCommitError::Err(error)) if error.error() == Errno::ENXIO
+        ));
+        assert_eq!(
+            cache
+                .as_vmo()
+                .commit_on(2, VmoMapMode::SharedRead)
+                .unwrap_err()
+                .error(),
+            Errno::ENXIO
+        );
+        assert_eq!(cache.as_vmo().committed_pages(), 2);
+        cache.resize(PAGE_SIZE, PAGE_SIZE).unwrap();
+        assert_eq!(cache.as_vmo().committed_pages(), 0);
+    }
+
+    #[ktest]
+    fn failed_preallocation_releases_only_new_pages() {
+        use crate::vm::page_cache::PageCache;
+
+        let quota = Quota::new(2);
+        let mut cache = PageCache::new_anon(PAGE_SIZE, Some(quota.clone())).unwrap();
+        cache.write_val(0, &42u8).unwrap();
+        let error = cache.preallocate(0..3 * PAGE_SIZE).unwrap_err();
+        assert_eq!(error.error(), Errno::ENOSPC);
+        assert_eq!(cache.as_vmo().committed_pages(), 1);
+        assert_eq!(quota.remaining(), 1);
+        assert_eq!(cache.read_val::<u8>(0).unwrap(), 42);
+    }
+    #[ktest]
+    fn resident_page_walk_does_not_allocate_sparse_neighbors() {
+        let vmo = VmoOptions::new_anon(4 * PAGE_SIZE)
+            .quota(Some(Quota::new(1)))
+            .alloc()
+            .unwrap();
+        vmo.commit_on(1, super::super::VmoMapMode::SharedRead)
+            .unwrap();
+        let mut visited = Vec::new();
+        vmo.for_each_resident_page(
+            &(0..4 * PAGE_SIZE),
+            |index, _| {
+                visited.push(index);
+                Ok(())
+            },
+            super::super::VmoMapMode::SharedRead,
+        )
+        .unwrap();
+        assert_eq!(visited.as_slice(), &[1]);
+        assert_eq!(vmo.committed_pages(), 1);
     }
 }
