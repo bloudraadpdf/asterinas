@@ -30,7 +30,7 @@ pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception:
                     .enqueue_signal(Box::new(KernelSignal::new_kill()));
                 return;
             }
-            Err(error) if error.error() == Errno::ENOSPC => {
+            Err(error) if matches!(error.error(), Errno::ENXIO | Errno::ENOSPC) => {
                 force_fault_signal(
                     FaultSignal::new(SIGBUS, BUS_ADRERR, Some(page_fault_info.address() as u64)),
                     ctx,

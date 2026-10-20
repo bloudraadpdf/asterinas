@@ -181,3 +181,5 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 
 ./utimensat/directory_atime
 ./utimensat/utimensat
+
+./mount/sparse_blocks

@@ -591,6 +591,38 @@ impl DirEntry {
 }
 
 impl RamInode {
+    fn metadata_snapshot(
+        &self,
+        inode_metadata: &InodeMeta,
+        page_cache: Option<&PageCache>,
+    ) -> Metadata {
+        let rdev = self.inner.device_id().unwrap_or(0);
+        Metadata {
+            ino: self.ino as _,
+            size: inode_metadata.size,
+            optimal_block_size: BLOCK_SIZE,
+            nr_sectors_allocated: match page_cache {
+                Some(cache) => cache.as_vmo().committed_pages() * (PAGE_SIZE / SECTOR_SIZE),
+                None => inode_metadata.nr_sectors_allocated(),
+            },
+            last_access_at: inode_metadata.atime,
+            last_modify_at: inode_metadata.mtime,
+            last_meta_change_at: inode_metadata.ctime,
+            type_: self.typ,
+            mode: inode_metadata.mode,
+            nr_hard_links: inode_metadata.nlinks,
+            uid: inode_metadata.uid,
+            gid: inode_metadata.gid,
+            container_dev_id: self.container_dev_id,
+            self_dev_id: if rdev == 0 {
+                None
+            } else {
+                DeviceId::from_encoded_u64(rdev)
+            },
+            birth_at: None,
+        }
+    }
+
     fn new(
         fs: &Arc<RamFs>,
         make_inner: impl FnOnce(Weak<Self>) -> Inner,
@@ -1059,7 +1091,8 @@ impl RamInode {
         let mut inode_meta = self.metadata.lock();
         let file_size = inode_meta.size;
         if file_size == new_size {
-            return Ok(());
+            drop(inode_meta);
+            return page_cache.resize(new_size, file_size);
         }
         let now = now();
         inode_meta.set_mtime(now);
@@ -1135,7 +1168,6 @@ impl FileOps for RamInode {
                 inode_meta.set_ctime(now);
                 if should_expand_size {
                     inode_meta.size = new_size;
-                    inode_meta.blocks = new_size_aligned / BLOCK_SIZE;
                 }
                 drop(inode_meta);
 
@@ -1551,29 +1583,8 @@ impl Inode for RamInode {
     }
 
     fn metadata(&self) -> Result<Metadata> {
-        let rdev = self.inner.device_id().unwrap_or(0);
-        let inode_metadata = self.metadata.lock();
-        Ok(Metadata {
-            ino: self.ino as _,
-            size: inode_metadata.size,
-            optimal_block_size: BLOCK_SIZE,
-            nr_sectors_allocated: inode_metadata.nr_sectors_allocated(),
-            last_access_at: inode_metadata.atime,
-            last_modify_at: inode_metadata.mtime,
-            last_meta_change_at: inode_metadata.ctime,
-            type_: self.typ,
-            mode: inode_metadata.mode,
-            nr_hard_links: inode_metadata.nlinks,
-            uid: inode_metadata.uid,
-            gid: inode_metadata.gid,
-            container_dev_id: self.container_dev_id,
-            self_dev_id: if rdev == 0 {
-                None
-            } else {
-                DeviceId::from_encoded_u64(rdev)
-            },
-            birth_at: None,
-        })
+        let page_cache = self.inner.as_file().map(|cache| cache.lock());
+        Ok(self.metadata_snapshot(&self.metadata.lock(), page_cache.as_deref()))
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
@@ -1594,27 +1605,25 @@ impl Inode for RamInode {
     }
 
     fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
-        // The support for flags is consistent with Linux
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| Error::new(Errno::EFBIG))?;
+        let mut page_cache = self
+            .inner
+            .as_file()
+            .ok_or_else(|| Error::new(Errno::EINVAL))?
+            .lock();
         match mode {
-            FallocMode::Allocate => {
-                let new_size = offset + len;
-                if new_size > self.size() {
-                    self.resize_impl(new_size)?;
+            FallocMode::Allocate | FallocMode::AllocateKeepSize => {
+                page_cache.preallocate(offset..end)?;
+                let file_size = self.size();
+                if mode == FallocMode::Allocate && end > file_size {
+                    self.metadata.lock().resize(end);
+                    page_cache.resize(end, file_size)?;
                 }
-                Ok(())
-            }
-            FallocMode::AllocateKeepSize => {
-                // Do nothing
-                Ok(())
             }
             FallocMode::PunchHoleKeepSize => {
-                let file_size = self.size();
-                if offset >= file_size {
-                    return Ok(());
-                }
-                let range = offset..file_size.min(offset + len);
-                // TODO: Think of a more light-weight approach
-                self.inner.as_file().unwrap().lock().fill_zeros(range)
+                page_cache.punch_hole(offset..end)?;
             }
             _ => {
                 return_errno_with_message!(
@@ -1623,6 +1632,11 @@ impl Inode for RamInode {
                 );
             }
         }
+        let now = now();
+        let mut metadata = self.metadata.lock();
+        metadata.set_mtime(now);
+        metadata.set_ctime(now);
+        Ok(())
     }
 
     fn extension(&self) -> &Extension {

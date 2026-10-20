@@ -128,6 +128,8 @@ pub struct Vmo {
     pub(super) quota: Option<Arc<Quota>>,
     /// The virtual pages where the VMO resides.
     pub(super) pages: XArray<CachePage>,
+    /// Updated under the page-array lock; readable without scanning the array.
+    pub(super) committed_pages: AtomicUsize,
     /// The size of the VMO.
     ///
     /// This is the page-aligned VMO size, which may differ from the
@@ -332,11 +334,12 @@ impl Vmo {
     fn commit_on_anonymous(&self, page_idx: usize) -> Result<CachePage> {
         let mut locked_pages = self.pages.lock();
         if page_idx >= self.size().div_ceil(PAGE_SIZE) {
-            return_errno_with_message!(Errno::EINVAL, "the offset is outside the VMO");
+            return_errno_with_message!(Errno::ENXIO, "the offset is outside the VMO");
         }
 
         let mut cursor = locked_pages.cursor_mut(page_idx as u64);
         if let Some(page) = cursor.load() {
+            page.finish_preallocation();
             return Ok(page.clone());
         }
 
@@ -347,6 +350,7 @@ impl Vmo {
             .transpose()?;
         let new_page = CachePage::alloc_zero(charge)?;
         cursor.store(new_page.clone());
+        self.committed_pages.fetch_add(1, Ordering::Relaxed);
         Ok(new_page)
     }
 
@@ -379,7 +383,7 @@ impl Vmo {
         let page_idx = offset / PAGE_SIZE;
         if offset >= self.size() {
             return Err(VmoCommitError::Err(Error::with_message(
-                Errno::EINVAL,
+                Errno::ENXIO,
                 "the offset is outside the VMO",
             )));
         }
@@ -403,6 +407,9 @@ impl Vmo {
             return backed_vmo.try_commit_with_cursor(cursor, commit_mode);
         } else if let Some(page) = cursor.load() {
             let index = cursor.index() as usize;
+            if page.preallocation_pending() {
+                return Err(VmoCommitError::NeedIo { index });
+            }
             return Ok((index, page.clone()));
         }
 
@@ -413,41 +420,36 @@ impl Vmo {
         Ok((index, page))
     }
 
-    /// Traverses the indices within a specified range of a VMO sequentially.
+    /// Visits resident pages that can be mapped without allocation or I/O.
     ///
-    /// For each index position, you have the option to commit the page as well as
-    /// perform other operations.
-    ///
-    /// Once a commit operation needs to perform I/O, it will return a
-    /// [`VmoCommitError::NeedIo`].
-    ///
-    /// If the VMO corresponds to a page cache, callers must hold the page table
-    /// lock and insert the committed page atomically to the page table inside
-    /// the operation.
-    pub(crate) fn try_operate_on_range<F>(
+    /// Callers must hold the page-table lock and map each page atomically inside
+    /// `operate`, as with [`Self::try_commit_page`]. Missing, uninitialized, and
+    /// provisionally preallocated pages are skipped.
+    pub(crate) fn for_each_resident_page<F>(
         &self,
         range: &Range<usize>,
         mut operate: F,
         map_mode: VmoMapMode,
-    ) -> Result<(), VmoCommitError>
+    ) -> Result<()>
     where
-        F: FnMut(
-            &mut dyn FnMut() -> Result<(usize, CachePage), VmoCommitError>,
-        ) -> Result<(), VmoCommitError>,
+        F: FnMut(usize, CachePage) -> Result<()>,
     {
-        self.try_operate_on_range_internal(
-            range,
-            |commit_fn| {
-                let mut new_commit_fn = || {
-                    let (idx, page) = commit_fn()?;
-                    map_mode.try_ensure(idx, &page)?;
-                    Ok((idx, page))
-                };
-                operate(&mut new_commit_fn)
-            },
-            // `VmoMapMode::try_ensure` checks if the page has been initialized.
-            CommitMode::Overwrite,
-        )
+        if range.end > self.size() {
+            return_errno_with_message!(Errno::EINVAL, "the range exceeds the VMO size");
+        }
+        let page_range = get_page_idx_range(range);
+        let guard = disable_preempt();
+        let mut cursor = self.pages.cursor(&guard, page_range.start as u64);
+        for index in page_range {
+            if let Some(page) = cursor.load()
+                && !page.preallocation_pending()
+                && map_mode.try_ensure(index, &page).is_ok()
+            {
+                operate(index, page.clone())?;
+            }
+            cursor.next();
+        }
+        Ok(())
     }
 
     fn try_operate_on_range_internal<F>(
@@ -486,11 +488,103 @@ impl Vmo {
         self.size.load(Ordering::Acquire)
     }
 
+    /// Returns the number of pages currently owned by this VMO.
+    pub(crate) fn committed_pages(&self) -> usize {
+        self.committed_pages.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn preallocate_anonymous(&self, range: Range<usize>) -> Result<()> {
+        debug_assert!(!self.has_backend());
+        let page_range = get_page_idx_range(&range);
+        let result = (|| {
+            for index in page_range.clone() {
+                let mut pages = self.pages.lock();
+                let mut cursor = pages.cursor_mut(index as u64);
+                if cursor.load().is_some() {
+                    continue;
+                }
+                let charge = self
+                    .quota
+                    .as_ref()
+                    .map(|quota| quota.charge(1))
+                    .transpose()?;
+                cursor.store(CachePage::alloc_preallocated(charge)?);
+                self.committed_pages.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.undo_preallocation(page_range);
+        } else {
+            let mut pages = self.pages.lock();
+            let mut cursor = pages.cursor_mut(page_range.start as u64);
+            loop {
+                if let Some(page) = cursor.load() {
+                    page.finish_preallocation();
+                }
+                if cursor
+                    .next_present()
+                    .is_none_or(|next| next >= page_range.end as u64)
+                {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    fn undo_preallocation(&self, range: Range<usize>) {
+        let mut rmap = self.rmap.lock();
+        let mut index = range.start as u64;
+        while index < range.end as u64 {
+            let (page, next) = {
+                let mut pages = self.pages.lock();
+                let mut cursor = pages.cursor_mut(index);
+                let page = if cursor
+                    .load()
+                    .is_some_and(|page| page.preallocation_pending())
+                {
+                    let page = cursor.remove().map(|page| page.clone());
+                    self.committed_pages.fetch_sub(1, Ordering::Relaxed);
+                    page
+                } else {
+                    None
+                };
+                (page, cursor.next_present())
+            };
+            if let Some(page) = page {
+                let offset = index as usize * PAGE_SIZE;
+                rmap.unmap(offset..offset + PAGE_SIZE);
+                page.release_quota();
+            }
+            let Some(next) = next else {
+                break;
+            };
+            index = next;
+        }
+    }
+
+    pub(super) fn punch_anonymous(&self, range: Range<usize>) -> Result<()> {
+        debug_assert!(!self.has_backend());
+        let full_start = range.start.align_up(PAGE_SIZE);
+        let full_end = range.end.align_down(PAGE_SIZE);
+        if full_start >= full_end {
+            return self.fill_zeros_anonymous(range);
+        }
+        self.fill_zeros_anonymous(range.start..full_start)?;
+        self.fill_zeros_anonymous(full_end..range.end)?;
+        let rmap = self.rmap.lock();
+        let pages = self.pages.lock();
+        self.decommit_anon_pages(rmap, pages, full_start..full_end)
+    }
+
     /// Returns the status of writable mappings of the VMO.
     pub(crate) fn writable_mapping_status(&self) -> &WritableMappingStatus {
         // Currently, only VMOs used by `MemfdInode` (anonymous) track writable mapping status.
         // VMOs with a backend do not use this field.
         debug_assert!(!self.has_backend());
+
         &self.writable_mapping_status
     }
 
@@ -507,36 +601,58 @@ impl Vmo {
     }
 
     /// Decommits anonymous pages in the specified byte range.
-    pub(super) fn decommit_anon_pages(
-        &self,
+    pub(super) fn decommit_anon_pages<'a>(
+        &'a self,
         mut locked_rmap: MutexGuard<Rmap>,
-        mut locked_pages: LockedXArray<CachePage>,
+        mut locked_pages: LockedXArray<'a, CachePage>,
         range: Range<usize>,
     ) -> Result<()> {
         debug_assert!(!self.has_backend());
 
-        let page_idx_range = get_page_idx_range(&range);
-        let mut cursor = locked_pages.cursor_mut(page_idx_range.start as u64);
+        if range.is_empty() {
+            return Ok(());
+        }
 
+        let page_idx_range = get_page_idx_range(&range);
         // We remove pages before unmapping them in the page table. So a concurrent page fault will
         // synchronize via the page table lock. Either the mapped item will be unmapped below or the
         // page fault handler will commit the page and be blocked on the reverse-mapping lock.
-        let mut removed = Vec::new();
+        let mut index = page_idx_range.start as u64;
         loop {
-            if let Some(page) = cursor.remove() {
-                removed.push(page.clone());
+            let mut removed: [Option<CachePage>; Self::PAGE_BATCH_CAPACITY] =
+                core::array::from_fn(|_| None);
+            let start = index;
+            {
+                let mut cursor = locked_pages.cursor_mut(index);
+                let mut count = 0;
+                loop {
+                    if let Some(page) = cursor.remove() {
+                        self.committed_pages.fetch_sub(1, Ordering::Relaxed);
+                        removed[count] = Some(page.clone());
+                        count += 1;
+                    }
+                    let Some(next) = cursor
+                        .next_present()
+                        .filter(|next| *next < page_idx_range.end as u64)
+                    else {
+                        index = page_idx_range.end as u64;
+                        break;
+                    };
+                    index = next;
+                    if count == removed.len() {
+                        break;
+                    }
+                }
             }
-            let page_idx = cursor.next_present();
-            if page_idx.is_none_or(|idx| idx >= page_idx_range.end as u64) {
+            drop(locked_pages);
+            locked_rmap.unmap(start as usize * PAGE_SIZE..index as usize * PAGE_SIZE);
+            for page in removed.into_iter().flatten() {
+                page.release_quota();
+            }
+            if index >= page_idx_range.end as u64 {
                 break;
             }
-        }
-
-        drop(locked_pages);
-
-        locked_rmap.unmap(page_idx_range.start * PAGE_SIZE..page_idx_range.end * PAGE_SIZE);
-        for page in removed {
-            page.release_quota();
+            locked_pages = self.pages.lock();
         }
 
         Ok(())
@@ -605,6 +721,24 @@ impl Vmo {
 
     fn read_sparse_anonymous(&self, range: Range<usize>, writer: &mut VmWriter) -> Result<()> {
         static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        self.for_each_anonymous_chunk(range, |page, chunk| {
+            if let Some(page) = page {
+                page.reader()
+                    .skip(chunk.start)
+                    .limit(chunk.len())
+                    .read_fallible(writer)?;
+            } else {
+                VmReader::from(&ZERO_PAGE[..chunk.len()]).read_fallible(writer)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn for_each_anonymous_chunk(
+        &self,
+        range: Range<usize>,
+        mut operation: impl FnMut(Option<CachePage>, Range<usize>) -> Result<()>,
+    ) -> Result<()> {
         let mut offset = range.start;
         while offset < range.end {
             let page_offset = offset % PAGE_SIZE;
@@ -616,14 +750,7 @@ impl Vmo {
                     .load()
                     .map(|page| page.clone())
             };
-            if let Some(page) = page {
-                page.reader()
-                    .skip(page_offset)
-                    .limit(length)
-                    .read_fallible(writer)?;
-            } else {
-                VmReader::from(&ZERO_PAGE[..length]).read_fallible(writer)?;
-            }
+            operation(page, page_offset..page_offset + length)?;
             offset += length;
         }
         Ok(())
@@ -712,6 +839,10 @@ impl Vmo {
             return_errno_with_message!(Errno::EINVAL, "the range to fill exceeds the VMO size");
         }
 
+        if !self.has_backend() {
+            return self.fill_zeros_anonymous(range);
+        }
+
         static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
 
         let mut current_offset = range.start;
@@ -720,26 +851,24 @@ impl Vmo {
             let write_len = (range.end - current_offset).min(page_remaining);
             let mut reader = VmReader::from(&ZERO_PAGE[..write_len]).to_fallible();
 
-            if !self.has_backend() {
-                let page = {
-                    let pages = self.pages.lock();
-                    pages
-                        .cursor((current_offset / PAGE_SIZE) as u64)
-                        .load()
-                        .map(|page| page.clone())
-                };
-                if let Some(page) = page {
-                    page.writer()
-                        .skip(current_offset % PAGE_SIZE)
-                        .write_fallible(&mut reader)?;
-                }
-            } else {
-                self.write(current_offset, &mut reader)?;
-            }
+            self.write(current_offset, &mut reader)?;
             current_offset += write_len;
         }
 
         Ok(())
+    }
+
+    fn fill_zeros_anonymous(&self, range: Range<usize>) -> Result<()> {
+        static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        self.for_each_anonymous_chunk(range, |page, chunk| {
+            if let Some(page) = page {
+                let mut reader = VmReader::from(&ZERO_PAGE[..chunk.len()]).to_fallible();
+                page.writer()
+                    .skip(chunk.start)
+                    .write_fallible(&mut reader)?;
+            }
+            Ok(())
+        })
     }
 
     /// Writes data to pages without dirty tracking.
@@ -1092,6 +1221,9 @@ impl<'a> BackedVmo<'a> {
             let mut locked_pages = self.pages.lock();
             let mut cursor_mut = locked_pages.cursor_mut(idx as u64);
             let removed_page = cursor_mut.remove();
+            if removed_page.is_some() {
+                self.committed_pages.fetch_sub(1, Ordering::Relaxed);
+            }
             // The page won't be evicted because it has already been marked as `Evicted`. It won't
             // be decommitted either, as the caller should hold a file system lock that prevents
             // concurrent resizing.
@@ -1144,7 +1276,7 @@ impl<'a> BackedVmo<'a> {
     fn commit_on_internal(&self, page_idx: usize, commit_mode: CommitMode) -> Result<CachePage> {
         let mut locked_pages = self.pages.lock();
         if page_idx >= self.size().div_ceil(PAGE_SIZE) {
-            return_errno_with_message!(Errno::EINVAL, "the offset is outside the VMO");
+            return_errno_with_message!(Errno::ENXIO, "the offset is outside the VMO");
         }
 
         let mut cursor = locked_pages.cursor_mut(page_idx as u64);
@@ -1164,6 +1296,7 @@ impl<'a> BackedVmo<'a> {
         // The page is within the file bounds - need to allocate a cache page.
         let uninit_page = CachePage::alloc_uninit()?;
         cursor.store(uninit_page.clone());
+        self.committed_pages.fetch_add(1, Ordering::Relaxed);
         drop(locked_pages);
 
         if commit_mode.skips_backend_read() {
@@ -1253,6 +1386,7 @@ impl<'a> BackedVmo<'a> {
 
         loop {
             if let Some(page) = cursor_mut.remove() {
+                self.committed_pages.fetch_sub(1, Ordering::Relaxed);
                 removed_pages.push((index, page.clone()));
             }
 
