@@ -1587,6 +1587,20 @@ impl Inode for RamInode {
         Ok(self.metadata_snapshot(&self.metadata.lock(), page_cache.as_deref()))
     }
 
+    fn cached_metadata(&self) -> Option<Metadata> {
+        let page_cache = match self.inner.as_file() {
+            Some(cache) => Some(cache.try_lock()?),
+            None => None,
+        };
+        let metadata = self.metadata.try_lock()?;
+        Some(self.metadata_snapshot(&metadata, page_cache.as_deref()))
+    }
+
+    fn cached_read_link(&self) -> Option<SymbolicLink> {
+        let link = self.inner.as_symlink()?.try_lock()?;
+        Some(SymbolicLink::Plain(link.clone()))
+    }
+
     fn fs(&self) -> Arc<dyn FileSystem> {
         Weak::upgrade(&self.fs).unwrap()
     }

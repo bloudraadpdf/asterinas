@@ -8,6 +8,11 @@
 //! [`MountTopology`] serializes mount-tree changes and indexes the peer and
 //! master relationships used to route propagation events.
 
+use core::{
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use hashbrown::HashSet;
 use ostd::sync::{RwMutexReadGuard, RwMutexWriteGuard};
 use sparse_id_alloc::SparseIdAlloc;
@@ -290,15 +295,61 @@ static MOUNT_TOPOLOGY: RwMutex<MountTopology> = RwMutex::new(MountTopology {
     peer_groups: BTreeMap::new(),
 });
 
+static MOUNT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(super) struct MountTopologyWriteGuard(RwMutexWriteGuard<'static, MountTopology>);
+
+impl Deref for MountTopologyWriteGuard {
+    type Target = MountTopology;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for MountTopologyWriteGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for MountTopologyWriteGuard {
+    fn drop(&mut self) {
+        MOUNT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+pub(super) struct MountTopologyEpoch(u64);
+
+impl MountTopologyEpoch {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.0 & 1 != 0 || MOUNT_GENERATION.load(Ordering::SeqCst) != self.0 {
+            return_errno_with_message!(Errno::EAGAIN, "a mount change overlaps the path lookup");
+        }
+        Ok(())
+    }
+}
+
 impl MountTopology {
     /// Acquires the write side of the mount topology lock.
-    pub(super) fn write_lock() -> RwMutexWriteGuard<'static, Self> {
-        MOUNT_TOPOLOGY.write()
+    pub(super) fn write_lock() -> MountTopologyWriteGuard {
+        let inner = MOUNT_TOPOLOGY.write();
+        MOUNT_GENERATION.fetch_add(1, Ordering::SeqCst);
+        MountTopologyWriteGuard(inner)
+    }
+
+    /// Snapshots the topology while its read or write guard is held.
+    pub(super) fn epoch(&self) -> MountTopologyEpoch {
+        MountTopologyEpoch(MOUNT_GENERATION.load(Ordering::SeqCst))
     }
 
     /// Acquires the read side of the mount topology lock.
     pub(super) fn read_lock() -> RwMutexReadGuard<'static, Self> {
         MOUNT_TOPOLOGY.read()
+    }
+
+    pub(super) fn try_read_lock() -> Option<RwMutexReadGuard<'static, Self>> {
+        MOUNT_TOPOLOGY.try_read()
     }
 
     /// Collects every propagation receiver that can address `mountpoint`.
@@ -684,3 +735,24 @@ const PEER_GROUP_ID_MAX: PeerGroupId = i32::MAX as PeerGroupId;
 /// Reference: <https://elixir.bootlin.com/linux/v6.17/source/fs/namespace.c#L295>
 static PEER_GROUP_ID_ALLOCATOR: SpinLock<SparseIdAlloc> =
     SpinLock::new(SparseIdAlloc::new(PEER_GROUP_ID_MIN, PEER_GROUP_ID_MAX));
+
+#[cfg(ktest)]
+mod epoch_tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn topology_snapshots_detect_active_and_finished_writers() {
+        let reader = MountTopology::read_lock();
+        let epoch = reader.epoch();
+        epoch.validate().unwrap();
+        drop(reader);
+        let writer = MountTopology::write_lock();
+        assert!(MountTopology::try_read_lock().is_none());
+        assert_eq!(epoch.validate().err().unwrap().error(), Errno::EAGAIN);
+        drop(writer);
+        assert_eq!(epoch.validate().err().unwrap().error(), Errno::EAGAIN);
+        MountTopology::read_lock().epoch().validate().unwrap();
+    }
+}

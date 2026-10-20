@@ -5,7 +5,7 @@
 use core::fmt::Display;
 
 use super::{
-    AccessMode, CreationFlags, FileCommon, FileLike, InodeType, MappableObject,
+    AccessMode, CreationFlags, FileCommon, FileLike, InodeType, MappableObject, Permission,
     SettableStatusFlags, StatusFlags, SyncMode, file_table::FdFlags,
 };
 use crate::{
@@ -73,7 +73,7 @@ impl InodeHandle {
             None
         } else if inode.type_() == InodeType::Socket {
             return_errno_with_message!(Errno::ENXIO, "a socket inode cannot be opened as a file");
-        } else if inode.type_() == InodeType::Dir && access_mode.is_writable() {
+        } else if inode.type_() == InodeType::Dir && Permission::from(access_mode).may_write() {
             return_errno_with_message!(Errno::EISDIR, "a directory cannot be opened writable");
         } else {
             inode

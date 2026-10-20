@@ -4,7 +4,9 @@ use alloc::str;
 
 use ostd::task::Task;
 
-use super::{Mount, MountTopology, Path};
+use super::{
+    Mount, MountTopology, Path, mount_propagation::MountTopologyEpoch, rename_epoch::RenameEpoch,
+};
 use crate::{
     fs::{
         file::{
@@ -131,6 +133,42 @@ pub(crate) enum EmptyPathStr {
     /// This is deliberately rare:
     /// as of Linux 6.8 the sole such syscall is **`readlinkat`**.
     Allow,
+}
+
+bitflags! {
+    pub(crate) struct ResolveFlags: u64 {
+        const NO_XDEV = 0x01;
+        const NO_MAGICLINKS = 0x02;
+        const NO_SYMLINKS = 0x04;
+        const BENEATH = 0x08;
+        const IN_ROOT = 0x10;
+        const CACHED = 0x20;
+    }
+}
+
+impl ResolveFlags {
+    pub(crate) fn is_scoped(self) -> bool {
+        self.intersects(Self::BENEATH | Self::IN_ROOT)
+    }
+}
+
+struct LookupPolicy<'a> {
+    root: &'a Path,
+    resolve: ResolveFlags,
+    epoch: Option<&'a RenameEpoch>,
+    mount_epoch: Option<&'a MountTopologyEpoch>,
+}
+
+impl LookupPolicy<'_> {
+    fn validate_epoch(&self) -> Result<()> {
+        if let Some(epoch) = self.mount_epoch {
+            epoch.validate()?;
+        }
+        if let Some(epoch) = self.epoch {
+            epoch.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// A resolver for [`Path`]s.
@@ -609,9 +647,29 @@ impl PathResolver {
 impl PathResolver {
     /// Looks up a child entry with `name` within a directory `path`.
     pub(crate) fn lookup_at_path(&self, path: &Path, name: &str) -> Result<Path> {
-        let dir_dentry = path.dentry.as_dir_dentry_or_err()?;
+        self.lookup_at_path_with_policy(
+            path,
+            name,
+            &LookupPolicy {
+                root: &self.root,
+                resolve: ResolveFlags::empty(),
+                epoch: None,
+                mount_epoch: None,
+            },
+        )
+    }
 
-        if path.inode().check_permission(Permission::MAY_EXEC).is_err() {
+    fn lookup_at_path_with_policy(
+        &self,
+        path: &Path,
+        name: &str,
+        policy: &LookupPolicy,
+    ) -> Result<Path> {
+        policy.validate_epoch()?;
+        let dir_dentry = path.dentry.as_dir_dentry_or_err()?;
+        if policy.resolve.contains(ResolveFlags::CACHED) {
+            path.inode().check_permission_cached(Permission::MAY_EXEC)?;
+        } else if path.inode().check_permission(Permission::MAY_EXEC).is_err() {
             return_errno_with_message!(Errno::EACCES, "the path cannot be looked up");
         }
         if name.len() > NAME_MAX {
@@ -621,13 +679,95 @@ impl PathResolver {
         let target_path = if super::is_dot(name) {
             return Ok(path.this());
         } else if super::is_dotdot(name) {
+            if path == policy.root {
+                if policy.resolve.contains(ResolveFlags::BENEATH) {
+                    return_errno_with_message!(Errno::EXDEV, "the path escapes the lookup root");
+                }
+                return Ok(path.this());
+            }
             self.resolve_parent(path).unwrap_or_else(|| path.this())
         } else {
-            let target_dentry = dir_dentry.lookup_child(name)?;
+            let target_dentry = if policy.resolve.contains(ResolveFlags::CACHED) {
+                dir_dentry.lookup_child_cached(name)?
+            } else {
+                dir_dentry.lookup_child(name)?
+            };
             Path::new(path.mount.clone(), target_dentry)
         };
 
-        Ok(target_path.get_top_path())
+        let top_path = target_path.get_top_path();
+        if policy.resolve.contains(ResolveFlags::NO_XDEV)
+            && !Arc::ptr_eq(&path.mount, &top_path.mount)
+        {
+            return_errno_with_message!(Errno::EXDEV, "the path crosses a mount point");
+        }
+        policy.validate_epoch()?;
+        Ok(top_path)
+    }
+
+    /// Resolves an `openat2` path under its explicit traversal constraints.
+    pub(crate) fn lookup_openat2(
+        &self,
+        dirfd: RawFileDesc,
+        path: &str,
+        follow_tail_link: bool,
+        resolve: ResolveFlags,
+    ) -> Result<LookupResult> {
+        if path.is_empty() {
+            return_errno_with_message!(Errno::ENOENT, "the path is empty");
+        }
+        if path.starts_with('/') && resolve.contains(ResolveFlags::BENEATH) {
+            return_errno_with_message!(Errno::EXDEV, "an absolute path escapes the lookup root");
+        }
+
+        let topology = if resolve.contains(ResolveFlags::CACHED) {
+            MountTopology::try_read_lock()
+                .ok_or_else(|| Error::with_message(Errno::EAGAIN, "the mount topology is busy"))?
+        } else {
+            MountTopology::read_lock()
+        };
+        let mount_epoch = topology.epoch();
+        drop(topology);
+        let epoch = resolve.is_scoped().then(RenameEpoch::begin).transpose()?;
+        let start = if path.starts_with('/') && !resolve.contains(ResolveFlags::IN_ROOT) {
+            self.root.clone()
+        } else {
+            self.lookup(&FsPath::from_fd(dirfd)?)?
+        };
+        if start.type_() != InodeType::Dir {
+            return_errno_with_message!(Errno::ENOTDIR, "the starting path is not a directory");
+        }
+        let root = if resolve.is_scoped() {
+            &start
+        } else {
+            &self.root
+        };
+        let policy = LookupPolicy {
+            root,
+            resolve,
+            epoch: epoch.as_ref(),
+            mount_epoch: Some(&mount_epoch),
+        };
+        let result = self.lookup_from_parent_with_policy(
+            &start,
+            path.trim_start_matches('/'),
+            follow_tail_link,
+            &policy,
+        )?;
+        if resolve.is_scoped() {
+            let mut ancestor = match &result {
+                LookupResult::Resolved(path) => path.clone(),
+                LookupResult::AtParent(parent) => parent.parent.clone(),
+            };
+            while ancestor != *root {
+                policy.validate_epoch()?;
+                ancestor = self.resolve_parent(&ancestor).ok_or_else(|| {
+                    Error::with_message(Errno::EXDEV, "the path is outside the lookup root")
+                })?;
+            }
+        }
+        policy.validate_epoch()?;
+        Ok(result)
     }
 
     /// Lookups the target `Path` according to the `fs_path`.
@@ -708,12 +848,31 @@ impl PathResolver {
     /// If `follow_tail_link` is true and the trailing component is a symlink,
     /// it will be followed.
     /// Symlinks in earlier components of the path will always be followed.
-    #[expect(clippy::redundant_closure)]
     fn lookup_from_parent(
         &self,
         parent: &Path,
         relative_path: &str,
         follow_tail_link: bool,
+    ) -> Result<LookupResult> {
+        self.lookup_from_parent_with_policy(
+            parent,
+            relative_path,
+            follow_tail_link,
+            &LookupPolicy {
+                root: &self.root,
+                resolve: ResolveFlags::empty(),
+                epoch: None,
+                mount_epoch: None,
+            },
+        )
+    }
+
+    fn lookup_from_parent_with_policy(
+        &self,
+        parent: &Path,
+        relative_path: &str,
+        follow_tail_link: bool,
+        policy: &LookupPolicy,
     ) -> Result<LookupResult> {
         debug_assert!(!relative_path.starts_with('/'));
 
@@ -742,7 +901,8 @@ impl PathResolver {
 
             // Iterate next path
             let next_is_tail = path_remain.is_empty();
-            let next_path = match self.lookup_at_path(&current_path, next_name) {
+            let next_path = match self.lookup_at_path_with_policy(&current_path, next_name, policy)
+            {
                 Ok(child) => child,
                 Err(e) => {
                     if next_is_tail && e.error() == Errno::ENOENT {
@@ -767,7 +927,19 @@ impl PathResolver {
                 if follows >= SYMLINKS_MAX {
                     return_errno_with_message!(Errno::ELOOP, "there are too many symlinks");
                 }
-                let read_link_res = next_path.inode().read_link()?;
+                if policy.resolve.contains(ResolveFlags::NO_SYMLINKS) {
+                    return_errno_with_message!(
+                        Errno::ELOOP,
+                        "symbolic link traversal is forbidden"
+                    );
+                }
+                let read_link_res = if policy.resolve.contains(ResolveFlags::CACHED) {
+                    next_path.inode().cached_read_link().ok_or_else(|| {
+                        Error::with_message(Errno::EAGAIN, "the symbolic link is not cached")
+                    })?
+                } else {
+                    next_path.inode().read_link()?
+                };
                 match read_link_res {
                     SymbolicLink::Plain(mut tmp_link_path) => {
                         let link_path_remain = {
@@ -786,17 +958,51 @@ impl PathResolver {
                             tmp_link_path
                         };
 
-                        // Change the path and relative path according to symlink
-                        if link_path_remain.starts_with('/') {
-                            current_path = self.root.clone();
+                        if link_path_remain.len() > PATH_MAX {
+                            return_errno_with_message!(
+                                Errno::ENAMETOOLONG,
+                                "the symlink path is too long"
+                            );
                         }
-                        let link_path = link_path_opt.get_or_insert_with(|| String::new());
+                        if link_path_remain.starts_with('/') {
+                            if policy.resolve.contains(ResolveFlags::BENEATH) {
+                                return_errno_with_message!(
+                                    Errno::EXDEV,
+                                    "an absolute symlink escapes the lookup root"
+                                );
+                            }
+                            if policy.resolve.contains(ResolveFlags::NO_XDEV)
+                                && !Arc::ptr_eq(&current_path.mount, &policy.root.mount)
+                            {
+                                return_errno_with_message!(
+                                    Errno::EXDEV,
+                                    "the symlink crosses a mount point"
+                                );
+                            }
+                            current_path = policy.root.clone();
+                        }
+                        let link_path = link_path_opt.get_or_insert_with(String::new);
                         link_path.clear();
                         link_path.push_str(link_path_remain.trim_start_matches('/'));
                         relative_path = link_path;
                         follows += 1;
                     }
                     SymbolicLink::Path(path) => {
+                        if policy.resolve.contains(ResolveFlags::NO_MAGICLINKS) {
+                            return_errno_with_message!(
+                                Errno::ELOOP,
+                                "magic link traversal is forbidden"
+                            );
+                        }
+                        if policy.resolve.is_scoped()
+                            || policy.resolve.contains(ResolveFlags::NO_XDEV)
+                                && !Arc::ptr_eq(&current_path.mount, &path.mount)
+                        {
+                            return_errno_with_message!(
+                                Errno::EXDEV,
+                                "the magic link escapes the lookup scope"
+                            );
+                        }
                         current_path = path;
                         relative_path = path_remain;
                         follows += 1;

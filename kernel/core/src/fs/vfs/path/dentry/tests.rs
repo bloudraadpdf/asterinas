@@ -12,7 +12,7 @@ use crate::{
         file::{InodeMode, InodeType, StatusFlags},
         vfs::{
             file_system::FileSystem,
-            inode::{Extension, FileOps, Inode, Metadata},
+            inode::{Extension, FileOps, Inode, Metadata, RevalidationPolicy},
         },
     },
     prelude::*,
@@ -22,6 +22,7 @@ use crate::{
 struct CacheTestInode {
     type_: InodeType,
     extension: Extension,
+    revalidation_policy: RevalidationPolicy,
 }
 
 impl CacheTestInode {
@@ -50,6 +51,9 @@ impl FileOps for CacheTestInode {
 }
 
 impl Inode for CacheTestInode {
+    fn revalidation_policy(&self) -> RevalidationPolicy {
+        self.revalidation_policy
+    }
     fn type_(&self) -> InodeType {
         self.type_
     }
@@ -113,6 +117,7 @@ fn inode(type_: InodeType) -> Arc<dyn Inode> {
     Arc::new(CacheTestInode {
         type_,
         extension: Extension::new(),
+        revalidation_policy: RevalidationPolicy::empty(),
     })
 }
 
@@ -204,4 +209,58 @@ fn cache_reclamation_regressions() {
     cached_parent_child_cycles_are_reclaimed();
     cache_reclamation_preserves_live_paths();
     deep_cache_reclamation_is_iterative();
+}
+
+#[ktest]
+fn cache_only_lookup_never_waits_or_calls_the_filesystem() {
+    let root = Dentry::new_root(inode(InodeType::Dir));
+    let file = child(&root, "file", InodeType::File);
+    let directory = root.as_dir_dentry_or_err().unwrap();
+    assert!(Arc::ptr_eq(
+        &file,
+        &directory.lookup_child_cached("file").unwrap()
+    ));
+    assert_eq!(
+        directory
+            .lookup_child_cached("missing")
+            .err()
+            .unwrap()
+            .error(),
+        Errno::EAGAIN
+    );
+    let mut children = root.dir_state.as_ref().unwrap().children.write();
+    assert_eq!(
+        directory.lookup_child_cached("file").err().unwrap().error(),
+        Errno::EAGAIN
+    );
+    children.insert_negative("absent".to_string());
+    drop(children);
+    assert_eq!(
+        directory
+            .lookup_child_cached("absent")
+            .err()
+            .unwrap()
+            .error(),
+        Errno::ENOENT
+    );
+    drop(file);
+    root.prune_unused_children();
+
+    let root = Dentry::new_root(Arc::new(CacheTestInode {
+        type_: InodeType::Dir,
+        extension: Extension::new(),
+        revalidation_policy: RevalidationPolicy::REVALIDATE_EXISTS,
+    }));
+    let file = child(&root, "file", InodeType::File);
+    assert_eq!(
+        root.as_dir_dentry_or_err()
+            .unwrap()
+            .lookup_child_cached("file")
+            .err()
+            .unwrap()
+            .error(),
+        Errno::EAGAIN
+    );
+    drop(file);
+    root.prune_unused_children();
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::{
-    fs::file::{AccessMode, CreationFlags, InodeMode, StatusFlags},
+    fs::file::{AccessMode, CreationFlags, InodeMode, Permission, StatusFlags},
     prelude::*,
 };
 
@@ -19,7 +19,7 @@ impl OpenArgs {
     pub(crate) fn from_flags_and_mode(flags: u32, inode_mode: InodeMode) -> Result<Self> {
         let creation_flags = CreationFlags::from_bits_truncate(flags);
         let status_flags = StatusFlags::from_bits_truncate(flags);
-        let access_mode = AccessMode::from_u32(flags)?;
+        let access_mode = AccessMode::from_u32(flags);
 
         // When `O_PATH` is set, all other flags (including `O_TMPFILE`) are
         // ignored, so the `O_TMPFILE` validations are skipped.
@@ -30,7 +30,7 @@ impl OpenArgs {
             if !creation_flags.contains(CreationFlags::O_DIRECTORY) {
                 return_errno_with_message!(Errno::EINVAL, "O_TMPFILE requires O_DIRECTORY");
             }
-            if !access_mode.is_writable() {
+            if !Permission::from(access_mode).may_write() {
                 return_errno_with_message!(Errno::EINVAL, "O_TMPFILE requires O_RDWR or O_WRONLY");
             }
             if creation_flags.contains(CreationFlags::O_CREAT) {

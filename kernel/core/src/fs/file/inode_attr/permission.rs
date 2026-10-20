@@ -36,7 +36,9 @@ impl From<AccessMode> for Permission {
         match access_mode {
             AccessMode::O_RDONLY => Permission::MAY_READ,
             AccessMode::O_WRONLY => Permission::MAY_WRITE,
-            AccessMode::O_RDWR => Permission::MAY_READ | Permission::MAY_WRITE,
+            AccessMode::O_RDWR | AccessMode::IoctlOnly => {
+                Permission::MAY_READ | Permission::MAY_WRITE
+            }
         }
     }
 }

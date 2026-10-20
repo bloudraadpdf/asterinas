@@ -51,6 +51,14 @@ pub(super) fn sys_openat(
         })?
     };
 
+    install_file(file_handle, flags, ctx)
+}
+
+fn install_file(
+    file_handle: Arc<dyn FileLike>,
+    flags: u32,
+    ctx: &Context,
+) -> Result<SyscallReturn> {
     let fd = {
         let file_table = ctx.thread_local.borrow_file_table();
         let mut file_table_locked = file_table.unwrap().write();
@@ -85,7 +93,7 @@ pub(super) fn sys_creat(path_addr: Vaddr, mode: u16, ctx: &Context) -> Result<Sy
     sys_openat(AT_FDCWD, path_addr, flags, mode, ctx)
 }
 
-fn do_open(
+pub(super) fn do_open(
     path_resolver: &PathResolver,
     fs_path: &FsPath,
     flags: u32,
@@ -103,6 +111,13 @@ fn do_open(
         path_resolver.lookup_unresolved_no_follow(fs_path)?
     };
 
+    open_lookup(lookup_res, open_args)
+}
+
+pub(super) fn open_lookup(
+    lookup_res: LookupResult,
+    open_args: OpenArgs,
+) -> Result<Arc<dyn FileLike>> {
     let file_handle: Arc<dyn FileLike> = match lookup_res {
         LookupResult::Resolved(path) => Arc::new(path.open(open_args)?),
         LookupResult::AtParent(result) => {
@@ -145,6 +160,13 @@ fn do_open_tmpfile(
         path_resolver.lookup_no_follow(fs_path)?
     };
 
+    open_tmpfile_at(dir_path, open_args)
+}
+
+pub(super) fn open_tmpfile_at(
+    dir_path: fs::vfs::path::Path,
+    open_args: &OpenArgs,
+) -> Result<Arc<dyn FileLike>> {
     // `O_EXCL` with `O_TMPFILE` is allowed by Linux, but it prevents the tmpfile
     // from being linked later by `linkat(..., AT_EMPTY_PATH)`.
     // Reference: <https://man7.org/linux/man-pages/man2/open.2.html>.

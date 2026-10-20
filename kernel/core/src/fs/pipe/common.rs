@@ -269,6 +269,9 @@ impl Pipe {
             .then(|| pipe_obj.writer_generation.load(Ordering::Relaxed));
 
         let handle = match access_mode {
+            AccessMode::IoctlOnly => {
+                return_errno_with_message!(Errno::EINVAL, "a pipe requires read or write access");
+            }
             AccessMode::O_RDONLY => {
                 pipe.read_count += 1;
 

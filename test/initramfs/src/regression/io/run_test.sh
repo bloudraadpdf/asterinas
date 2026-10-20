@@ -19,3 +19,4 @@ set -e
 ./file_io/fcntl_status_flags
 ./file_io/file_err
 ./file_io/iovec_err
+./file_io/openat2
