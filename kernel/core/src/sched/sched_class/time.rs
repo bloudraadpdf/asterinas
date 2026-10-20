@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::mem;
+use core::{mem, time::Duration};
 
 use spin::Once;
 
@@ -50,4 +50,14 @@ pub(crate) fn base_slice_clocks() -> u64 {
 /// Returns the minimum scheduling period, measured in TSC clock units.
 pub(crate) fn min_period_clocks() -> u64 {
     consts().1
+}
+
+/// Converts scheduler clocks to a duration.
+pub(super) fn clocks_to_duration(clocks: u64) -> Duration {
+    let (numerator, denominator) = tsc_factors();
+    let nanoseconds = u128::from(clocks) * u128::from(numerator) / u128::from(denominator);
+    Duration::new(
+        (nanoseconds / 1_000_000_000) as u64,
+        (nanoseconds % 1_000_000_000) as u32,
+    )
 }

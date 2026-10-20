@@ -70,3 +70,26 @@ FN_TEST(sched_prio_limit)
 #endif
 }
 END_TEST()
+
+FN_TEST(sched_rr_interval)
+{
+	struct timespec interval;
+	struct sched_param param = { .sched_priority = 50 };
+	TEST_RES(sched_setscheduler(0, SCHED_FIFO, &param), _ret == 0);
+	TEST_ERRNO(sched_rr_get_interval(-1, &interval), EINVAL);
+	TEST_ERRNO(sched_rr_get_interval(1234567890, &interval), ESRCH);
+	TEST_ERRNO(sched_rr_get_interval(0, NULL), EFAULT);
+	TEST_RES(sched_rr_get_interval(0, &interval),
+		 _ret == 0 && interval.tv_sec == 0 && interval.tv_nsec == 0);
+	TEST_RES(sched_setscheduler(0, SCHED_RR, &param), _ret == 0);
+	TEST_RES(sched_rr_get_interval(0, &interval),
+		 _ret == 0 && interval.tv_sec >= 0 && interval.tv_nsec >= 0 &&
+			 interval.tv_nsec < 1000000000 &&
+			 (interval.tv_sec > 0 || interval.tv_nsec > 0));
+	TEST_RES(sched_rr_get_interval(getpid(), &interval),
+		 _ret == 0 && (interval.tv_sec > 0 || interval.tv_nsec > 0));
+	TEST_RES(sched_setscheduler(0, SCHED_FIFO, &param), _ret == 0);
+	TEST_RES(sched_rr_get_interval(0, &interval),
+		 _ret == 0 && interval.tv_sec == 0 && interval.tv_nsec == 0);
+}
+END_TEST()

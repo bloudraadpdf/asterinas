@@ -17,6 +17,7 @@ pub(crate) use self::{
     rmap::{Rmap, RmapEntry},
     vmar_impls::{
         RssType, Vmar,
+        locking::current_lock_limit,
         map::{MmapMode, VmarMapOffset},
         page_fault::PageFaultInfo,
         protect::ProtectDirection,

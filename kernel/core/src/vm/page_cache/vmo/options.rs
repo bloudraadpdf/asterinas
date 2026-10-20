@@ -185,12 +185,16 @@ mod test {
         let vmo = VmoOptions::new(PAGE_SIZE).alloc().unwrap();
         assert_eq!(vmo.size(), PAGE_SIZE);
         assert_eq!(vmo.committed_pages(), 0);
+        assert!(!vmo.is_page_resident(0));
+        assert_eq!(vmo.committed_pages(), 0);
         // the vmo is zeroed once allocated
         let mut read_buffer = [0; size_of::<usize>()];
         let mut writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
         vmo.read(0, &mut writer).unwrap();
         assert_eq!(usize::from_ne_bytes(read_buffer), 0);
         assert_eq!(vmo.committed_pages(), 1);
+        assert!(vmo.is_page_resident(0));
+        assert!(!vmo.is_page_resident(PAGE_SIZE));
     }
 
     #[ktest]
@@ -251,6 +255,7 @@ mod test {
         cache.preallocate(2 * PAGE_SIZE..4 * PAGE_SIZE).unwrap();
         assert_eq!(cache.as_vmo().size(), PAGE_SIZE);
         assert_eq!(cache.as_vmo().committed_pages(), 2);
+        assert!(!cache.as_vmo().is_page_resident(2 * PAGE_SIZE));
         assert!(matches!(
             cache
                 .as_vmo()

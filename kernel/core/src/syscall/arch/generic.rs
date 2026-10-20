@@ -76,8 +76,10 @@ macro_rules! import_generic_syscall_entries {
             lseek::sys_lseek,
             madvise::sys_madvise,
             memfd_create::sys_memfd_create,
+            mincore::sys_mincore,
             mkdir::sys_mkdirat,
             mknod::sys_mknodat,
+            mlock::{sys_mlock, sys_munlock},
             mmap::sys_mmap,
             mount::sys_mount,
             move_mount::sys_move_mount,
@@ -125,6 +127,7 @@ macro_rules! import_generic_syscall_entries {
             sched_getattr::sys_sched_getattr,
             sched_getparam::sys_sched_getparam,
             sched_getscheduler::sys_sched_getscheduler,
+            sched_rr_get_interval::sys_sched_rr_get_interval,
             sched_setattr::sys_sched_setattr,
             sched_setparam::sys_sched_setparam,
             sched_setscheduler::sys_sched_setscheduler,
@@ -317,6 +320,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_SCHED_SETSCHEDULER = 119     => sys_sched_setscheduler(args[..3]);
             SYS_SCHED_GETSCHEDULER = 120     => sys_sched_getscheduler(args[..1]);
             SYS_SCHED_GETPARAM = 121         => sys_sched_getparam(args[..2]);
+            SYS_SCHED_RR_GET_INTERVAL = 127  => sys_sched_rr_get_interval(args[..2]);
             SYS_SCHED_SETAFFINITY = 122      => sys_sched_setaffinity(args[..3]);
             SYS_SCHED_GETAFFINITY = 123      => sys_sched_getaffinity(args[..3]);
             SYS_SCHED_YIELD = 124            => sys_sched_yield(args[..0]);
@@ -404,8 +408,11 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_EXECVE = 221                 => sys_execve(args[..3], &mut user_ctx);
             SYS_MMAP = 222                   => sys_mmap(args[..6]);
             SYS_FADVISE64 = 223              => sys_fadvise64(args[..4]);
+            SYS_MLOCK = 228                 => sys_mlock(args[..2]);
+            SYS_MUNLOCK = 229               => sys_munlock(args[..2]);
             SYS_MPROTECT = 226               => sys_mprotect(args[..3]);
             SYS_MSYNC = 227                  => sys_msync(args[..3]);
+            SYS_MINCORE = 232               => sys_mincore(args[..3]);
             SYS_MADVISE = 233                => sys_madvise(args[..3]);
             SYS_RT_TGSIGQUEUEINFO = 240       => sys_rt_tgsigqueueinfo(args[..4]);
             SYS_ACCEPT4 = 242                => sys_accept4(args[..4]);

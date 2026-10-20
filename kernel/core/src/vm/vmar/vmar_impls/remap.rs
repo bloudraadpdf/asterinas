@@ -45,6 +45,13 @@ impl Vmar {
         new_size: usize,
         check_single_mapping: bool,
     ) -> Result<()> {
+        if old_size == 0
+            || map_addr
+                .checked_add(old_size)
+                .is_none_or(|end| end > super::VMAR_CAP_ADDR)
+        {
+            return_errno!(Errno::EFAULT);
+        }
         let mut inner = self.inner.write();
         let mut rss_delta = RssDelta::new(self);
 
@@ -57,7 +64,27 @@ impl Vmar {
         // `map_addr..map_addr + old_size` have a mapping. If not,
         // we should return an `Err`.
 
-        inner.resize_mapping(self, map_addr, old_size, new_size, &mut rss_delta)
+        let locks_growth = new_size > old_size
+            && inner
+                .vm_mappings
+                .find_one(&(map_addr + old_size - 1))
+                .is_some_and(|mapping| mapping.memory_locked());
+        if locks_growth {
+            self.reserve_locked_pages(
+                &mut inner,
+                (new_size - old_size) / PAGE_SIZE,
+                Errno::EAGAIN,
+            )?;
+        }
+        inner.resize_mapping(self, map_addr, old_size, new_size, &mut rss_delta)?;
+        if locks_growth {
+            self.add_locked_pages(map_addr + old_size..map_addr + new_size);
+        }
+        drop(inner);
+        if locks_growth {
+            self.populate_locked_best_effort(map_addr + old_size..map_addr + new_size);
+        }
+        Ok(())
     }
 
     /// Remaps the original mapping to a new address and/or size.
@@ -102,6 +129,7 @@ impl Vmar {
                 "remap: there is no mapping at the old address"
             )
         };
+        let memory_locked = old_mapping.memory_locked();
         let extra = if action == RemapOldMappingAction::Keep {
             new_size
         } else {
@@ -126,6 +154,14 @@ impl Vmar {
             {
                 return_errno_with_message!(Errno::EINVAL, "remap: the file offset overflows");
             }
+        }
+
+        if memory_locked && new_size > old_size {
+            self.reserve_locked_pages(
+                &mut inner,
+                (new_size - old_size) / PAGE_SIZE,
+                Errno::EAGAIN,
+            )?;
         }
 
         // Shrink the old mapping first.
@@ -176,6 +212,14 @@ impl Vmar {
                 let mut rmap = rmap_to_remove.remove(self, old_mapping_addr);
                 let new_mapping = old_mapping.enlarge(new_size - old_size);
                 inner.insert_try_merge(self, new_mapping, rmap.as_deref_mut());
+                if memory_locked {
+                    self.add_locked_pages(old_range.end..old_addr + new_size);
+                }
+                drop(rmap);
+                drop(inner);
+                if memory_locked {
+                    self.populate_locked_best_effort(old_range.end..old_addr + new_size);
+                }
                 return Ok(old_range.start);
             }
 
@@ -187,13 +231,8 @@ impl Vmar {
             let (vm_mapping, mut rmap_to_remove) = inner.remove(&old_mapping_addr).unwrap();
             let mut rmap = rmap_to_remove.remove(self, old_mapping_addr);
 
-            let (left, old_mapping, right) = vm_mapping.split_range(&old_range);
-            if let Some(left) = left {
-                inner.insert_without_try_merge(self, left, rmap.as_deref_mut());
-            }
-            if let Some(right) = right {
-                inner.insert_without_try_merge(self, right, rmap.as_deref_mut());
-            }
+            let old_mapping =
+                inner.extract_mapping_range(self, vm_mapping, &old_range, rmap.as_deref_mut());
 
             // Create a new `VmMapping` at the target address.
             // Note that we have ensured that `new_size >= old_size` at the beginning.
@@ -205,7 +244,7 @@ impl Vmar {
             );
 
             // Move the mapping before dropping `rmap`.
-            self.move_pt(old_range, new_range.clone());
+            self.move_pt(old_range.clone(), new_range.clone());
         } else {
             let old_mapping = inner.vm_mappings.find_one(&old_mapping_addr).unwrap();
             let vmo_for_rmap = old_mapping.vmo_for_rmap().cloned();
@@ -222,9 +261,22 @@ impl Vmar {
             );
 
             // Move the mapping before dropping `rmap`.
-            self.move_pt(old_range, new_range.clone());
+            self.move_pt(old_range.clone(), new_range.clone());
         }
 
+        if memory_locked {
+            self.move_locked_pages(old_range.clone(), new_range.start);
+            if new_size > old_size {
+                self.add_locked_pages(new_range.start + old_size..new_range.end);
+            }
+            if action == RemapOldMappingAction::Keep {
+                inner.set_memory_lock_flags(self, old_range, false);
+            }
+        }
+        drop(inner);
+        if memory_locked && new_size > old_size {
+            self.populate_locked_best_effort(new_range.start + old_size..new_range.end);
+        }
         Ok(new_range.start)
     }
 

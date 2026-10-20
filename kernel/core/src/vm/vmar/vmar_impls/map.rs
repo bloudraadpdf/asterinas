@@ -72,6 +72,7 @@ impl Vmar {
 pub(crate) struct VmarMapOptions<'a, 'b> {
     shm: Option<PendingAttachment>,
     grows_down: bool,
+    memory_locked: bool,
     parent: &'a Vmar,
     mappable: Option<MappableObject<'b>>,
     file: Option<Arc<dyn FileLike>>,
@@ -126,6 +127,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         Self {
             shm: None,
             grows_down: false,
+            memory_locked: false,
             parent,
             mappable: None,
             file: None,
@@ -227,6 +229,12 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         self
     }
 
+    /// Locks the new mapping and attempts to populate it before returning.
+    pub(crate) fn memory_locked(mut self) -> Self {
+        self.memory_locked = true;
+        self
+    }
+
     pub(crate) fn grows_down(mut self) -> Self {
         self.grows_down = true;
         self
@@ -280,6 +288,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         let Self {
             shm,
             grows_down,
+            memory_locked,
             parent,
             mappable,
             file,
@@ -293,6 +302,9 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             handle_page_faults_around,
         } = self;
 
+        if memory_locked && super::locking::current_lock_limit() == 0 {
+            return_errno!(Errno::EPERM);
+        }
         let mut inner = parent.inner.write();
 
         inner
@@ -330,6 +342,9 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             "allocate free region, map_size = 0x{:x}, offset = {:x?}, align = 0x{:x}",
             map_size, offset, align
         );
+        if memory_locked {
+            parent.reserve_locked_pages(&mut inner, map_size / PAGE_SIZE, Errno::EAGAIN)?;
+        }
         let map_to_addr = match offset {
             VmarMapOffset::FixedReplace(map_to_addr) => {
                 let mut rss_delta = RssDelta::new(parent);
@@ -447,9 +462,18 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             }
         }
 
+        let lock_mapping = memory_locked && vm_mapping.can_memory_lock();
+        if lock_mapping {
+            vm_mapping.set_memory_locked(true);
+            parent.add_locked_pages(map_to_addr..map_to_addr + map_size);
+        }
         // Add the mapping to the VMAR.
         inner.insert_try_merge(parent, vm_mapping, rmap.as_deref_mut());
-
+        drop(rmap);
+        drop(inner);
+        if lock_mapping {
+            parent.populate_locked_best_effort(map_to_addr..map_to_addr + map_size);
+        }
         Ok(map_to_addr)
     }
 

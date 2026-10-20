@@ -122,7 +122,9 @@ mod cache_page;
 mod tests;
 mod vmo;
 
-pub(crate) use cache_page::{CachePage, CachePageExt, CachePageMeta, LockedCachePage};
+pub(crate) use cache_page::{
+    CachePage, CachePageExt, CachePageMeta, CachePagePin, LockedCachePage,
+};
 pub use vmo::Vmo;
 pub(crate) use vmo::{VmoCommitError, VmoFlags, VmoMapMode, VmoOptions};
 
@@ -345,15 +347,15 @@ impl PageCache {
     ///
     /// Only pages in the `UpToDate` state are removed. Dirty and uninitialized
     /// pages are left in place. This is useful for invalidating cached data that
-    /// is no longer needed and can be re-read from the backend if necessary
-    /// (e.g., before direct I/O operations).
+    /// is no longer needed and can be re-read from the backend if necessary.
+    /// Memory-locked pages remain resident during this reclaim operation.
     #[cfg_attr(not(ktest), expect(dead_code))]
     pub(crate) fn evict_range(&self, range: Range<usize>) -> Result<()> {
         let Some(vmo) = self.0.as_backed_vmo() else {
             return Ok(());
         };
 
-        vmo.evict_up_to_date_pages(&range)
+        vmo.evict_up_to_date_pages(&range, vmo::EvictMode::Reclaim)
     }
 
     /// Flushes dirty pages and then evicts clean pages in the specified range.
@@ -368,7 +370,7 @@ impl PageCache {
         };
 
         vmo.flush_dirty_pages(&range)?;
-        vmo.evict_up_to_date_pages(&range)
+        vmo.evict_up_to_date_pages(&range, vmo::EvictMode::Invalidate)
     }
 
     /// Fills the specified range of the page cache with zeros.

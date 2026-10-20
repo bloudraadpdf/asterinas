@@ -8,7 +8,8 @@ pub(crate) use self::{
     nice::{AtomicNice, Nice},
     sched_class::{
         LinuxSchedPolicy, RealTimePolicy, RealTimePriority, SchedAttr, SchedPolicy, SchedPriority,
-        init, init_on_each_cpu, set_thread_inherited_priority, set_thread_policy,
+        init, init_on_each_cpu, round_robin_interval, set_thread_inherited_priority,
+        set_thread_policy,
     },
     stats::{loadavg, nr_queued_and_running},
 };

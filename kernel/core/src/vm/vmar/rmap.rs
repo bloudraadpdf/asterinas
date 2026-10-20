@@ -106,6 +106,7 @@ impl Rmap {
                     RssType::File,
                     -(cursor_mut.unmap(addr_range.len()) as isize),
                 );
+                vmar.invalidate_locked_pages(addr_range.clone());
                 cursor_mut.flusher().dispatch_tlb_flush();
                 cursor_mut.flusher().sync_tlb_flush();
             }

@@ -4,6 +4,10 @@
 
 set -e
 
+./mincore
+./mlock
+./mlock_remap_accounting
+
 ./mmap/data_account
 ./mmap/grow_down
 ./mmap/mmap_and_fork

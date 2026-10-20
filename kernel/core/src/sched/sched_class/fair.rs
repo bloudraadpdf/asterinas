@@ -274,13 +274,29 @@ impl FairClassRq {
     /// 3. The scheduling period should not be too high to ensure the scheduling latency
     ///    & responsiveness.
     fn period(&self) -> u64 {
+        Self::period_for_count(self.entities.len() + 1)
+    }
+
+    fn period_for_count(count: usize) -> u64 {
         let base_slice_clks = base_slice_clocks();
         let min_period_clks = min_period_clocks();
 
         // `+ 1` means including the current running thread.
-        let period_single_cpu =
-            (base_slice_clks * (self.entities.len() + 1) as u64).max(min_period_clks);
+        let period_single_cpu = (base_slice_clks * count as u64).max(min_period_clks);
         period_single_cpu * u64::from((1 + num_cpus()).ilog2())
+    }
+
+    pub(super) fn interval_for(&self, target: &SchedAttr, current: Option<&SchedAttr>) -> u64 {
+        let current_weight = current.map_or(0, |attr| {
+            attr.fair.weight.load(Ordering::Relaxed) & !HAS_PENDING
+        });
+        let total_weight = self.total_weight + current_weight;
+        if total_weight == 0 {
+            return 0;
+        }
+        let target_weight = target.fair.weight.load(Ordering::Relaxed) & !HAS_PENDING;
+        let period = Self::period_for_count(self.entities.len() + usize::from(current.is_some()));
+        period.saturating_mul(target_weight) / total_weight
     }
 
     /// The virtual time slice for each thread in the run queue, measured in vruntime clocks.

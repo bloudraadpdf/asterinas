@@ -76,8 +76,10 @@ use super::{
     lseek::sys_lseek,
     madvise::sys_madvise,
     memfd_create::sys_memfd_create,
+    mincore::sys_mincore,
     mkdir::{sys_mkdir, sys_mkdirat},
     mknod::{sys_mknod, sys_mknodat},
+    mlock::{sys_mlock, sys_munlock},
     mmap::sys_mmap,
     mount::sys_mount,
     move_mount::sys_move_mount,
@@ -128,6 +130,7 @@ use super::{
     sched_getattr::sys_sched_getattr,
     sched_getparam::sys_sched_getparam,
     sched_getscheduler::sys_sched_getscheduler,
+    sched_rr_get_interval::sys_sched_rr_get_interval,
     sched_setattr::sys_sched_setattr,
     sched_setparam::sys_sched_setparam,
     sched_setscheduler::sys_sched_setscheduler,
@@ -221,6 +224,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_MREMAP = 25            => sys_mremap(args[..5]);
     SYS_MSYNC = 26             => sys_msync(args[..3]);
     SYS_SCHED_YIELD = 24       => sys_sched_yield(args[..0]);
+    SYS_MINCORE = 27          => sys_mincore(args[..3]);
     SYS_MADVISE = 28           => sys_madvise(args[..3]);
     SYS_SHMGET = 29            => sys_shmget(args[..3]);
     SYS_SHMAT = 30             => sys_shmat(args[..3]);
@@ -336,6 +340,9 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_SCHED_GETSCHEDULER = 145 => sys_sched_getscheduler(args[..1]);
     SYS_SCHED_GET_PRIORITY_MAX = 146 => sys_sched_get_priority_max(args[..1]);
     SYS_SCHED_GET_PRIORITY_MIN = 147 => sys_sched_get_priority_min(args[..1]);
+    SYS_SCHED_RR_GET_INTERVAL = 148 => sys_sched_rr_get_interval(args[..2]);
+    SYS_MLOCK = 149            => sys_mlock(args[..2]);
+    SYS_MUNLOCK = 150          => sys_munlock(args[..2]);
     SYS_PIVOT_ROOT = 155       => sys_pivot_root(args[..2]);
     SYS_PRCTL = 157            => sys_prctl(args[..5]);
     SYS_ARCH_PRCTL = 158       => sys_arch_prctl(args[..2]);

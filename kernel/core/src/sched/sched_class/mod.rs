@@ -5,7 +5,7 @@
 #![warn(unused)]
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{fmt, ops::Bound, sync::atomic::Ordering};
+use core::{fmt, ops::Bound, sync::atomic::Ordering, time::Duration};
 
 use ostd::{
     arch::read_tsc as sched_clock,
@@ -62,6 +62,34 @@ pub(crate) fn init() {
 
 pub(crate) fn init_on_each_cpu() {
     enable_preemption_on_cpu();
+}
+
+pub(crate) fn round_robin_interval(thread: &Arc<Thread>) -> Duration {
+    let scheduler = CLASS_SCHEDULER.get().unwrap();
+    let attr = thread.sched_attr();
+    let _placement = attr.placement.lock();
+    let clocks = match attr.effective_policy() {
+        SchedPolicy::RealTime { .. } => match attr.policy() {
+            SchedPolicy::RealTime {
+                rt_policy: RealTimePolicy::RoundRobin { .. },
+                ..
+            } => attr.real_time.time_slice(),
+            _ => 0,
+        },
+        SchedPolicy::Fair(_) => {
+            let Some(cpu) = thread.task().and_then(|task| task.cpu().get()) else {
+                return Duration::ZERO;
+            };
+            let rq = scheduler.rqs[cpu.as_usize()].lock();
+            let current = rq.current.as_ref().and_then(|((_, thread), _)| {
+                let attr = thread.sched_attr();
+                matches!(attr.effective_policy(), SchedPolicy::Fair(_)).then_some(attr)
+            });
+            rq.fair.interval_for(attr, current)
+        }
+        _ => 0,
+    };
+    time::clocks_to_duration(clocks)
 }
 
 pub(crate) fn set_thread_policy(thread: &Arc<Thread>, policy: SchedPolicy) -> Option<CpuId> {

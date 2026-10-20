@@ -20,7 +20,7 @@ impl Vmar {
             debug_assert!(vm_mapping.range().contains(&address));
 
             let mut rss_delta = RssDelta::new(self);
-            return vm_mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta);
+            return self.fault_locked_mapping(vm_mapping, page_fault_info, &mut rss_delta);
         }
 
         drop(inner);
@@ -32,7 +32,7 @@ impl Vmar {
         };
         let mapping = inner.vm_mappings.find_one(&base).unwrap();
         let mut rss_delta = RssDelta::new(self);
-        mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta)
+        self.fault_locked_mapping(mapping, page_fault_info, &mut rss_delta)
     }
 
     fn grow_stack(&self, inner: &mut VmarInner, address: Vaddr) -> Result<Vaddr> {
@@ -69,9 +69,25 @@ impl Vmar {
         {
             return_errno!(Errno::EFAULT);
         }
+        let memory_locked = inner.vm_mappings.find_one(&base).unwrap().memory_locked();
+        if memory_locked {
+            self.reserve_locked_pages(inner, extra / PAGE_SIZE, Errno::EFAULT)?;
+        }
         let (mapping, mut removed) = inner.remove(&base).unwrap();
         let mut rmap = removed.remove(self, base);
         inner.insert_without_try_merge(self, mapping.grow_down(start), rmap.as_deref_mut());
+        if memory_locked {
+            self.add_locked_pages(start..base);
+        }
+        drop(rmap);
+        if memory_locked {
+            let mapping = inner.vm_mappings.find_one(&start).unwrap();
+            for address in (start..base).step_by(PAGE_SIZE) {
+                let info = super::locking::lock_fault_info(mapping, address)?;
+                let mut rss = RssDelta::new(self);
+                self.fault_locked_mapping(mapping, &info, &mut rss)?;
+            }
+        }
         Ok(start)
     }
 }

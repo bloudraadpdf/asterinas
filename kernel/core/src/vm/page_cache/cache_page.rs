@@ -3,7 +3,7 @@
 use core::{
     borrow::Borrow,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
@@ -91,6 +91,7 @@ pub(crate) struct CachePageMeta {
     is_writing_back: AtomicBool,
     /// An unfinished preallocation may remove this page until a user commits it.
     preallocation_pending: AtomicBool,
+    lock_pins: AtomicUsize,
     _charge: SpinLock<Option<QuotaCharge>>,
     // TODO: Add a reverse mapping from the page to VMO for eviction.
 }
@@ -102,12 +103,45 @@ impl Default for CachePageMeta {
             lock: AtomicBool::new(false),
             is_writing_back: AtomicBool::new(false),
             preallocation_pending: AtomicBool::new(false),
+            lock_pins: AtomicUsize::new(0),
             _charge: SpinLock::new(None),
         }
     }
 }
 
 impl_untyped_frame_meta_for!(CachePageMeta);
+
+const EVICTING: usize = 1 << (usize::BITS - 1);
+
+/// A reference that prevents ordinary cache eviction of a memory-locked page.
+#[derive(Debug)]
+pub(crate) struct CachePagePin(CachePage);
+
+impl CachePagePin {
+    pub(crate) fn try_new(page: CachePage) -> Result<Self, CachePage> {
+        if page
+            .metadata()
+            .lock_pins
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+                if pins < EVICTING - 1 {
+                    Some(pins + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
+            return Err(page);
+        }
+        Ok(Self(page))
+    }
+}
+
+impl Drop for CachePagePin {
+    fn drop(&mut self) {
+        self.0.metadata().lock_pins.fetch_sub(1, Ordering::Release);
+    }
+}
 
 /// Convenience operations on a [`CachePage`] handle.
 ///
@@ -338,8 +372,26 @@ impl<PageRef: Borrow<CachePage>> LockedCachePage<PageRef> {
     /// associated with the page cache.
     pub(super) fn set_evicted(&self) {
         self.metadata()
+            .lock_pins
+            .fetch_or(EVICTING, Ordering::AcqRel);
+        self.metadata()
             .state
             .store(PageState::Evicted, Ordering::Release);
+    }
+
+    /// Marks a clean page evicted only if no memory lock pins it.
+    pub(super) fn try_evict_unpinned(&self) -> bool {
+        if !self.state().is_up_to_date()
+            || self
+                .metadata()
+                .lock_pins
+                .compare_exchange(0, EVICTING, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        self.set_evicted();
+        true
     }
 
     /// Sets the writing back flag of the page, indicating that the page
@@ -438,4 +490,33 @@ fn lock_page(page: &CachePage) -> &'static WaitQueue {
             .ok()
     });
     wait_queue
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::*;
+
+    use super::*;
+
+    #[ktest]
+    fn memory_locks_exclude_eviction_and_survive_truncation() {
+        let page = CachePage::alloc_zero(None).unwrap();
+        let first = CachePagePin::try_new(page.clone()).unwrap();
+        let second = CachePagePin::try_new(page.clone()).unwrap();
+        let locked = page.lock_guard();
+        assert!(!locked.try_evict_unpinned());
+        drop(first);
+        assert!(!locked.try_evict_unpinned());
+        drop(second);
+        assert!(locked.try_evict_unpinned());
+        assert!(CachePagePin::try_new(page.clone()).is_err());
+        drop(locked);
+
+        let page = CachePage::alloc_zero(None).unwrap();
+        let pin = CachePagePin::try_new(page.clone()).unwrap();
+        page.lock_guard().set_evicted();
+        assert!(CachePagePin::try_new(page.clone()).is_err());
+        drop(pin);
+        assert_eq!(page.metadata().lock_pins.load(Ordering::Acquire), EVICTING);
+    }
 }
