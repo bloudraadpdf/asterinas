@@ -156,6 +156,10 @@ impl FileCommon {
     }
 
     pub(crate) fn release_range_locks(&self, owner: RangeLockOwner) {
+        if self.status_flags().contains(StatusFlags::O_PATH) {
+            return;
+        }
+
         if let Some(range_lock_list) = self
             .path()
             .inode()
