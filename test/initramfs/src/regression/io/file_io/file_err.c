@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -69,6 +70,33 @@ FN_TEST(ftruncate_large)
 	TEST_SUCC(ftruncate(memfd, 0));
 
 	TEST_SUCC(close(memfd));
+}
+END_TEST()
+
+FN_TEST(ftruncate_append_descriptor)
+{
+	int modes[] = { O_WRONLY, O_RDWR };
+	for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+		char path[] = "/tmp/ftruncate_append_XXXXXX";
+		int temporary_fd = CHECK(mkstemp(path));
+		int append_fd = CHECK(open(path, modes[i] | O_APPEND));
+		CHECK(close(temporary_fd));
+		CHECK(unlink(path));
+
+		TEST_RES(write(append_fd, "abc", 3), _ret == 3);
+		TEST_RES(lseek(append_fd, 1, SEEK_SET), _ret == 1);
+		TEST_SUCC(ftruncate(append_fd, 8));
+		struct stat statbuf = { 0 };
+		TEST_SUCC(fstat(append_fd, &statbuf));
+		TEST_RES(statbuf.st_size, _ret == 8);
+		TEST_SUCC(ftruncate(append_fd, 2));
+		TEST_RES(lseek(append_fd, 0, SEEK_CUR), _ret == 1);
+		TEST_RES(write(append_fd, "d", 1), _ret == 1);
+		TEST_SUCC(fstat(append_fd, &statbuf));
+		TEST_RES(statbuf.st_size, _ret == 3);
+		TEST_RES(lseek(append_fd, 0, SEEK_CUR), _ret == 3);
+		TEST_SUCC(close(append_fd));
+	}
 }
 END_TEST()
 

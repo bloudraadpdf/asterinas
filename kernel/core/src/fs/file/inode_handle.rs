@@ -331,10 +331,6 @@ impl FileLike for InodeHandle {
             return_errno_with_message!(Errno::EINVAL, "the file is not opened writable");
         }
 
-        if self.status_flags().contains(StatusFlags::O_APPEND) {
-            // FIXME: It's allowed to `ftruncate` an append-only file on Linux.
-            return_errno_with_message!(Errno::EPERM, "can not resize append-only file");
-        }
         // `ftruncate` uses the descriptor's write mode and must not recheck current inode
         // permissions. See <https://man7.org/linux/man-pages/man2/truncate.2.html>.
         self.path().resize_unchecked_access(new_size)
