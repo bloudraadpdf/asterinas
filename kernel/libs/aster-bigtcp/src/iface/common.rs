@@ -242,20 +242,106 @@ impl<E: Ext> IfaceCommon<E> {
     }
 
     fn do_poll_and_notify(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
-        let next_poll = self.do_poll(device, phy);
+        let (next_poll, _) = self.do_poll(device, phy, usize::MAX);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
     }
 
-    fn do_poll(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) -> Option<u64> {
+    pub(super) fn poll_with_budget<D: WithDevice>(
+        &self,
+        driver: &D,
+        phy: &dyn PollPhy,
+        budget: u16,
+    ) -> usize {
+        if budget == 0 {
+            return 0;
+        }
+        driver.with(|device| {
+            let received = self.do_busy_poll(device, phy, usize::from(budget));
+            device.notify_poll_end();
+            // General egress belongs to the background poll, including replies deferred
+            // when this batch exhausted its local TCP processing allowance.
+            let now = (get_network_timestamp().total_millis() as u64).max(1);
+            self.sched_poll.schedule_next_poll(Some(now));
+            received
+        })
+    }
+
+    fn do_busy_poll(
+        &self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        budget: usize,
+    ) -> usize {
+        const LOCAL_TCP_STEPS: usize = 64;
+        let mut interface = self.interface();
+        interface.context_mut().now = get_network_timestamp();
+        let mut sockets = self.sockets.lock();
+        let mut actions = Vec::new();
+        let mut remaining_tcp_steps = LOCAL_TCP_STEPS;
+        let mut received = 0;
+
+        // Applying actions after each packet bounds temporary storage independently of
+        // the socket population and makes newly accepted connections visible immediately.
+        for _ in 0..budget {
+            let deferred = interface.take_deferred_tcp();
+            let (count, remaining, deferred) = {
+                let mut context = PollContext::new(interface.as_mut(), &sockets, &mut actions);
+                context.limit_local_tcp(remaining_tcp_steps);
+                let count = if let Some((ip_repr, tcp_repr)) = deferred {
+                    context.process_deferred_tcp(device, phy, &ip_repr, &tcp_repr);
+                    0
+                } else {
+                    context.poll_ingress(device, phy, 1)
+                };
+                (
+                    count,
+                    context.remaining_local_tcp_steps(),
+                    context.take_deferred_tcp(),
+                )
+            };
+            remaining_tcp_steps = remaining;
+            for action in actions.drain(..) {
+                match action {
+                    SocketTableAction::AddTcpConn(connection) => {
+                        let result = sockets.insert_connection(connection);
+                        debug_assert!(result.is_ok());
+                    }
+                    SocketTableAction::DelTcpConn(key) => {
+                        sockets.remove_dead_tcp_connection(&key);
+                    }
+                }
+            }
+            received += count;
+            if let Some(reply) = deferred {
+                interface.defer_tcp(reply);
+                break;
+            }
+            if remaining_tcp_steps == 0 || count == 0 {
+                break;
+            }
+        }
+        received
+    }
+
+    fn do_poll(
+        &self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        budget: usize,
+    ) -> (Option<u64>, usize) {
         let mut interface = self.interface();
         interface.context_mut().now = get_network_timestamp();
 
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
+        let deferred = interface.take_deferred_tcp();
         let mut context = PollContext::new(interface.as_mut(), &sockets, &mut socket_actions);
-        context.poll_ingress(device, phy);
+        if let Some((ip_repr, tcp_repr)) = deferred {
+            context.process_deferred_tcp(device, phy, &ip_repr, &tcp_repr);
+        }
+        let received = context.poll_ingress(device, phy, budget);
         context.poll_egress(device, phy);
 
         // Insert new connections and remove dead connections.
@@ -273,7 +359,7 @@ impl<E: Ext> IfaceCommon<E> {
 
         // Note that only TCP connections can have timers set, so as far as the time to poll is
         // concerned, we only need to consider TCP connections.
-        interface.next_poll_at_ms()
+        (interface.next_poll_at_ms(), received)
     }
 }
 

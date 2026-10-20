@@ -50,6 +50,7 @@ static NEXT_BINDING_ID: AtomicU64 = AtomicU64::new(1);
 struct State {
     incoming: VecDeque<ReceivedDatagram>,
     incoming_bytes: usize,
+    last_receive_iface: Option<u32>,
     outgoing: BTreeMap<u32, VecDeque<Datagram>>,
     outgoing_bytes: usize,
     outgoing_packets: usize,
@@ -161,6 +162,7 @@ impl<E: Ext> UdpSocketBg<E> {
             .incoming
             .push_back(ReceivedDatagram { metadata, payload });
         state.incoming_bytes += length;
+        state.last_receive_iface = Some(self.bound.iface().index());
         drop(state);
         self.shared.observer.on_events(SocketEvents::CAN_RECV);
         true
@@ -238,6 +240,7 @@ impl<E: Ext> UdpSocket<E> {
             state: SpinLock::new(State {
                 incoming: VecDeque::new(),
                 incoming_bytes: 0,
+                last_receive_iface: None,
                 outgoing: BTreeMap::new(),
                 outgoing_bytes: 0,
                 outgoing_packets: 0,
@@ -371,6 +374,14 @@ impl<E: Ext> UdpSocket<E> {
             state.incoming_bytes -= message.payload.len();
         }
         Ok(result)
+    }
+
+    /// Returns the interface that most recently accepted a datagram for this socket.
+    pub fn busy_poll_iface(&self) -> Option<Arc<dyn Iface<E>>> {
+        let index = self.first.shared.state.lock().last_receive_iface?;
+        self.bound_ports()
+            .find(|port| port.iface().index() == index)
+            .map(|port| port.iface().clone())
     }
 
     pub fn can_recv(&self) -> bool {

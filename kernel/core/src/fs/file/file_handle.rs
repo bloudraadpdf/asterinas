@@ -24,6 +24,12 @@ use crate::{
 
 /// The basic operations defined on a file
 pub(crate) trait FileLike: Pollable + Send + Sync + Any {
+    /// Polls a bound network interface, or returns `None` for unsupported files.
+    /// A zero budget only checks whether a target is available.
+    fn busy_poll(&self, _budget: u16) -> Option<usize> {
+        None
+    }
+
     /// Reads data from this file.
     ///
     /// By default, this method returns `EBADF`

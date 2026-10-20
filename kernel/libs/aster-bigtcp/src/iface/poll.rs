@@ -34,6 +34,8 @@ pub(super) struct PollContext<'a, E: Ext> {
     iface: PollableIfaceMut<'a, E>,
     sockets: &'a SocketTable<E>,
     actions: &'a mut Vec<SocketTableAction<E>>,
+    local_tcp_steps: usize,
+    deferred_tcp: Option<(IpRepr, TcpRepr<'static>)>,
 }
 
 /// Socket table actions such as adding or removing TCP connections.
@@ -55,13 +57,50 @@ impl<'a, E: Ext> PollContext<'a, E> {
             iface,
             sockets,
             actions,
+            local_tcp_steps: usize::MAX,
+            deferred_tcp: None,
         }
     }
 }
 
 impl<E: Ext> PollContext<'_, E> {
-    pub(super) fn poll_ingress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
-        loop {
+    pub(super) fn limit_local_tcp(&mut self, steps: usize) {
+        self.local_tcp_steps = steps;
+    }
+
+    pub(super) fn remaining_local_tcp_steps(&self) -> usize {
+        self.local_tcp_steps
+    }
+
+    pub(super) fn take_deferred_tcp(&mut self) -> Option<(IpRepr, TcpRepr<'static>)> {
+        self.deferred_tcp.take()
+    }
+
+    pub(super) fn process_deferred_tcp(
+        &mut self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        ip_repr: &IpRepr,
+        tcp_repr: &TcpRepr<'static>,
+    ) {
+        if let Some((ip_repr, tcp_repr)) =
+            self.process_tcp_until_outgoing(ip_repr, tcp_repr, PacketSlice::from(tcp_repr.payload))
+            && let Some(reply) = self.emit_tcp(phy, &ip_repr, &tcp_repr)
+            && let Some(packet) = phy.dispatch(reply, self.iface.context_mut())
+            && let Err(err) = device.send(packet)
+        {
+            ostd::error!("failed to send a network packet: {:?}", err);
+        }
+    }
+
+    pub(super) fn poll_ingress(
+        &mut self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        budget: usize,
+    ) -> usize {
+        let mut received = 0;
+        while received < budget {
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
                 Err(NetError::NotReady) => break,
@@ -71,6 +110,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
+            received += 1;
             let Some(processed) = phy.process(rx_packet, self.iface.context_mut()) else {
                 continue;
             };
@@ -93,6 +133,7 @@ impl<E: Ext> PollContext<'_, E> {
                 ostd::error!("failed to send a network packet: {:?}", err);
             }
         }
+        received
     }
 
     fn parse_and_process_ip(
@@ -160,12 +201,18 @@ impl<E: Ext> PollContext<'_, E> {
         tcp_repr: &TcpRepr,
         payload: PacketSlice<'_>,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
+        self.local_tcp_steps = self.local_tcp_steps.saturating_sub(1);
         let (mut ip_repr, mut tcp_repr) = self.process_tcp(ip_repr, tcp_repr, payload)?;
 
         loop {
             if !self.iface.context().is_unicast_local(ip_repr.dst_addr()) {
                 return Some((ip_repr, tcp_repr));
             }
+            if self.local_tcp_steps == 0 {
+                self.deferred_tcp = Some((ip_repr, tcp_repr));
+                return None;
+            }
+            self.local_tcp_steps -= 1;
 
             let payload = PacketSlice::from(tcp_repr.payload);
             let (new_ip_repr, new_tcp_repr) = self.process_tcp(&ip_repr, &tcp_repr, payload)?;

@@ -36,6 +36,7 @@ pub(super) struct TcpBacklog<E: Ext> {
     fast_open: FastOpenQueue,
     pub(super) connecting: BTreeMap<ConnectionKey, TcpConnection<E>>,
     pub(super) connected: Vec<TcpConnection<E>>,
+    pub(super) last_receive_iface: Option<u32>,
 }
 
 /// States needed by [`TcpListenerBg`].
@@ -128,6 +129,7 @@ impl<E: Ext> TcpListener<E> {
             fast_open: FastOpenQueue::new(option.fast_open_backlog),
             connecting: BTreeMap::new(),
             connected: Vec::new(),
+            last_receive_iface: None,
         })))
     }
 
@@ -216,6 +218,11 @@ impl<E: Ext> TcpListener<E> {
         !self.0.inner.backlog.lock().connected.is_empty()
     }
 
+    /// Returns the interface that last received traffic for this listener group.
+    pub fn last_receive_iface(&self) -> Option<u32> {
+        self.0.inner.backlog.lock().last_receive_iface
+    }
+
     /// Changes the limit for subsequent authenticated passive opens.
     pub fn set_fast_open_backlog(&self, limit: usize) {
         self.0.inner.backlog.lock().fast_open.set_limit(limit);
@@ -294,6 +301,8 @@ impl<E: Ext> TcpListenerBg<E> {
         {
             return (TcpProcessResult::NotProcessed, None);
         }
+
+        backlog.last_receive_iface = Some(self.bound.iface().index());
 
         // FIXME: According to the Linux implementation, `max_conn` is the upper bound of
         // `connected.len()`. We currently limit it to `connected.len() + connecting.len()` for

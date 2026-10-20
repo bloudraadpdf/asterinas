@@ -168,6 +168,10 @@ impl core::ops::Deref for SocketCommon {
 
 /// Operations defined on a socket.
 pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
+    fn busy_poll(&self, _budget: u16) -> Option<usize> {
+        None
+    }
+
     fn take_error(&self) -> Option<Error> {
         self.pending_error()
             .take()
@@ -276,6 +280,10 @@ pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
 }
 
 impl<T: Socket + 'static> FileLike for T {
+    fn busy_poll(&self, budget: u16) -> Option<usize> {
+        Socket::busy_poll(self, budget)
+    }
+
     fn read(&self, writer: &mut VmWriter) -> Result<usize> {
         if !writer.has_avail() {
             // Linux always returns `Ok(0)` in this case, so we follow it.

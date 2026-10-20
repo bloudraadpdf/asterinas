@@ -168,6 +168,17 @@ impl SocketPrivate for DatagramSocket {
 }
 
 impl Socket for DatagramSocket {
+    fn busy_poll(&self, budget: u16) -> Option<usize> {
+        let iface = {
+            let inner = self.inner.read();
+            let Inner::Bound(bound) = &*inner else {
+                return None;
+            };
+            bound.busy_poll_iface()?
+        };
+        Some(iface.poll_with_budget(budget))
+    }
+
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;
         let can_reuse = self.options.read().socket.reuse_addr();

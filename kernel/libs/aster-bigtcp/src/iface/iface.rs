@@ -25,6 +25,12 @@ pub trait Iface<E>: internal::IfaceInternal<E> + Send + Sync {
     /// Transmits or receives packets queued in the iface, and updates socket status accordingly.
     fn poll(&self);
 
+    /// Processes at most `budget` device RX packets and returns the number received.
+    ///
+    /// Zero checks eligibility without device I/O. General egress is deferred to a
+    /// background poll; local TCP responses have a separate bounded allowance.
+    fn poll_with_budget(&self, budget: u16) -> usize;
+
     /// Returns the maximum transmission unit.
     fn mtu(&self) -> usize;
 }

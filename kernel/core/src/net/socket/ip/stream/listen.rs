@@ -56,6 +56,14 @@ impl ListenStream {
         self.tcp_listeners[0].iface()
     }
 
+    pub(super) fn busy_poll_iface(&self) -> Option<Arc<Iface>> {
+        let index = self.tcp_listeners[0].last_receive_iface()?;
+        self.tcp_listeners
+            .iter()
+            .find(|listener| listener.iface().index() == index)
+            .map(|listener| listener.iface().clone())
+    }
+
     pub(super) fn set_fast_open_backlog(&self, limit: usize) {
         self.tcp_listeners[0].set_fast_open_backlog(limit);
     }

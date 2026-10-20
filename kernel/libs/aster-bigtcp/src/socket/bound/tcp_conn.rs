@@ -178,6 +178,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
 
             if let Some(ref listener) = self.listener {
                 let mut backlog = listener.inner.backlog.lock();
+                backlog.last_receive_iface = Some(this.bound.iface().index());
                 if let Some(value) = backlog.connecting.remove(this.connection_key()) {
                     backlog.connected.push(value);
                 }
