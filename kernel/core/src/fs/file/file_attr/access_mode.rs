@@ -2,8 +2,6 @@
 
 use aster_rights::Rights;
 
-use crate::prelude::*;
-
 #[expect(non_camel_case_types)]
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,6 +12,8 @@ pub(crate) enum AccessMode {
     O_WRONLY = 1,
     /// Read write
     O_RDWR = 2,
+    /// Checks read/write permission but permits only descriptor control operations.
+    IoctlOnly = 3,
 }
 
 impl AccessMode {
@@ -27,13 +27,15 @@ impl AccessMode {
 }
 
 impl AccessMode {
-    pub(crate) fn from_u32(flags: u32) -> Result<Self> {
-        let bits = (flags & 0b11) as u8;
+    pub(crate) const MASK: u32 = 0b11;
+
+    pub(crate) fn from_u32(flags: u32) -> Self {
+        let bits = (flags & Self::MASK) as u8;
         match bits {
-            0 => Ok(Self::O_RDONLY),
-            1 => Ok(Self::O_WRONLY),
-            2 => Ok(Self::O_RDWR),
-            _ => return_errno_with_message!(Errno::EINVAL, "the bits are not a valid access mode"),
+            0 => Self::O_RDONLY,
+            1 => Self::O_WRONLY,
+            2 => Self::O_RDWR,
+            _ => Self::IoctlOnly,
         }
     }
 }
@@ -60,6 +62,7 @@ impl From<AccessMode> for Rights {
             AccessMode::O_RDONLY => Rights::READ,
             AccessMode::O_WRONLY => Rights::WRITE,
             AccessMode::O_RDWR => Rights::READ | Rights::WRITE,
+            AccessMode::IoctlOnly => Rights::empty(),
         }
     }
 }

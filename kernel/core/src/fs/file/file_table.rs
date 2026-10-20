@@ -104,6 +104,7 @@ impl TryFrom<RawFileDesc> for FileDesc {
 /// not try to move the file table to a different address.
 pub(crate) struct FileTable {
     table: SlotVec<FileTableEntry>,
+    reserved: BTreeSet<FileDesc>,
 }
 
 impl FileTable {
@@ -111,6 +112,7 @@ impl FileTable {
     pub(crate) fn new() -> RwArc<Self> {
         RwArc::new(Self {
             table: SlotVec::new(),
+            reserved: BTreeSet::new(),
         })
     }
 
@@ -118,6 +120,7 @@ impl FileTable {
     pub(crate) fn fork_from(parent: &Self) -> RwArc<Self> {
         RwArc::new(Self {
             table: parent.table.clone(),
+            reserved: BTreeSet::new(),
         })
     }
 
@@ -151,13 +154,23 @@ impl FileTable {
     }
 
     fn find_free_fd(&self, start: usize, limit: usize) -> Result<usize> {
-        let free = if self.table.len() == self.len() || start >= self.len() {
+        let mut free = if self.table.len() == self.len() || start >= self.len() {
             self.len().max(start)
         } else {
             (start..self.len().min(limit))
                 .find(|&fd| self.table.get(fd).is_none())
                 .unwrap_or(self.len())
         };
+        while free < limit
+            && self
+                .reserved
+                .contains(&FileDesc::try_from(free as RawFileDesc).unwrap())
+        {
+            free += 1;
+            while free < limit && self.table.get(free).is_some() {
+                free += 1;
+            }
+        }
         if free >= limit {
             return_errno_with_message!(Errno::EMFILE, "the open file limit has been reached");
         }
@@ -172,6 +185,9 @@ impl FileTable {
         flags: FdFlags,
     ) -> Result<Option<ClosedFile>> {
         let entry = self.duplicate_entry(fd, flags)?;
+        if self.reserved.contains(&new_fd) {
+            return_errno_with_message!(Errno::EBUSY, "the destination descriptor is reserved");
+        }
         let closed_file = self.close_file(new_fd);
         self.table.put_at(new_fd.into(), entry);
         Ok(closed_file)
@@ -215,6 +231,22 @@ impl FileTable {
             (first_fd as RawFileDesc).try_into().unwrap(),
             (second_fd as RawFileDesc).try_into().unwrap(),
         ))
+    }
+
+    /// Reserves a descriptor before an operation with filesystem side effects.
+    pub(crate) fn reserve(file_table: &RwArc<Self>, limit: usize) -> Result<FileDescReservation> {
+        let fd = {
+            let mut table = file_table.write();
+            let fd = (table.find_free_fd(0, limit)? as RawFileDesc)
+                .try_into()
+                .unwrap();
+            table.reserved.insert(fd);
+            fd
+        };
+        Ok(FileDescReservation {
+            table: file_table.clone(),
+            fd: Some(fd),
+        })
     }
 
     pub(crate) fn close_file(&mut self, fd: FileDesc) -> Option<ClosedFile> {
@@ -290,6 +322,34 @@ impl Drop for FileTable {
         for (_, file) in self.fds_and_files() {
             file.common()
                 .release_range_locks(self.as_range_lock_owner());
+        }
+    }
+}
+
+/// A reserved descriptor that is released if its open operation fails.
+pub(crate) struct FileDescReservation {
+    table: RwArc<FileTable>,
+    fd: Option<FileDesc>,
+}
+
+impl FileDescReservation {
+    pub(crate) fn install(mut self, file: Arc<dyn FileLike>, flags: FdFlags) -> FileDesc {
+        let fd = self.fd.take().unwrap();
+        let mut table = self.table.write();
+        let was_reserved = table.reserved.remove(&fd);
+        debug_assert!(was_reserved);
+        debug_assert!(table.table.get(fd.into()).is_none());
+        table
+            .table
+            .put_at(fd.into(), FileTableEntry::new(file, flags));
+        fd
+    }
+}
+
+impl Drop for FileDescReservation {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd {
+            self.table.write().reserved.remove(&fd);
         }
     }
 }
@@ -426,5 +486,39 @@ bitflags! {
     pub(crate) struct FdFlags: u8 {
         /// Close on exec
         const CLOEXEC = 1;
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn reservations_count_towards_limits_and_release_on_failure() {
+        let table = FileTable::new();
+        let first = FileTable::reserve(&table, 2).unwrap();
+        let second = FileTable::reserve(&table, 2).unwrap();
+        assert_eq!(first.fd, Some(FileDesc::ZERO));
+        assert_eq!(second.fd, Some(FileDesc::try_from(1).unwrap()));
+        assert_eq!(
+            FileTable::reserve(&table, 2).err().unwrap().error(),
+            Errno::EMFILE
+        );
+        assert_eq!(
+            table.read().get_file(FileDesc::ZERO).err().unwrap().error(),
+            Errno::EBADF
+        );
+        assert_eq!(table.read().fds_and_files().count(), 0);
+        let fork = FileTable::fork_from(&table.read());
+        let fork_first = FileTable::reserve(&fork, 2).unwrap();
+        assert_eq!(fork_first.fd, Some(FileDesc::ZERO));
+        drop(first);
+        let reused = FileTable::reserve(&table, 2).unwrap();
+        assert_eq!(reused.fd, Some(FileDesc::ZERO));
+        drop(reused);
+        drop(second);
+        assert!(table.read().reserved.is_empty());
     }
 }

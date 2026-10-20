@@ -104,6 +104,7 @@ mod msync;
 mod munmap;
 mod nanosleep;
 mod open;
+mod openat2;
 mod pause;
 mod personality;
 mod pidfd_getfd;

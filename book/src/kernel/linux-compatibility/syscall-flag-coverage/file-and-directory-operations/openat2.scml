@@ -1,0 +1,22 @@
+openat2_flags =
+    O_RDONLY | O_WRONLY | O_RDWR |
+    O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC |
+    O_DIRECTORY | O_NOFOLLOW | O_TMPFILE |
+    O_APPEND | O_ASYNC | O_DIRECT | O_LARGEFILE | O_NOATIME |
+    O_NONBLOCK | O_DSYNC | O_SYNC;
+openat2_resolve =
+    RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS |
+    RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_CACHED;
+
+struct open_how = {
+    flags = <openat2_flags>,
+    resolve = <openat2_resolve>,
+    ..
+};
+struct open_how = {
+    flags = O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+    resolve = <openat2_resolve>,
+    ..
+};
+
+openat2(dirfd, path = <PATH>, how = <open_how>, size);

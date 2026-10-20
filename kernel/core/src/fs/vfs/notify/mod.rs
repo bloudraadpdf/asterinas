@@ -388,7 +388,7 @@ pub(crate) fn on_close(common: &FileCommon) {
         return;
     };
     let events = match common.access_mode() {
-        AccessMode::O_RDONLY => FsEvents::CLOSE_NOWRITE,
+        AccessMode::O_RDONLY | AccessMode::IoctlOnly => FsEvents::CLOSE_NOWRITE,
         _ => FsEvents::CLOSE_WRITE,
     };
     notify_parent(path, events);

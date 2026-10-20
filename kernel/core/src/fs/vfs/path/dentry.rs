@@ -652,6 +652,31 @@ impl DirDentry<'_> {
         Ok(self.insert_positive_child(&mut children, name, target))
     }
 
+    /// Looks up a cached child without waiting, revalidation, or filesystem calls.
+    pub(in crate::fs) fn lookup_child_cached(&self, name: &str) -> Result<Arc<Dentry>> {
+        let children = self
+            .children
+            .try_read()
+            .ok_or_else(|| Error::with_message(Errno::EAGAIN, "the directory cache is busy"))?;
+        match children.find(name) {
+            Some(CachedDentry::Positive { dentry })
+                if !self
+                    .revalidation_policy
+                    .contains(RevalidationPolicy::REVALIDATE_EXISTS) =>
+            {
+                Ok(dentry)
+            }
+            Some(CachedDentry::Negative)
+                if !self
+                    .revalidation_policy
+                    .contains(RevalidationPolicy::REVALIDATE_ABSENT) =>
+            {
+                return_errno_with_message!(Errno::ENOENT, "found a cached negative dentry");
+            }
+            _ => return_errno_with_message!(Errno::EAGAIN, "the child needs a filesystem lookup"),
+        }
+    }
+
     /// Creates a `Dentry` by making an inode of the `type_` with the `mode`.
     pub(in crate::fs) fn mknod(
         &self,
@@ -822,6 +847,7 @@ impl DirDentry<'_> {
         new_name: &str,
         mode: RenameMode,
     ) -> Result<()> {
+        let _rename_mutation = super::rename_epoch::RenameMutation::new();
         if is_dot_or_dotdot(old_name) {
             return_errno_with_message!(Errno::EBUSY, "old_name is . or ..");
         }

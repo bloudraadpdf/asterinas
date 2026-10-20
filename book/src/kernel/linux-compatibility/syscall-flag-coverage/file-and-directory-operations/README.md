@@ -35,6 +35,59 @@ The SCML rules are omitted for brevity.
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/openat.2.html).
 
+### `openat2`
+
+```c
+{{#include openat2.scml}}
+```
+
+The syscall validates all 64 bits of the open flags, mode and resolution flags.
+The initial `open_how` is 24 bytes.
+Larger structures require zero extension bytes and cannot exceed one page.
+Unknown flags, invalid creation modes, incompatible `O_PATH` flags,
+and `RESOLVE_BENEATH | RESOLVE_IN_ROOT` return `EINVAL`.
+Descriptor reservation precedes file creation or truncation;
+failed opens release their reservation.
+
+`RESOLVE_BENEATH` anchors relative traversal at `dirfd` and rejects escape with `EXDEV`.
+`RESOLVE_IN_ROOT` instead rebases absolute paths and absolute symlinks there,
+and clamps `..` at that root.
+`RESOLVE_NO_XDEV` rejects ordinary and bind-mount transitions.
+The symlink and magic-link restrictions apply while traversing links;
+an `O_PATH | O_NOFOLLOW` open can still return the final link itself.
+Underlying filesystem support for open flags remains the same as for `openat`.
+
+`RESOLVE_CACHED` uses nonblocking dentry-cache and inode metadata/link queries.
+RAMfs implements resident metadata and symlink queries with try-locks.
+A cache miss, required revalidation, unavailable resident metadata,
+or a contended resolver/cache/topology lock returns `EAGAIN`.
+Creation, truncation and temporary-file requests also return `EAGAIN` with this flag.
+Other filesystems can implement the same cache-only inode APIs;
+their default answer is that resident data is unavailable.
+
+Constrained walks pin path objects and snapshot the mount generation under a brief read guard.
+They release that guard before calling filesystem lookup or magic-link callbacks.
+The topology write guard marks its generation odd during a mutation and even on release.
+A changed or odd generation invalidates the walk with `EAGAIN`,
+including concurrent bind mounts and pivot-root changes.
+Each dentry rename marks a generation and active-writer count before changing parents,
+including nested overlay renames and all error exits through an RAII guard.
+A scoped reader starts only with no active writer,
+checks the generation while walking parents,
+then requires no active writer and the same generation at completion.
+Sequentially consistent atomics order these checks and mutation markers.
+Any overlapping rename returns `EAGAIN`.
+Neither a global tree reader nor a mount-topology reader is held across filesystem callbacks,
+so overlay copy-up can rename and procfs magic links can acquire a target resolver.
+Access mode 3 checks read/write permission but permits only descriptor control operations.
+It does not permit data I/O and cannot open directories or FIFOs.
+
+The final pinned path or creation parent was inside the root during resolution;
+a later rename can move it, as on Linux.
+
+See the Linux [`openat2` ABI](https://man7.org/linux/man-pages/man2/openat2.2.html)
+and [scoped path-walk contract](https://github.com/torvalds/linux/blob/v6.16/fs/namei.c#L903-L921).
+
 ### `renameat2`
 
 Supported functionality in SCML:

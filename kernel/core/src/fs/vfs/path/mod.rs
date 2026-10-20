@@ -14,8 +14,8 @@ pub(crate) use mount_propagation::MountPropType;
 pub(in crate::fs) use mount_propagation::MountTopology;
 use mount_propagation::PendingPropagationChanges;
 pub(crate) use resolver::{
-    AT_FDCWD, AbsPathResult, EmptyPathStr, FsPath, LookupResult, PathResolver, SplitPath,
-    SplitPathError,
+    AT_FDCWD, AbsPathResult, EmptyPathStr, FsPath, LookupResult, PathResolver, ResolveFlags,
+    SplitPath, SplitPathError,
 };
 
 use crate::{
@@ -44,6 +44,7 @@ mod dentry;
 mod mount;
 mod mount_namespace;
 mod mount_propagation;
+mod rename_epoch;
 mod resolver;
 
 /// A `Path` is used to represent an exact location in the VFS tree.
