@@ -18,6 +18,7 @@ pub(super) fn sys_fchmod(raw_fd: RawFileDesc, mode: u16, ctx: &Context) -> Resul
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
+    file.common().check_not_path()?;
     file.path()
         .chmod(InodeMode::from_bits_truncate(mode), ctx)?;
     Ok(SyscallReturn::Return(0))

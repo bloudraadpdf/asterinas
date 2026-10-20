@@ -99,10 +99,15 @@ impl FileCommon {
         FileDescriptionId(Arc::as_ptr(&self.lock_identity) as usize)
     }
 
-    pub(crate) fn test_range_lock(&self, mut lock: RangeLockItem) -> Result<RangeLockItem> {
+    pub(crate) fn check_not_path(&self) -> Result<()> {
         if self.status_flags().contains(StatusFlags::O_PATH) {
             return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
         }
+        Ok(())
+    }
+
+    pub(crate) fn test_range_lock(&self, mut lock: RangeLockItem) -> Result<RangeLockItem> {
+        self.check_not_path()?;
 
         let Some(range_lock_list) = self
             .path()
@@ -182,18 +187,14 @@ impl FileCommon {
     }
 
     pub(crate) fn set_flock(&self, lock: FlockItem, is_nonblocking: bool) -> Result<()> {
-        if self.status_flags().contains(StatusFlags::O_PATH) {
-            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-        }
+        self.check_not_path()?;
 
         let flock_list = self.path().inode().fs_lock_context_or_init().flock_list();
         flock_list.set_lock(lock, is_nonblocking)
     }
 
     pub(crate) fn unlock_flock(&self) -> Result<()> {
-        if self.status_flags().contains(StatusFlags::O_PATH) {
-            return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-        }
+        self.check_not_path()?;
 
         if let Some(flock_list) = self
             .path()
