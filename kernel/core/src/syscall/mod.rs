@@ -42,6 +42,7 @@ mod clone;
 mod close;
 mod connect;
 mod constants;
+mod copy_file_range;
 mod dup;
 mod epoll;
 mod eventfd;

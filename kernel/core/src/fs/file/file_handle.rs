@@ -327,7 +327,6 @@ impl dyn FileLike {
         self.read_at(offset, &mut writer)
     }
 
-    #[expect(dead_code)]
     pub(crate) fn write_bytes_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
         let mut reader = VmReader::from(buf).to_fallible();
         self.write_at(offset, &mut reader)
