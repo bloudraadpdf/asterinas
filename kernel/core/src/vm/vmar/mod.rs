@@ -2,6 +2,7 @@
 
 //! User address space management.
 
+mod anon_name;
 mod handle;
 mod interval_set;
 mod rmap;
@@ -13,6 +14,7 @@ mod vmar_impls;
 use ostd::mm::Vaddr;
 
 pub(crate) use self::{
+    anon_name::AnonVmaName,
     handle::VmarHandle,
     rmap::{Rmap, RmapEntry},
     vmar_impls::{

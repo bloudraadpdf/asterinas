@@ -45,6 +45,7 @@ fi
 ./personality/personality
 
 ./prctl/auxv
+./prctl/vma_name
 ./prctl/capbset
 ./prctl/no_new_privs
 ./prctl/secure_bits

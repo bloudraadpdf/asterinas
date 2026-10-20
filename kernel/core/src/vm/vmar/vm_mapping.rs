@@ -21,8 +21,8 @@ use ostd::{
 };
 
 use super::{
-    MmapMode, PageFaultInfo, Rmap, RssType, Vmar, interval_set::Interval, util::is_intersected,
-    vmar_impls::RssDelta,
+    AnonVmaName, MmapMode, PageFaultInfo, Rmap, RssType, Vmar, interval_set::Interval,
+    util::is_intersected, vmar_impls::RssDelta,
 };
 use crate::{
     fs::{
@@ -59,6 +59,7 @@ use crate::{
 /// [`Vmar`]: crate::vm::vmar::Vmar
 pub(crate) struct VmMapping {
     shm: Option<ShmMapping>,
+    anon_name: Option<AnonVmaName>,
     grows_down: bool,
     memory_locked: bool,
     /// The size of mapping, in bytes. The map size can even be larger than the
@@ -101,6 +102,7 @@ impl Debug for VmMapping {
             .field("map_to_addr", &self.map_to_addr)
             .field("mapped_mem", &self.mapped_mem)
             .field("file", &self.file.as_ref().map(|file| file.path()))
+            .field("anon_name", &self.anon_name)
             .field("map_mode", &self.map_mode)
             .field("handle_page_faults_around", &self.handle_page_faults_around)
             .field("perms", &self.perms)
@@ -128,6 +130,7 @@ impl VmMapping {
     ) -> Self {
         Self {
             shm: None,
+            anon_name: None,
             grows_down: false,
             memory_locked: false,
             map_size,
@@ -204,6 +207,7 @@ impl VmMapping {
     pub(super) fn new_fork(&self) -> VmMapping {
         VmMapping {
             shm: self.shm.clone(),
+            anon_name: self.anon_name.clone(),
             memory_locked: false,
             mapped_mem: self.mapped_mem.dup(),
             file: self.file.clone(),
@@ -222,6 +226,7 @@ impl VmMapping {
         let offset_in_mapping = range.start - self.map_to_addr;
         VmMapping {
             shm: self.shm.clone(),
+            anon_name: self.anon_name.clone(),
             map_size: NonZeroUsize::new(range.end - range.start).unwrap(),
             map_to_addr: va,
             mapped_mem: self.mapped_mem.dup_at_offset(offset_in_mapping),
@@ -233,6 +238,24 @@ impl VmMapping {
     pub(super) fn install_shm(&mut self, mapping: ShmMapping) {
         debug_assert!(self.shm.is_none());
         self.shm = Some(mapping);
+    }
+
+    pub(super) fn can_name_anonymous(&self) -> bool {
+        self.file.is_none()
+            && self.shm.is_none()
+            && match &self.mapped_mem {
+                MappedMemory::Anonymous => true,
+                MappedMemory::Vmo(_) => self.map_mode.is_shared(),
+                MappedMemory::Device(_) => false,
+            }
+    }
+
+    pub(super) fn anon_name(&self) -> Option<&AnonVmaName> {
+        self.anon_name.as_ref()
+    }
+
+    pub(super) fn set_anon_name(&mut self, name: Option<AnonVmaName>) {
+        self.anon_name = name;
     }
 
     pub(super) fn shm_origin(&self) -> Option<(Vaddr, ShmAttachmentId)> {
@@ -422,6 +445,15 @@ impl VmMapping {
                         return Some(Cow::Borrowed("[vdso]"));
                     }
                 }
+            }
+
+            if let Some(name) = &self.anon_name {
+                let prefix = if self.map_mode.is_shared() {
+                    "anon_shmem"
+                } else {
+                    "anon"
+                };
+                return Some(Cow::Owned(format!("[{}:{}]", prefix, name.as_str())));
             }
 
             if let Some(file) = &self.file {
@@ -803,6 +835,7 @@ impl VmMapping {
 
         let left = Self {
             shm: self.shm.clone(),
+            anon_name: self.anon_name.clone(),
             map_size: NonZeroUsize::new(left_size).unwrap(),
             map_to_addr: self.map_to_addr,
             mapped_mem: l_mapped_mem,
@@ -1120,6 +1153,7 @@ impl Drop for MappedVmo {
 fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     let is_adjacent = left.map_end() == right.map_to_addr();
     let is_type_equal = left.map_mode == right.map_mode
+        && left.anon_name == right.anon_name
         && left.grows_down == right.grows_down
         && left.memory_locked == right.memory_locked
         && left.shm.as_ref().map(ShmMapping::id) == right.shm.as_ref().map(ShmMapping::id)
@@ -1163,6 +1197,7 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
 
     Some(VmMapping {
         shm: left.shm.clone(),
+        anon_name: left.anon_name.clone(),
         map_size,
         mapped_mem,
         file: left.file.clone(),
