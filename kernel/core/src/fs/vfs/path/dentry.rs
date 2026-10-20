@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::format;
 use core::{
     ops::Deref,
     sync::atomic::{AtomicU32, Ordering},
@@ -42,8 +43,8 @@ use crate::{
 ///   but is deliberately kept out of the parent's children cache,
 ///   so path lookup cannot reach it.
 ///   This variant is reserved for temporary files created via `O_TMPFILE`;
-///   such a file can be promoted to a `Named` dentry
-///   by a later `linkat(2)` (future work).
+///   a later `linkat(2)` creates a separate `Named` dentry,
+///   while the original remains anonymous.
 /// - **Pseudo** — an object with no position in any real filesystem tree
 ///   (pipes, sockets, anon-inode fds, namespace/pidfd files, memfd).
 ///   It has no parent,
@@ -158,7 +159,7 @@ enum NameAndParent {
     Real(Option<RwLock<(String, Arc<Dentry>)>>),
     /// An anonymous child:
     /// a real parent directory,
-    /// but a fixed `"/"` name and never present in the parent's children cache.
+    /// but only an inode-derived display name and no entry in the parent's children cache.
     Anonymous(Arc<Dentry>),
     /// A pseudo `Dentry`;
     /// the `fn` synthesizes its display name.
@@ -176,7 +177,7 @@ impl NameAndParent {
                 Some(name_and_parent) => name_and_parent.read().0.clone(),
                 None => String::from("/"),
             },
-            NameAndParent::Anonymous(_) => String::from("/"),
+            NameAndParent::Anonymous(_) => format!("#{}", inode.ino()),
             NameAndParent::Pseudo(name_fn) => (name_fn)(inode),
         }
     }
@@ -195,8 +196,6 @@ impl NameAndParent {
     ///
     /// Returns `SetNameAndParentError`
     /// if the `Dentry` is a root, anonymous, or pseudo `Dentry`.
-    /// (Promoting an anonymous `Dentry` to a named one,
-    /// e.g. for `linkat(2)` on an `O_TMPFILE` file, is future work.)
     fn set(&self, name: &str, parent: Arc<Dentry>) -> Result<(), SetNameAndParentError> {
         if let NameAndParent::Real(Some(name_and_parent)) = self {
             let mut name_and_parent = name_and_parent.write();
@@ -246,6 +245,11 @@ impl Dentry {
             DentryOptions::Pseudo(name_fn) => NameAndParent::Pseudo(name_fn),
         };
 
+        let flags = if matches!(name_and_parent, NameAndParent::Anonymous(_)) {
+            DentryFlags::UNLINKED
+        } else {
+            DentryFlags::empty()
+        };
         let type_ = inode.type_();
         let is_dir = type_ == InodeType::Dir;
         let dir_state = is_dir.then(|| DentryDirState {
@@ -258,7 +262,7 @@ impl Dentry {
             type_,
             name_and_parent,
             dir_state,
-            flags: AtomicU32::new(DentryFlags::empty().bits()),
+            flags: AtomicU32::new(flags.bits()),
             mount_count: AtomicU32::new(0),
             this: weak_self.clone(),
         })
@@ -1051,9 +1055,7 @@ impl Debug for Dentry {
 /// - For the root dentry, it uses "/" and self's pointer to form the key.
 /// - For pseudo dentries, it uses self's name and self's pointer to form the key.
 ///
-/// Anonymous dentries have no meaningful `DentryKey`:
-/// they all share a fixed `"/"` name under a real parent,
-/// so their keys would not be unique.
+/// Anonymous dentries have display names rather than lookup names.
 /// They are never cached by a parent or used as a mountpoint,
 /// so [`Dentry::key`] must not be called on them.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1065,9 +1067,7 @@ pub(super) struct DentryKey {
 impl DentryKey {
     /// Forms a `DentryKey` from the corresponding `Dentry`.
     fn new(dentry: &Dentry) -> Self {
-        // Anonymous dentries must not be keyed:
-        // their keys would not be unique,
-        // and they are never cached by a parent or used as a mountpoint.
+        // Anonymous dentries are never cached by a parent or used as a mountpoint.
         // See the [`DentryKey`] documentation for details.
         debug_assert!(!matches!(
             dentry.name_and_parent,
