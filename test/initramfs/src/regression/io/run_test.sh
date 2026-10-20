@@ -14,6 +14,8 @@ set -e
 
 ./file_io/access_err
 ./file_io/block_device
+./file_io/copy_file_range
+./file_io/copy_file_range_positions
 ./file_io/fcntl_lock
 ./file_io/fcntl_owner
 ./file_io/fcntl_status_flags

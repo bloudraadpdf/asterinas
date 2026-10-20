@@ -105,6 +105,11 @@ impl InodeHandle {
         *offset
     }
 
+    /// Locks the shared open-file-description position across a positional operation.
+    pub(crate) fn lock_offset(&self) -> MutexGuard<'_, usize> {
+        self.offset.lock()
+    }
+
     fn file_ops_and_is_offset_aware(&self) -> (&dyn FileOps, bool) {
         if let Some(ref open_file) = self.open_file {
             let is_offset_aware = open_file.is_offset_aware();
