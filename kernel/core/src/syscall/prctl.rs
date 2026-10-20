@@ -10,6 +10,7 @@ use crate::{
         posix_thread::{ContextPthreadAdminApi, ThreadName},
         signal::sig_num::SigNum,
     },
+    vm::vmar::AnonVmaName,
 };
 
 pub(super) fn sys_prctl(
@@ -85,6 +86,29 @@ pub(super) fn sys_prctl(
             let thread_name = ctx.posix_thread.thread_name().lock();
             ctx.user_space()
                 .write_bytes(write_to_addr, thread_name.as_bytes_with_nul())?;
+        }
+        PrctlCmd::PR_SET_VMA_ANON_NAME(address, length, name_address) => {
+            let user_space = ctx.user_space();
+            let name = if name_address == 0 {
+                None
+            } else {
+                let mut reader = user_space.reader(name_address, AnonVmaName::MAX_BYTES)?;
+                let name = reader
+                    .read_cstring_until_nul(AnonVmaName::MAX_BYTES)?
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                Some(AnonVmaName::new(&name)?)
+            };
+            if !address.is_multiple_of(PAGE_SIZE) {
+                return_errno!(Errno::EINVAL);
+            }
+            let length = length
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?
+                & !(PAGE_SIZE - 1);
+            let end = address
+                .checked_add(length)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            user_space.vmar().name_anonymous(address..end, name)?;
         }
         PrctlCmd::PR_CAPBSET_READ(capability) => {
             let credentials = ctx.posix_thread.credentials();
@@ -185,6 +209,7 @@ const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_GET_NO_NEW_PRIVS: i32 = 39;
 const PR_CAP_AMBIENT: i32 = 47;
 const PR_GET_AUXV: i32 = 0x41555856;
+const PR_SET_VMA: i32 = 0x53564d41;
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +223,7 @@ enum PrctlCmd {
     PR_SET_KEEPCAPS(u32),
     PR_SET_NAME(Vaddr),
     PR_GET_NAME(Vaddr),
+    PR_SET_VMA_ANON_NAME(Vaddr, usize, Vaddr),
     PR_CAPBSET_READ(CapSet),
     PR_CAPBSET_DROP(CapSet),
     PR_GET_SECUREBITS,
@@ -250,6 +276,14 @@ impl PrctlCmd {
             PR_SET_KEEPCAPS => Ok(PrctlCmd::PR_SET_KEEPCAPS(arg2 as _)),
             PR_SET_NAME => Ok(PrctlCmd::PR_SET_NAME(arg2 as _)),
             PR_GET_NAME => Ok(PrctlCmd::PR_GET_NAME(arg2 as _)),
+            PR_SET_VMA => {
+                if arg2 != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                Ok(PrctlCmd::PR_SET_VMA_ANON_NAME(
+                    arg3 as _, arg4 as _, arg5 as _,
+                ))
+            }
             PR_CAPBSET_READ => Ok(PrctlCmd::PR_CAPBSET_READ(parse_capability(arg2)?)),
             PR_CAPBSET_DROP => Ok(PrctlCmd::PR_CAPBSET_DROP(parse_capability(arg2)?)),
             PR_GET_SECUREBITS => Ok(PrctlCmd::PR_GET_SECUREBITS),

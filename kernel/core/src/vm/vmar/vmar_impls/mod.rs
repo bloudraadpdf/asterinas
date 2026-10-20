@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod access_alien;
+mod anon_name;
 mod fork;
 pub(super) mod locking;
 pub(super) mod map;
