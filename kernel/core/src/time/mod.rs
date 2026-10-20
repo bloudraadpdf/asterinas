@@ -27,6 +27,16 @@ const NSEC_PER_USEC: i64 = 1_000;
 const USEC_PER_SEC: i64 = 1_000_000;
 pub(crate) const NSEC_PER_SEC: i64 = 1_000_000_000;
 
+/// The Linux userspace clock-tick frequency, independent of the kernel timer frequency.
+pub(crate) const USER_HZ: u64 = 100;
+
+/// Converts a duration to Linux userspace clock ticks, rounding down.
+pub(crate) fn duration_to_clock_ticks(duration: Duration) -> u64 {
+    let seconds = duration.as_secs().saturating_mul(USER_HZ);
+    let subsecond_ticks = u64::from(duration.subsec_nanos()) * USER_HZ / NSEC_PER_SEC as u64;
+    seconds.saturating_add(subsecond_ticks)
+}
+
 pub(super) fn init() {
     system_time::init();
     clocks::init();
@@ -179,4 +189,20 @@ pub(crate) struct itimerspec_t {
 pub(crate) struct timezone_t {
     pub tz_minuteswest: i32,
     pub tz_dsttime: i32,
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::*;
+
+    use super::*;
+
+    #[ktest]
+    fn userspace_clock_ticks_round_down_and_saturate() {
+        assert_eq!(duration_to_clock_ticks(Duration::ZERO), 0);
+        assert_eq!(duration_to_clock_ticks(Duration::from_nanos(9_999_999)), 0);
+        assert_eq!(duration_to_clock_ticks(Duration::from_millis(10)), 1);
+        assert_eq!(duration_to_clock_ticks(Duration::new(1, 999_999_999)), 199);
+        assert_eq!(duration_to_clock_ticks(Duration::MAX), u64::MAX);
+    }
 }

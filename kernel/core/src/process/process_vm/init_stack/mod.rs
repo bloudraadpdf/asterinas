@@ -289,6 +289,12 @@ impl InitStackWriter<'_> {
         let execfn_pointer = self.write_cstring(&self.execfn)?;
         self.auxvec.set(AuxKey::AT_EXECFN, execfn_pointer);
 
+        #[cfg(target_arch = "x86_64")]
+        {
+            let platform_pointer = self.write_bytes(c"x86_64".to_bytes_with_nul())?;
+            self.auxvec.set(AuxKey::AT_PLATFORM, platform_pointer);
+        }
+
         // Write envp strings.
         let envp_end = self.pos();
         let envp_pointers = self.write_envp_strings()?;

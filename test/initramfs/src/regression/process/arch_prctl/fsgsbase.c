@@ -4,8 +4,10 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <asm/hwcap2.h>
 #include <asm/prctl.h>
 #include <cpuid.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -51,6 +53,13 @@ static void write_gsbase(uintptr_t gs_base)
 {
 	asm volatile("wrgsbase %0" : : "r"(gs_base) : "memory");
 }
+
+FN_TEST(advertise_fsgsbase)
+{
+	TEST_RES(getauxval(AT_HWCAP2) & HWCAP2_FSGSBASE,
+		 _ret == (cpu_has_fsgsbase() ? HWCAP2_FSGSBASE : 0));
+}
+END_TEST()
 
 FN_TEST(sync_gsbase_from_cpu)
 {

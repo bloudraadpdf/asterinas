@@ -21,6 +21,7 @@ use crate::{
         process_vm::{AuxKey, AuxVec},
         program_loader::{ProgramToLoad, open_executable_file},
     },
+    time::USER_HZ,
     util::random::getrandom,
     vm::{
         perms::VmPerms,
@@ -456,8 +457,22 @@ fn init_aux_vec(
     let mut aux_vec = AuxVec::new();
 
     aux_vec.set(AuxKey::AT_PAGESZ, PAGE_SIZE as _);
+    aux_vec.set(AuxKey::AT_CLKTCK, USER_HZ);
     aux_vec.set(AuxKey::AT_RSEQ_FEATURE_SIZE, 28);
     aux_vec.set(AuxKey::AT_RSEQ_ALIGN, 32);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        use x86_64::registers::control::{Cr4, Cr4Flags};
+
+        const HWCAP2_FSGSBASE: u64 = 1 << 1;
+        let hwcap2 = if Cr4::read().contains(Cr4Flags::FSGSBASE) {
+            HWCAP2_FSGSBASE
+        } else {
+            0
+        };
+        aux_vec.set(AuxKey::AT_HWCAP2, hwcap2);
+    }
 
     let Some(ph_vaddr) = elf_map_range.relocated_addr_of(elf.find_vaddr_of_phdrs()?) else {
         return_errno_with_message!(
