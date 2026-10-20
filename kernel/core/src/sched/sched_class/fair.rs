@@ -234,6 +234,23 @@ pub(super) struct FairClassRq {
 }
 
 impl FairClassRq {
+    pub(super) fn remove(&mut self, task: &Arc<Task>) -> bool {
+        let mut removed = false;
+        self.entities.retain(|Reverse(item)| {
+            if Arc::ptr_eq(&item.0, task) {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if removed {
+            let (old_weight, _) = task.as_thread().unwrap().sched_attr().fair.fetch_weight();
+            self.total_weight -= old_weight;
+        }
+        removed
+    }
+
     pub(crate) fn new(cpu: CpuId) -> Self {
         Self {
             cpu,

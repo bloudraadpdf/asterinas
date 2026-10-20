@@ -15,9 +15,14 @@ use crate::{
     vm::{page_cache::Vmo, perms::VmPerms, vmar::PageFaultInfo},
 };
 
+pub(crate) mod pi;
+
 type FutexBitSet = u32;
 
 const FUTEX_BITSET_MATCH_ANY: FutexBitSet = 0xFFFF_FFFF;
+pub(super) const FUTEX_WAITERS: u32 = 0x8000_0000;
+pub(super) const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+pub(super) const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
 
 /// Specifies whether a futex is scoped to the current process or shared through
 /// its backing mapping.
@@ -111,7 +116,7 @@ pub(crate) fn futex_wait_bitset(
         );
     }
 
-    futex_bucket.add_item(futex_item);
+    futex_bucket.add_item(futex_item)?;
 
     // Release the lock.
     drop(futex_bucket);
@@ -165,7 +170,7 @@ pub(crate) fn futex_wake_bitset(
     let futex_key = FutexKey::new(futex_addr, bitset, &current_userspace!(), visibility)?;
     let (_, futex_bucket_ref) = get_futex_bucket(&futex_key);
     let mut futex_bucket = futex_bucket_ref.lock();
-    let res = futex_bucket.remove_and_wake_items(&futex_key, max_count);
+    let res = futex_bucket.remove_and_wake_items(&futex_key, max_count)?;
 
     Ok(res)
 }
@@ -333,10 +338,10 @@ pub(crate) fn futex_wake_op(
             })?;
     };
 
-    let mut res = futex_bucket_1.remove_and_wake_items(&futex_key_1, max_count_1);
+    let mut res = futex_bucket_1.remove_and_wake_items(&futex_key_1, max_count_1)?;
     if wake_op.should_wake(old_val) {
         let bucket = futex_bucket_2.as_mut().unwrap_or(&mut futex_bucket_1);
-        res += bucket.remove_and_wake_items(&futex_key_2, max_count_2);
+        res += bucket.remove_and_wake_items(&futex_key_2, max_count_2)?;
     }
 
     Ok(res)
@@ -350,10 +355,6 @@ pub(crate) fn futex_requeue(
     ctx: &Context,
     visibility: FutexVisibility,
 ) -> Result<usize> {
-    if futex_new_addr == futex_addr {
-        return futex_wake(futex_addr, max_nwakes, visibility);
-    }
-
     let user_space = ctx.user_space();
     let futex_key = FutexKey::new(futex_addr, FUTEX_BITSET_MATCH_ANY, &user_space, visibility)?;
     let futex_new_key = FutexKey::new(
@@ -365,20 +366,20 @@ pub(crate) fn futex_requeue(
 
     let (mut futex_bucket, futex_new_bucket) = lock_bucket_pairs(&futex_key, &futex_new_key);
 
-    let nwakes = futex_bucket.remove_and_wake_items(&futex_key, max_nwakes);
+    let nwakes = futex_bucket.remove_and_wake_items(&futex_key, max_nwakes)?;
 
-    if let Some(mut futex_new_bucket) = futex_new_bucket {
+    let nrequeues = if let Some(mut futex_new_bucket) = futex_new_bucket {
         futex_bucket.requeue_items_to_another_bucket(
             &futex_key,
             &mut futex_new_bucket,
             &futex_new_key,
             max_nrequeues,
-        );
+        )?
     } else {
-        futex_bucket.update_item_keys(&futex_key, &futex_new_key, max_nrequeues);
-    }
+        futex_bucket.update_item_keys(&futex_key, &futex_new_key, max_nrequeues)?
+    };
 
-    Ok(nwakes)
+    Ok(nwakes + nrequeues)
 }
 
 static FUTEX_BUCKETS: Once<FutexBucketVec> = Once::new();
@@ -470,8 +471,12 @@ impl FutexBucket {
         }
     }
 
-    pub(self) fn add_item(&mut self, item: FutexItem) {
+    pub(self) fn add_item(&mut self, item: FutexItem) -> Result<()> {
+        self.items
+            .try_reserve(1)
+            .map_err(|_| Error::new(Errno::ENOMEM))?;
         self.items.push(item);
+        Ok(())
     }
 
     pub(self) fn remove_by_waker(&mut self, waker: &Arc<Waker>) -> Option<FutexItem> {
@@ -482,11 +487,23 @@ impl FutexBucket {
         Some(self.items.swap_remove(idx))
     }
 
-    pub(self) fn remove_and_wake_items(&mut self, key: &FutexKey, max_count: usize) -> usize {
+    pub(self) fn remove_and_wake_items(
+        &mut self,
+        key: &FutexKey,
+        max_count: usize,
+    ) -> Result<usize> {
         let mut count = 0;
+        let mut invalid = false;
 
         self.items.retain(|item| {
-            if item.key.match_up(key) && count < max_count && item.wake() {
+            if invalid || count >= max_count || !item.key.match_up(key) {
+                return true;
+            }
+            if item.kind == FutexWaitKind::PriorityInheritance {
+                invalid = true;
+                return true;
+            }
+            if item.wake() {
                 count += 1;
                 false
             } else {
@@ -494,20 +511,35 @@ impl FutexBucket {
             }
         });
 
-        count
+        if invalid {
+            return_errno_with_message!(Errno::EINVAL, "ordinary wake cannot operate on PI waiters");
+        }
+        Ok(count)
     }
 
-    pub(self) fn update_item_keys(&mut self, key: &FutexKey, new_key: &FutexKey, max_count: usize) {
+    pub(self) fn update_item_keys(
+        &mut self,
+        key: &FutexKey,
+        new_key: &FutexKey,
+        max_count: usize,
+    ) -> Result<usize> {
         let mut count = 0;
-        for item in self.items.iter_mut() {
-            if item.key.match_up(key) {
-                item.key = new_key.clone();
-                count += 1;
+        for item in self
+            .items
+            .iter_mut()
+            .filter(|item| item.key.match_up(key))
+            .take(max_count)
+        {
+            if item.kind == FutexWaitKind::PriorityInheritance {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "ordinary requeue cannot move PI waiters"
+                );
             }
-            if count >= max_count {
-                break;
-            }
+            item.key = new_key.clone();
+            count += 1;
         }
+        Ok(count)
     }
 
     pub(self) fn requeue_items_to_another_bucket(
@@ -516,33 +548,63 @@ impl FutexBucket {
         another: &mut Self,
         new_key: &FutexKey,
         max_nrequeues: usize,
-    ) {
+    ) -> Result<usize> {
+        let moving = self
+            .items
+            .iter()
+            .filter(|item| item.key.match_up(key))
+            .take(max_nrequeues)
+            .take_while(|item| item.kind == FutexWaitKind::Ordinary)
+            .count();
+        another
+            .items
+            .try_reserve(moving)
+            .map_err(|_| Error::new(Errno::ENOMEM))?;
         let mut count = 0;
+        let mut invalid = false;
         self.items
             .extract_if(.., |item| {
-                if item.key.match_up(key) && count < max_nrequeues {
-                    count += 1;
-                    true
-                } else {
-                    false
+                if invalid || !item.key.match_up(key) || count >= max_nrequeues {
+                    return false;
                 }
+                if item.kind == FutexWaitKind::PriorityInheritance {
+                    invalid = true;
+                    return false;
+                }
+                count += 1;
+                true
             })
             .for_each(|mut extracted| {
                 extracted.key = new_key.clone();
-                another.add_item(extracted);
+                another.items.push(extracted);
             });
+        if invalid {
+            return_errno_with_message!(Errno::EINVAL, "ordinary requeue cannot move PI waiters");
+        }
+        Ok(count)
     }
 }
 
 struct FutexItem {
     key: FutexKey,
     waker: Arc<Waker>,
+    kind: FutexWaitKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FutexWaitKind {
+    Ordinary,
+    PriorityInheritance,
 }
 
 impl FutexItem {
     pub(self) fn create(key: FutexKey) -> (Self, Waiter) {
         let (waiter, waker) = Waiter::new_pair();
-        let futex_item = FutexItem { key, waker };
+        let futex_item = FutexItem {
+            key,
+            waker,
+            kind: FutexWaitKind::Ordinary,
+        };
 
         (futex_item, waiter)
     }
@@ -703,6 +765,7 @@ pub(crate) enum FutexOp {
     FUTEX_TRYLOCK_PI = 8,
     FUTEX_WAIT_BITSET = 9,
     FUTEX_WAKE_BITSET = 10,
+    FUTEX_LOCK_PI2 = 13,
 }
 
 bitflags! {

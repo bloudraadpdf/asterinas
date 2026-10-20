@@ -4,7 +4,7 @@ use ostd::{arch::cpu::context::UserContext, mm::VmIo, task::Task};
 
 use super::{
     AsPosixThread, ThreadLocal,
-    futex::{FutexVisibility, futex_wake},
+    futex::{FutexVisibility, futex_wake, pi},
     ptrace::PtraceEvent,
     robust_list::{RobustListHead, wake_robust_futex},
 };
@@ -98,7 +98,7 @@ fn exit_internal(
         tracer.process().children_wait_queue().wake_all();
     }
 
-    wake_robust_list(posix_thread);
+    release_futexes(ctx);
 
     drop_after!(thread_local.take_sem_undo());
 
@@ -176,13 +176,20 @@ fn wake_robust_list(posix_thread: &super::PosixThread) {
     let tid = posix_thread.namespace_tid();
 
     debug!("exit: wake up the robust list: {:?}", list_head);
-    for futex_addr in list_head.futexes(head_addr) {
-        if let Err(err) = wake_robust_futex(futex_addr, tid) {
+    for futex in list_head.futexes(head_addr) {
+        if let Err(err) = wake_robust_futex(futex, tid) {
             debug!(
                 "exit: cannot wake the robust futex at {:#x}: {:?}",
-                futex_addr, err
+                futex.address(),
+                err
             );
             return;
         }
     }
+}
+
+pub(in crate::process) fn release_futexes(ctx: &Context) {
+    pi::begin_exit(ctx);
+    wake_robust_list(ctx.posix_thread);
+    pi::release_owned(ctx);
 }

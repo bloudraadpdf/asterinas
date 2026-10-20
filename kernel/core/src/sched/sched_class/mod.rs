@@ -21,6 +21,7 @@ use ostd::{
     },
     util::id_set::Id,
 };
+use spin::Once;
 
 use super::{
     nice::Nice,
@@ -38,14 +39,17 @@ mod stop;
 
 use self::policy::{SchedPolicyKind, SchedPolicyState};
 pub(crate) use self::{
-    policy::{LinuxSchedPolicy, SchedPolicy},
+    policy::{LinuxSchedPolicy, SchedPolicy, SchedPriority},
     real_time::{RealTimePolicy, RealTimePriority},
 };
 
 type SchedEntity = (Arc<Task>, Arc<Thread>);
 
+static CLASS_SCHEDULER: Once<&'static ClassScheduler> = Once::new();
+
 pub(crate) fn init() {
-    let scheduler = Box::leak(Box::new(ClassScheduler::new()));
+    let scheduler: &'static ClassScheduler = Box::leak(Box::new(ClassScheduler::new()));
+    CLASS_SCHEDULER.call_once(|| scheduler);
 
     // Inject the scheduler into the ostd for actual scheduling work.
     inject_scheduler(scheduler);
@@ -58,6 +62,23 @@ pub(crate) fn init() {
 
 pub(crate) fn init_on_each_cpu() {
     enable_preemption_on_cpu();
+}
+
+pub(crate) fn set_thread_policy(thread: &Arc<Thread>, policy: SchedPolicy) -> Option<CpuId> {
+    CLASS_SCHEDULER
+        .get()
+        .unwrap()
+        .change_attr(thread, |attr| attr.set_policy(policy))
+}
+
+pub(crate) fn set_thread_inherited_priority(
+    thread: &Arc<Thread>,
+    priority: Option<SchedPriority>,
+) -> Option<CpuId> {
+    CLASS_SCHEDULER
+        .get()
+        .unwrap()
+        .change_attr(thread, |attr| attr.set_inherited_priority(priority))
 }
 
 /// Represents the middle layer between scheduling classes and generic scheduler
@@ -144,6 +165,7 @@ trait SchedClassRq: Send + fmt::Debug {
 /// scheduling class.
 #[derive(Debug)]
 pub(crate) struct SchedAttr {
+    placement: SpinLock<(), LocalIrqDisabled>,
     policy: SchedPolicyState,
     last_cpu: AtomicCpuId,
     real_time: real_time::RealTimeAttr,
@@ -154,6 +176,7 @@ impl SchedAttr {
     /// Constructs a new `SchedAttr` with the given scheduling policy.
     pub(crate) fn new(policy: SchedPolicy) -> Self {
         Self {
+            placement: SpinLock::new(()),
             policy: SchedPolicyState::new(policy),
             last_cpu: AtomicCpuId::default(),
             real_time: {
@@ -175,6 +198,14 @@ impl SchedAttr {
         self.policy.get()
     }
 
+    pub(crate) fn effective_priority(&self) -> SchedPriority {
+        self.policy.priority()
+    }
+
+    fn effective_policy(&self) -> SchedPolicy {
+        self.policy.effective()
+    }
+
     fn policy_kind(&self) -> SchedPolicyKind {
         self.policy.kind()
     }
@@ -183,28 +214,24 @@ impl SchedAttr {
     ///
     /// Specifically for real-time policies, if the new policy doesn't
     /// specify a base slice factor for RR, the old one will be kept.
-    pub(crate) fn set_policy(&self, policy: SchedPolicy) {
-        self.policy.set(policy, |policy| match policy {
+    fn set_policy(&self, policy: SchedPolicy) {
+        self.policy
+            .set(policy, |effective| self.apply_effective_policy(effective));
+    }
+
+    fn apply_effective_policy(&self, policy: SchedPolicy) {
+        match policy {
             SchedPolicy::RealTime { rt_prio, rt_policy } => {
                 self.real_time.update(rt_prio.get(), rt_policy);
             }
             SchedPolicy::Fair(nice) => self.fair.update(nice),
             _ => {}
-        });
+        }
     }
 
-    pub(crate) fn update_policy<T>(&self, f: impl FnOnce(&mut SchedPolicy) -> T) -> T {
-        self.policy.update(|policy| {
-            let ret = f(policy);
-            match *policy {
-                SchedPolicy::RealTime { rt_prio, rt_policy } => {
-                    self.real_time.update(rt_prio.get(), rt_policy);
-                }
-                SchedPolicy::Fair(nice) => self.fair.update(nice),
-                _ => {}
-            }
-            ret
-        })
+    fn set_inherited_priority(&self, priority: Option<SchedPriority>) {
+        self.policy
+            .set_inherited(priority, |effective| self.apply_effective_policy(effective));
     }
 
     pub(crate) fn last_cpu(&self) -> Option<CpuId> {
@@ -219,6 +246,7 @@ impl SchedAttr {
 impl Scheduler for ClassScheduler {
     fn enqueue(&self, task: Arc<Task>, flags: EnqueueFlags) -> Option<CpuId> {
         let thread = task.as_thread()?.clone();
+        let _placement = thread.sched_attr().placement.lock();
 
         let (still_in_rq, cpu) = {
             let selected_cpu_id = self.select_cpu(&thread, flags);
@@ -243,11 +271,12 @@ impl Scheduler for ClassScheduler {
             .current
             .as_ref()
             .is_none_or(|((_, rq_current_thread), _)| {
-                thread.sched_attr().policy() < rq_current_thread.sched_attr().policy()
+                thread.sched_attr().effective_policy()
+                    < rq_current_thread.sched_attr().effective_policy()
             });
 
         thread.sched_attr().set_last_cpu(cpu);
-        rq.enqueue_entity((task, thread), Some(flags));
+        rq.enqueue_entity((task, thread.clone()), Some(flags));
 
         should_preempt.then_some(cpu)
     }
@@ -265,6 +294,46 @@ impl Scheduler for ClassScheduler {
 }
 
 impl ClassScheduler {
+    fn change_attr(&self, thread: &Arc<Thread>, update: impl FnOnce(&SchedAttr)) -> Option<CpuId> {
+        let attr = thread.sched_attr();
+        // Placement precedes the CPU runqueue; enqueues use the same order.
+        let _placement = attr.placement.lock();
+        let Some(task) = thread.task() else {
+            update(attr);
+            return None;
+        };
+        let Some(cpu) = task.cpu().get() else {
+            update(attr);
+            return None;
+        };
+        let mut rq = self.rqs[cpu.as_usize()].lock();
+        let old_policy = attr.effective_policy();
+        let is_current = rq
+            .current
+            .as_ref()
+            .is_some_and(|((current, _), _)| Arc::ptr_eq(current, &task));
+        if is_current {
+            let _ = rq.update_current(UpdateFlags::Tick);
+        }
+        update(attr);
+        let queued = if old_policy != attr.effective_policy() {
+            match old_policy {
+                SchedPolicy::RealTime { rt_prio, .. } => rq.real_time.remove(&task, rt_prio.get()),
+                SchedPolicy::Fair(_) => rq.fair.remove(&task),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if is_current && old_policy.kind() != attr.effective_policy().kind() {
+            rq.current.as_mut().unwrap().1 = CurrentRuntime::new();
+        }
+        if queued {
+            rq.enqueue_entity((task, thread.clone()), None);
+        }
+        rq.needs_preemption().then_some(cpu)
+    }
+
     pub(crate) fn new() -> Self {
         let class_rq = |cpu| {
             SpinLock::new(PerCpuClassRqSet {
@@ -335,6 +404,25 @@ impl ClassScheduler {
 }
 
 impl PerCpuClassRqSet {
+    fn needs_preemption(&self) -> bool {
+        let Some(((_, current), _)) = &self.current else {
+            return !self.stop.is_empty() || !self.real_time.is_empty() || !self.fair.is_empty();
+        };
+        let policy = current.sched_attr().effective_policy();
+        if !self.stop.is_empty() && policy.kind() != SchedPolicyKind::Stop {
+            return true;
+        }
+        match policy {
+            SchedPolicy::Stop => false,
+            SchedPolicy::RealTime { rt_prio, .. } => self
+                .real_time
+                .highest_priority()
+                .is_some_and(|priority| priority < rt_prio.get()),
+            SchedPolicy::Fair(_) => !self.real_time.is_empty(),
+            SchedPolicy::Idle => !self.real_time.is_empty() || !self.fair.is_empty(),
+        }
+    }
+
     fn pick_next_entity(&mut self) -> Option<SchedEntity> {
         (self.stop.pick_next())
             .or_else(|| self.real_time.pick_next())

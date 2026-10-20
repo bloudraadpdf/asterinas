@@ -489,7 +489,7 @@ where
 pub(crate) fn unpark_target(runnable: Arc<Task>) {
     let preempt_cpu = scheduler_singleton().enqueue(runnable, EnqueueFlags::Wake);
     if let Some(preempt_cpu_id) = preempt_cpu {
-        set_need_preempt(preempt_cpu_id);
+        request_preemption(preempt_cpu_id);
     }
 }
 
@@ -500,13 +500,17 @@ pub(crate) fn unpark_target(runnable: Arc<Task>) {
 pub(super) fn run_new_task(runnable: Arc<Task>) {
     let preempt_cpu = scheduler_singleton().enqueue(runnable, EnqueueFlags::Spawn);
     if let Some(preempt_cpu_id) = preempt_cpu {
-        set_need_preempt(preempt_cpu_id);
+        request_preemption(preempt_cpu_id);
     }
 
     might_preempt();
 }
 
-fn set_need_preempt(cpu_id: CpuId) {
+/// Requests rescheduling at the next preemption point on the specified CPU.
+///
+/// The scheduler must first make a runnable task eligible to preempt that CPU's
+/// current task. This function also notifies remote CPUs.
+pub fn request_preemption(cpu_id: CpuId) {
     let preempt_guard = disable_preempt();
 
     if preempt_guard.current_cpu() == cpu_id {

@@ -197,6 +197,7 @@ impl PosixThreadBuilder {
                     process,
                     task: weak_task.clone(),
                     robust_list: AtomicUsize::new(0),
+                    pi_exit: super::futex::pi::PiExitState::new(),
                     identity: Rcu::new(identity),
                     name: Mutex::new(thread_name),
                     credentials,

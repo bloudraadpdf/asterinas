@@ -8,9 +8,9 @@ use super::{
 };
 use crate::{
     prelude::*,
-    process::pid_table,
+    process::{pid_table, posix_thread::futex::pi},
     sched::{LinuxSchedPolicy, Nice, RealTimePolicy, SchedAttr, SchedPolicy},
-    thread::Tid,
+    thread::{Thread, Tid},
     util::CopyCompat,
 };
 
@@ -212,6 +212,24 @@ pub(super) fn access_sched_attr_with<T>(
         return_errno_with_message!(Errno::ESRCH, "the target thread does not exist");
     };
     f(thread.sched_attr())
+}
+
+pub(super) fn update_sched_policy_with(
+    tid: Tid,
+    ctx: &Context,
+    update: impl FnOnce(SchedPolicy) -> Result<SchedPolicy>,
+) -> Result<()> {
+    if tid.cast_signed() < 0 {
+        return_errno_with_message!(Errno::EINVAL, "all negative TIDs are not valid");
+    }
+    let thread = if tid == 0 {
+        Thread::current()
+    } else {
+        let table = pid_table::pid_table_mut();
+        table.get_thread_in(tid, ctx.process.pid_namespace())
+    }
+    .ok_or_else(|| Error::new(Errno::ESRCH))?;
+    pi::update_sched_policy(thread, ctx.process.pid_namespace(), update)
 }
 
 pub(super) fn sys_sched_getattr(

@@ -2,7 +2,7 @@
 
 use super::{
     SyscallReturn,
-    sched_getattr::{access_sched_attr_with, read_linux_sched_attr_from_user},
+    sched_getattr::{read_linux_sched_attr_from_user, update_sched_policy_with},
 };
 use crate::{prelude::*, sched::SchedPolicy, thread::Tid};
 
@@ -22,10 +22,7 @@ pub(super) fn sys_sched_setattr(
 
     let attr = read_linux_sched_attr_from_user(addr, ctx)?;
     let policy = SchedPolicy::try_from(attr)?;
-    access_sched_attr_with(tid, ctx, |attr| {
-        attr.set_policy(policy);
-        Ok(())
-    })?;
+    update_sched_policy_with(tid, ctx, |_| Ok(policy))?;
 
     Ok(SyscallReturn::Return(0))
 }

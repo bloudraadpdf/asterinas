@@ -46,21 +46,46 @@ pub(crate) trait SignalContext {
     fn set_arguments(&mut self, sig_num: SigNum, siginfo_addr: usize, ucontext_addr: usize);
 }
 
+fn restart_interrupted_syscall(user_ctx: &mut UserContext, original: usize) {
+    #[cfg(target_arch = "x86_64")]
+    const INSTRUCTION_LENGTH: usize = 2;
+    #[cfg(any(
+        target_arch = "riscv64",
+        target_arch = "loongarch64",
+        target_arch = "aarch64"
+    ))]
+    const INSTRUCTION_LENGTH: usize = 4;
+
+    if let Some(address) = user_ctx
+        .instruction_pointer()
+        .checked_sub(INSTRUCTION_LENGTH)
+    {
+        user_ctx.set_syscall_ret(original);
+        user_ctx.set_instruction_pointer(address);
+    }
+}
+
 /// Handles a pending signal for the current process.
 pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
     // FIXME: This function may handle or suppress only one signal per trap, delaying
     // other pending unmasked signals until the next trap. Consider a looped scan.
     //
     // For details, see <https://github.com/asterinas/asterinas/pull/2984/#discussion_r3137275994>.
-    let syscall_restart = if let Some(orig_syscall_ret) = ctx.thread_local.orig_syscall_ret()
-        && user_ctx.syscall_ret() == -(Errno::ERESTARTSYS as i32) as usize
-    {
-        // We should never return `ERESTARTSYS` to the userspace.
+    let syscall_restart = ctx.thread_local.orig_syscall_ret().and_then(|original| {
+        let result = user_ctx.syscall_ret();
+        let restart = result == -(Errno::ERESTARTSYS as i32) as usize;
+        let unconditional = result == -(Errno::ERESTARTNOINTR as i32) as usize;
+        if !restart && !unconditional {
+            return None;
+        }
         user_ctx.set_syscall_ret(-(Errno::EINTR as i32) as usize);
-        Some(orig_syscall_ret)
-    } else {
-        None
-    };
+        if unconditional {
+            restart_interrupted_syscall(user_ctx, original);
+            None
+        } else {
+            Some(original)
+        }
+    });
 
     let mut restore_sig_mask = ctx
         .thread_local
@@ -146,18 +171,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
             if let Some(orig_syscall_ret) = syscall_restart
                 && flags.contains(SigActionFlags::SA_RESTART)
             {
-                #[cfg(target_arch = "x86_64")]
-                const SYSCALL_INSTR_LEN: usize = 2; // syscall
-                #[cfg(target_arch = "riscv64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // ecall
-                #[cfg(target_arch = "loongarch64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // syscall
-                #[cfg(target_arch = "aarch64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // svc
-
-                user_ctx.set_syscall_ret(orig_syscall_ret);
-                user_ctx
-                    .set_instruction_pointer(user_ctx.instruction_pointer() - SYSCALL_INSTR_LEN);
+                restart_interrupted_syscall(user_ctx, orig_syscall_ret);
             }
 
             if let Err(e) = handle_user_signal(
