@@ -9,7 +9,12 @@ use ostd::{
 };
 
 use super::SyscallReturn;
-use crate::{prelude::*, process::pid_table, thread::Tid};
+use crate::{
+    prelude::*,
+    process::pid_table,
+    sched::set_thread_affinity,
+    thread::{Thread, Tid},
+};
 
 pub(super) fn sys_sched_getaffinity(
     tid: Tid,
@@ -30,10 +35,6 @@ pub(super) fn sys_sched_getaffinity(
     Ok(SyscallReturn::Return(bytes_written as isize))
 }
 
-// TODO: The manual page of `sched_setaffinity` says that if the thread is not
-// running on the CPU specified in the affinity mask, it would be migrated to
-// one of the CPUs specified in the mask. We currently do not support this
-// feature as the scheduler is not ready for migration yet.
 pub(super) fn sys_sched_setaffinity(
     tid: Tid,
     cpuset_size: usize,
@@ -42,20 +43,13 @@ pub(super) fn sys_sched_setaffinity(
 ) -> Result<SyscallReturn> {
     let user_cpu_set = read_cpu_set_from(ctx.user_space(), cpuset_size, cpu_set_ptr)?;
 
-    match tid {
-        0 => ctx
-            .thread
-            .atomic_cpu_affinity()
-            .store(&user_cpu_set, Ordering::Relaxed),
-        _ => match pid_table::pid_table_mut().get_thread_in(tid, ctx.process.pid_namespace()) {
-            Some(thread) => {
-                thread
-                    .atomic_cpu_affinity()
-                    .store(&user_cpu_set, Ordering::Relaxed);
-            }
-            None => return_errno_with_message!(Errno::ESRCH, "the target thread does not exist"),
-        },
+    let thread = if tid == 0 {
+        Thread::current()
+    } else {
+        pid_table::pid_table_mut().get_thread_in(tid, ctx.process.pid_namespace())
     }
+    .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target thread does not exist"))?;
+    set_thread_affinity(&thread, &user_cpu_set);
 
     Ok(SyscallReturn::Return(0))
 }

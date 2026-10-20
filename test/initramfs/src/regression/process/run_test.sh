@@ -6,6 +6,7 @@ set -e
 
 if [ "$(uname -m)" = "x86_64" ]; then
     ./arch_prctl/fsgsbase
+    ./arch_prctl/shadow_stack || [ "$?" -eq 77 ]
 fi
 
 ./clone3/clone_exit_signal
@@ -61,8 +62,10 @@ fi
 if [ "$(uname -m)" = "x86_64" ]; then
     ./ptrace/debugger
     ./ptrace/read_write_regs
+    ./ptrace/shadow_stack || [ "$?" -eq 77 ]
 fi
 
+./sched/affinity
 ./sched/sched_attr_getset
 ./sched/sched_param_getset
 ./sched/sched_param_idle
@@ -80,6 +83,7 @@ fi
 if [ "$(uname -m)" = "x86_64" ]; then
     ./signal/cpu_contract
     ./signal/fault_signals
+    ./signal/shstk_fault || [ "$?" -eq 77 ]
     ./signal/sigaltstack
     ./signal/signal_fpu
     ./signal/signal_xstate

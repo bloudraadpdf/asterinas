@@ -536,6 +536,9 @@ pub(crate) fn handle_user_signal(
     );
 
     // 4. Set correct register values.
+    #[cfg(target_arch = "x86_64")]
+    super::posix_thread::shadow_stack::setup_signal(retaddr, ctx)?;
+
     user_ctx.set_instruction_pointer(handler_addr as _);
     user_ctx.set_stack_pointer(stack_pointer as usize);
     // Set parameters of the signal handler.

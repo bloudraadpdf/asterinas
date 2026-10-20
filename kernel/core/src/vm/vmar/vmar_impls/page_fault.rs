@@ -111,6 +111,8 @@ pub(crate) struct PageFaultInfo {
     /// Whether this page fault is forced (e.g., manually triggered by `ptrace`).
     /// A forced page fault may bypass some permission checks.
     is_forced: bool,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: bool,
 }
 
 impl PageFaultInfo {
@@ -124,7 +126,20 @@ impl PageFaultInfo {
             address,
             required_perms,
             is_forced: false,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: false,
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack(mut self) -> Self {
+        self.shadow_stack = true;
+        self
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(in vmar) fn is_shadow_stack(&self) -> bool {
+        self.shadow_stack
     }
 
     /// Returns whether this page fault is forced.

@@ -73,6 +73,8 @@ pub(crate) struct VmarMapOptions<'a, 'b> {
     shm: Option<PendingAttachment>,
     grows_down: bool,
     memory_locked: bool,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: bool,
     parent: &'a Vmar,
     mappable: Option<MappableObject<'b>>,
     file: Option<Arc<dyn FileLike>>,
@@ -128,6 +130,8 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             shm: None,
             grows_down: false,
             memory_locked: false,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: false,
             parent,
             mappable: None,
             file: None,
@@ -229,6 +233,12 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         self
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn shadow_stack(mut self) -> Self {
+        self.shadow_stack = true;
+        self
+    }
+
     /// Locks the new mapping and attempts to populate it before returning.
     pub(crate) fn memory_locked(mut self) -> Self {
         self.memory_locked = true;
@@ -289,6 +299,8 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             shm,
             grows_down,
             memory_locked,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack,
             parent,
             mappable,
             file,
@@ -302,6 +314,16 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             handle_page_faults_around,
         } = self;
 
+        #[cfg(target_arch = "x86_64")]
+        if shadow_stack
+            && (mappable.is_some()
+                || file.is_some()
+                || shm.is_some()
+                || grows_down
+                || map_mode.is_shared())
+        {
+            return_errno!(Errno::EINVAL);
+        }
         if memory_locked && super::locking::current_lock_limit() == 0 {
             return_errno!(Errno::EPERM);
         }
@@ -361,7 +383,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
                 map_to_addr
             }
             VmarMapOffset::Hint(map_to_addr) => {
-                if inner.alloc_free_region_exact(map_to_addr, map_size).is_ok() {
+                if inner.alloc_free_region_hint(map_to_addr, map_size).is_ok() {
                     map_to_addr
                 } else {
                     inner.alloc_free_region(map_size, align)?.start
@@ -374,14 +396,25 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
                 if let Some(addr) = addr_hint
                     && (VMAR_LOWEST_ADDR..MAP_32BIT_HIGH_LIMIT).contains(&addr)
                     && map_size <= MAP_32BIT_HIGH_LIMIT - addr
-                    && inner.alloc_free_region_exact(addr, map_size).is_ok()
+                    && inner.alloc_free_region_hint(addr, map_size).is_ok()
                 {
                     addr
                 } else {
                     inner.alloc_free_region_below_2gib(map_size, align)?.start
                 }
             }
-            VmarMapOffset::Any => inner.alloc_free_region(map_size, align)?.start,
+            VmarMapOffset::Any => {
+                #[cfg(target_arch = "x86_64")]
+                if shadow_stack {
+                    inner.alloc_shadow_stack_region(map_size)?.start
+                } else {
+                    inner.alloc_free_region(map_size, align)?.start
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    inner.alloc_free_region(map_size, align)?.start
+                }
+            }
         };
 
         // Parse the `Mappable` and prepare the `MappedMemory`.
@@ -434,6 +467,10 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             perms | may_perms,
         )
         .with_grows_down(grows_down);
+        #[cfg(target_arch = "x86_64")]
+        if shadow_stack {
+            vm_mapping = vm_mapping.with_shadow_stack();
+        }
 
         if let Some(pending) = shm {
             vm_mapping.install_shm(pending.publish());

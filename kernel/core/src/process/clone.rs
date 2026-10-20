@@ -4,12 +4,14 @@ use alloc::borrow::Cow;
 use core::{num::NonZeroU64, sync::atomic::Ordering};
 
 #[cfg(target_arch = "x86_64")]
-use ostd::arch::cpu::context::{FsBase, GsBase};
+use ostd::arch::cpu::context::{FsBase, GsBase, UserShadowStackContext};
 use ostd::{
     arch::cpu::context::UserContext, cpu::CpuId, mm::VmIo, sync::RwArc, task::Task,
     user::UserContextApi,
 };
 
+#[cfg(target_arch = "x86_64")]
+use super::posix_thread::shadow_stack::ShadowStackState;
 use super::{
     Credentials, Process, pid_table,
     posix_thread::{AsPosixThread, PosixThreadBuilder},
@@ -417,6 +419,18 @@ impl ChildNamespaces {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn clone_shadow_stack(
+    ctx: &Context,
+    child_vmar: &VmarHandle,
+    args: &CloneArgs,
+) -> Result<(ShadowStackState, UserShadowStackContext)> {
+    ctx.thread_local
+        .shadow_stack()
+        .borrow()
+        .clone_for(ctx, child_vmar, args.flags, args.stack_size)
+}
+
 fn clone_child_task(
     ctx: &Context,
     parent_context: &UserContext,
@@ -448,6 +462,9 @@ fn clone_child_task(
 
     // Clone FPU context
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
+    #[cfg(target_arch = "x86_64")]
+    let (child_shadow_stack, child_shadow_context) =
+        clone_shadow_stack(ctx, &child_vmar, &clone_args)?;
 
     let ChildNamespaces {
         user_ns: child_user_ns,
@@ -508,7 +525,11 @@ fn clone_child_task(
         .default_timer_slack_ns(default_timer_slack_ns);
         #[cfg(target_arch = "x86_64")]
         {
-            thread_builder = thread_builder.fs_base(child_fs_base).gs_base(child_gs_base);
+            thread_builder = thread_builder
+                .fs_base(child_fs_base)
+                .gs_base(child_gs_base)
+                .shadow_stack_context(child_shadow_context)
+                .shadow_stack(child_shadow_stack);
         }
 
         // Deal with SETTID/CLEARTID flags
@@ -583,6 +604,9 @@ fn clone_child_process(
 
     // Clone FPU context
     let child_fpu_context = thread_local.supp_user_context().fpu().get();
+    #[cfg(target_arch = "x86_64")]
+    let (child_shadow_stack, child_shadow_context) =
+        clone_shadow_stack(ctx, &child_vmar, &clone_args)?;
 
     let ChildNamespaces {
         user_ns: child_user_ns,
@@ -646,7 +670,9 @@ fn clone_child_process(
         {
             child_thread_builder = child_thread_builder
                 .fs_base(child_fs_base)
-                .gs_base(child_gs_base);
+                .gs_base(child_gs_base)
+                .shadow_stack_context(child_shadow_context)
+                .shadow_stack(child_shadow_stack);
         }
 
         // Deal with SETTID/CLEARTID flags

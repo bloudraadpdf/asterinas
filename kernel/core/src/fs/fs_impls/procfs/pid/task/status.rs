@@ -203,6 +203,24 @@ impl ProcFileOps for StatusFileOps {
             credentials.ambient_capset().bits()
         )?;
 
+        #[cfg(target_arch = "x86_64")]
+        {
+            let control = posix_thread.shadow_stack_control();
+            for (name, flags) in [
+                ("x86_Thread_features", control.features()),
+                ("x86_Thread_features_locked", control.locked()),
+            ] {
+                write!(printer, "{}:\t", name)?;
+                if flags & 1 != 0 {
+                    write!(printer, "shstk ")?;
+                }
+                if flags & 2 != 0 {
+                    write!(printer, "wrss ")?;
+                }
+                writeln!(printer)?;
+            }
+        }
+
         Ok(printer.bytes_written())
     }
 }

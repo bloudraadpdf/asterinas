@@ -16,6 +16,11 @@ enum ArchPrctlCode {
     ARCH_SET_FS = 0x1002,
     ARCH_GET_FS = 0x1003,
     ARCH_GET_GS = 0x1004,
+    ARCH_SHSTK_ENABLE = 0x5001,
+    ARCH_SHSTK_DISABLE = 0x5002,
+    ARCH_SHSTK_LOCK = 0x5003,
+    ARCH_SHSTK_UNLOCK = 0x5004,
+    ARCH_SHSTK_STATUS = 0x5005,
 }
 
 pub(super) fn sys_arch_prctl(code: u64, addr: usize, ctx: &Context) -> Result<SyscallReturn> {
@@ -44,6 +49,34 @@ fn do_arch_prctl(code: ArchPrctlCode, addr: usize, ctx: &Context) -> Result<u64>
                 return_errno_with_message!(Errno::EPERM, "fsbase must be a userspace address");
             }
             supp.fs_base().set(FsBase::new(addr));
+            Ok(0)
+        }
+        ArchPrctlCode::ARCH_SHSTK_ENABLE | ArchPrctlCode::ARCH_SHSTK_DISABLE => {
+            ctx.thread_local.shadow_stack().borrow_mut().control(
+                matches!(code, ArchPrctlCode::ARCH_SHSTK_ENABLE),
+                addr as u64,
+                ctx,
+            )?;
+            Ok(0)
+        }
+        ArchPrctlCode::ARCH_SHSTK_LOCK => {
+            ctx.thread_local
+                .shadow_stack()
+                .borrow_mut()
+                .lock(addr as u64);
+            Ok(0)
+        }
+        ArchPrctlCode::ARCH_SHSTK_UNLOCK => {
+            ctx.thread_local
+                .shadow_stack()
+                .borrow_mut()
+                .control(true, addr as u64, ctx)?;
+            Ok(0)
+        }
+        ArchPrctlCode::ARCH_SHSTK_STATUS => {
+            let features =
+                crate::process::posix_thread::shadow_stack::ShadowStackState::features(ctx);
+            ctx.user_space().write_val(addr, &features)?;
             Ok(0)
         }
         ArchPrctlCode::ARCH_GET_FS => {

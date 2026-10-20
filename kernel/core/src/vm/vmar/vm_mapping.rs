@@ -38,6 +38,13 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MappingKind {
+    Ordinary,
+    #[cfg(target_arch = "x86_64")]
+    ShadowStack,
+}
+
 /// A memory mapping for a range of virtual addresses in a [`Vmar`].
 ///
 /// A `VmMapping` can be bound with a [`Vmo`] which can provide physical pages
@@ -62,6 +69,7 @@ pub(crate) struct VmMapping {
     anon_name: Option<AnonVmaName>,
     grows_down: bool,
     memory_locked: bool,
+    kind: MappingKind,
     /// The size of mapping, in bytes. The map size can even be larger than the
     /// size of VMO. Those pages outside VMO range cannot be read or write.
     ///
@@ -103,6 +111,7 @@ impl Debug for VmMapping {
             .field("mapped_mem", &self.mapped_mem)
             .field("file", &self.file.as_ref().map(|file| file.path()))
             .field("anon_name", &self.anon_name)
+            .field("kind", &self.kind)
             .field("map_mode", &self.map_mode)
             .field("handle_page_faults_around", &self.handle_page_faults_around)
             .field("perms", &self.perms)
@@ -133,6 +142,7 @@ impl VmMapping {
             anon_name: None,
             grows_down: false,
             memory_locked: false,
+            kind: MappingKind::Ordinary,
             map_size,
             map_to_addr,
             mapped_mem,
@@ -146,6 +156,27 @@ impl VmMapping {
     pub(super) fn with_grows_down(mut self, grows_down: bool) -> Self {
         self.grows_down = grows_down;
         self
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn with_shadow_stack(mut self) -> Self {
+        self.kind = MappingKind::ShadowStack;
+        self
+    }
+
+    pub(super) fn is_shadow_stack(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.kind == MappingKind::ShadowStack
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn start_gap(&self) -> usize {
+        if self.is_shadow_stack() { PAGE_SIZE } else { 0 }
     }
 
     pub(super) fn memory_locked(&self) -> bool {
@@ -501,6 +532,10 @@ impl VmMapping {
         rss_delta: &mut RssDelta,
     ) -> Result<()> {
         self.check_perms_for_page_fault(page_fault_info)?;
+        #[cfg(target_arch = "x86_64")]
+        if self.is_shadow_stack() {
+            return self.handle_shadow_stack_fault(vm_space, page_fault_info, rss_delta);
+        }
 
         let page_aligned_addr = page_fault_info.address.align_down(PAGE_SIZE);
         let is_write = page_fault_info.required_perms.contains(VmPerms::WRITE);
@@ -557,6 +592,17 @@ impl VmMapping {
             page_fault_info.required_perms,
             self.range()
         );
+
+        #[cfg(target_arch = "x86_64")]
+        if page_fault_info.is_shadow_stack() != self.is_shadow_stack()
+            && (page_fault_info.is_shadow_stack()
+                || page_fault_info.required_perms.contains(VmPerms::WRITE))
+        {
+            return_errno_with_message!(
+                Errno::EACCES,
+                "shadow-stack access does not match the mapping kind"
+            );
+        }
 
         let mut perms = self.perms;
 
@@ -964,7 +1010,19 @@ impl VmMapping {
         let range = self.range();
         let mut cursor = vm_space.cursor_mut(&preempt_guard, &range).unwrap();
 
-        let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| *flags = new_flags;
+        let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| {
+            #[cfg(target_arch = "x86_64")]
+            if self.is_shadow_stack() {
+                let dirty = if perms.contains(VmPerms::WRITE) {
+                    *flags & PageFlags::DIRTY
+                } else {
+                    PageFlags::empty()
+                };
+                *flags = new_flags | PageFlags::SHADOW_STACK | dirty;
+                return;
+            }
+            *flags = new_flags;
+        };
         while cursor.virt_addr() < range.end {
             if let Some(va) = cursor.protect_next(range.end - cursor.virt_addr(), op) {
                 cursor.flusher().issue_tlb_flush(TlbFlushOp::for_range(va));
@@ -1156,6 +1214,7 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
         && left.anon_name == right.anon_name
         && left.grows_down == right.grows_down
         && left.memory_locked == right.memory_locked
+        && left.kind == right.kind
         && left.shm.as_ref().map(ShmMapping::id) == right.shm.as_ref().map(ShmMapping::id)
         && left.handle_page_faults_around == right.handle_page_faults_around
         && left.perms == right.perms
@@ -1205,7 +1264,7 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     })
 }
 
-fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
+pub(super) fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
     let new_frame = FrameAllocOptions::new()
         .priority(AllocationPriority::Normal)
         .zeroed(false)

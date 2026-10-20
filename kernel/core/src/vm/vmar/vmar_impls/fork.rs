@@ -78,7 +78,7 @@ impl Vmar {
 /// `size`. The destination range starts from `dst`'s current position.
 ///
 /// The number of physical frames copied is returned.
-fn cow_copy_pt(src: &mut CursorMut<'_>, dst: &mut CursorMut<'_>, size: usize) -> usize {
+pub(super) fn cow_copy_pt(src: &mut CursorMut<'_>, dst: &mut CursorMut<'_>, size: usize) -> usize {
     let start_va = src.virt_addr();
     let end_va = start_va + size;
     let mut remain_size = size;
@@ -87,6 +87,8 @@ fn cow_copy_pt(src: &mut CursorMut<'_>, dst: &mut CursorMut<'_>, size: usize) ->
 
     let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| {
         *flags -= PageFlags::W;
+        #[cfg(target_arch = "x86_64")]
+        flags.remove(PageFlags::DIRTY);
     };
 
     while let Some(mapped_va) = src.find_next(remain_size) {

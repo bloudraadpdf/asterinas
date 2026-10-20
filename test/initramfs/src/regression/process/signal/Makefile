@@ -4,6 +4,7 @@ ifneq ($(HOST_PLATFORM), x86_64-linux)
 C_OBJS_FILTER += \
 	cpu_contract \
 	fault_signals \
+	shstk_fault \
 	sigaltstack \
 	signal_fpu \
 	signal_xstate \

@@ -127,7 +127,11 @@ pub(super) unsafe fn after_switching_to() {
         // it to NULL after the read.
         let prev_task = unsafe { Arc::from_raw(prev) };
 
-        // Allows it to be switched on a CPU again, if anyone wants to.
+        // Publish deferred placement before releasing the saved context, so a
+        // remote CPU cannot resume it and race a later deferred enqueue.
+        if prev_task.requeue_after_switch.swap(false, Ordering::AcqRel) {
+            super::scheduler::unpark_target(prev_task.clone());
+        }
         prev_task.switched_to_cpu.store(false, Ordering::Release);
 
         Some(prev_task)
@@ -136,7 +140,7 @@ pub(super) unsafe fn after_switching_to() {
     };
 
     if let Some(handler) = POST_SCHEDULE_HANDLER.get() {
-        handler();
+        handler(prev.as_deref());
     }
 
     // See `switch_to_task`, where we forgot an IRQ guard.

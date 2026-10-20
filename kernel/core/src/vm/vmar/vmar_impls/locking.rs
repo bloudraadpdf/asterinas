@@ -249,6 +249,12 @@ pub(super) fn lock_fault_info(mapping: &VmMapping, address: Vaddr) -> Result<Pag
     if !mapping.perms().intersects(VmPerms::ALL_PERMS) {
         return_errno!(Errno::ENOMEM);
     }
+    #[cfg(target_arch = "x86_64")]
+    if mapping.is_shadow_stack() && mapping.perms().contains(VmPerms::WRITE) {
+        return Ok(PageFaultInfo::new(address, VmPerms::READ | VmPerms::WRITE)
+            .shadow_stack()
+            .force());
+    }
     let required = if mapping.perms().contains(VmPerms::WRITE) && mapping.is_cow() {
         VmPerms::WRITE
     } else {

@@ -2,11 +2,17 @@
 
 //! CPU execution context control.
 
+mod shadow_stack;
+
 use alloc::boxed::Box;
 use core::arch::x86_64::{_fxrstor64, _fxsave64, _xrstor64, _xsave64};
 
 use bitflags::bitflags;
 use ostd_pod::{FromZeros, IntoBytes};
+pub use shadow_stack::{
+    ShadowStackContextError, UserShadowStackAdmissionError, UserShadowStackContext,
+    enable_user_shadow_stacks, write_shadow_stack_word,
+};
 use spin::Once;
 use x86::bits64::segmentation::{rdfsbase, rdgsbase, swapgs, wrfsbase, wrgsbase};
 use x86_64::registers::{

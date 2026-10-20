@@ -3,7 +3,7 @@
 use core::cell::{Cell, Ref, RefCell, RefMut};
 
 #[cfg(target_arch = "x86_64")]
-use ostd::arch::cpu::context::{FsBase, GsBase};
+use ostd::arch::cpu::context::{FsBase, GsBase, UserShadowStackContext};
 use ostd::{
     arch::cpu::context::FpuContext, irq::DisabledLocalIrqGuard, sync::RwArc, task::CurrentTask,
 };
@@ -40,6 +40,8 @@ pub(crate) struct ThreadLocal {
     // Supplementary userspace CPU context.
     supp_user_context: SuppUserContext,
     rseq: super::rseq::RseqState,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: RefCell<super::shadow_stack::ShadowStackState>,
 
     // Signal.
     /// Stack address, size, and flags for the signal handler.
@@ -79,6 +81,8 @@ impl ThreadLocal {
             fs: RefCell::new(fs),
             supp_user_context,
             rseq: super::rseq::RseqState::new(),
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: RefCell::new(super::shadow_stack::ShadowStackState::default()),
             sig_stack: RefCell::new(SigStack::default()),
             sig_mask_saved: Cell::new(None),
             orig_syscall_ret: Cell::new(None),
@@ -116,6 +120,11 @@ impl ThreadLocal {
 
     pub(crate) fn clear_child_tid(&self) -> &Cell<Vaddr> {
         &self.clear_child_tid
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack(&self) -> &RefCell<super::shadow_stack::ShadowStackState> {
+        &self.shadow_stack
     }
 
     pub(crate) fn vmar(&self) -> &RefCell<Option<VmarHandle>> {
@@ -257,6 +266,8 @@ pub(crate) struct SuppUserContext {
     fs_base: CpuSync<FsBase>,
     #[cfg(target_arch = "x86_64")]
     gs_base: CpuSync<GsBase>,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: CpuSync<UserShadowStackContext>,
 }
 
 impl SuppUserContext {
@@ -267,6 +278,8 @@ impl SuppUserContext {
             fs_base: CpuSync::new(FsBase::default()),
             #[cfg(target_arch = "x86_64")]
             gs_base: CpuSync::new(GsBase::default()),
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: CpuSync::new(UserShadowStackContext::default()),
         }
     }
 
@@ -287,6 +300,12 @@ impl SuppUserContext {
         self
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn with_shadow_stack_context(mut self, context: UserShadowStackContext) -> Self {
+        self.shadow_stack = CpuSync::new(context);
+        self
+    }
+
     pub(crate) fn fpu(&self) -> &CpuSync<FpuContext> {
         &self.fpu
     }
@@ -301,12 +320,18 @@ impl SuppUserContext {
         &self.gs_base
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack(&self) -> &CpuSync<UserShadowStackContext> {
+        &self.shadow_stack
+    }
+
     pub(crate) fn before_schedule(&self, guard: &DisabledLocalIrqGuard) {
         self.fpu.before_schedule(guard);
         #[cfg(target_arch = "x86_64")]
         {
             self.fs_base.before_schedule(guard);
             self.gs_base.before_schedule(guard);
+            self.shadow_stack().before_schedule(guard);
         }
     }
 
@@ -316,6 +341,7 @@ impl SuppUserContext {
         {
             self.fs_base.before_user_exec(guard);
             self.gs_base.before_user_exec(guard);
+            self.shadow_stack().before_user_exec(guard);
         }
     }
 }

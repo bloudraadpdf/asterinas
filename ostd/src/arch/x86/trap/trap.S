@@ -27,7 +27,7 @@
 
 .macro DEF_HANDLER, i
 _trap_handler_\i:
-.if \i == 8 || (\i >= 10 && \i <= 14) || \i == 17
+.if \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21
     # error code pushed by CPU
     push    \i          # interrupt vector
     jmp     trap_common

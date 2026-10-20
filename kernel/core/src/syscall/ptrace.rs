@@ -109,6 +109,39 @@ pub(super) fn sys_ptrace(
                 .read_val::<arch_ptrace::CUserRegsStruct>(data)?;
             tracee.ptrace_set_regs(regs)?;
         }
+        #[cfg(target_arch = "x86_64")]
+        PtraceRequest::PTRACE_ARCH_PRCTL => {
+            let tracee = ctx.posix_thread.get_tracee(tid)?;
+            let tracee = tracee.as_posix_thread().unwrap();
+            if let Some(value) = tracee.ptrace_arch_prctl(data as u64, addr)? {
+                ctx.user_space().write_val(addr, &value)?;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        PtraceRequest::PTRACE_GETREGSET | PtraceRequest::PTRACE_SETREGSET => {
+            let tracee = ctx.posix_thread.get_tracee(tid)?;
+            let tracee = tracee.as_posix_thread().unwrap();
+            tracee.ptrace_check_stopped()?;
+            let user = ctx.user_space();
+            let mut vector = user.read_val::<PtraceIoVec>(data)?;
+            if addr != 0x204 || !vector.length.is_multiple_of(size_of::<u64>()) {
+                return_errno!(Errno::EINVAL);
+            }
+            vector.length = vector.length.min(size_of::<u64>());
+            let pointer = tracee.ptrace_get_shadow_stack_pointer()?;
+            if matches!(request, PtraceRequest::PTRACE_GETREGSET) {
+                if vector.length != 0 {
+                    user.write_val(vector.base, &(pointer as u64))?;
+                }
+            } else {
+                if vector.length != size_of::<u64>() {
+                    return_errno!(Errno::EINVAL);
+                }
+                let pointer = user.read_val::<u64>(vector.base)?;
+                tracee.ptrace_set_shadow_stack_pointer(pointer as usize)?;
+            }
+            user.write_val(data, &vector)?;
+        }
         PtraceRequest::PTRACE_SYSCALL => {
             let sig_num = parse_ptrace_injected_signal(data)?;
 
@@ -216,6 +249,8 @@ enum PtraceRequest {
     PTRACE_SETREGS = 13,
     /// Continues and stops at the next entry to or return from syscall.
     PTRACE_SYSCALL = 24,
+    #[cfg(target_arch = "x86_64")]
+    PTRACE_ARCH_PRCTL = 30,
     /// Sets ptrace options.
     PTRACE_SETOPTIONS = 0x4200,
     /// Gets the message of the last ptrace-event-stop.
@@ -239,8 +274,18 @@ enum PtraceRequest {
     // PTRACE_SYSEMU = 31,
     // /// Single-steps the thread, and the next syscall will not be executed.
     // PTRACE_SYSEMU_SINGLESTEP = 32,
-    // /// Gets register contents.
-    // PTRACE_GETREGSET = 0x4204,
-    // /// Sets register contents.
-    // PTRACE_SETREGSET = 0x4205,
+    /// Gets the selected register set.
+    #[cfg(target_arch = "x86_64")]
+    PTRACE_GETREGSET = 0x4204,
+    /// Sets the selected register set.
+    #[cfg(target_arch = "x86_64")]
+    PTRACE_SETREGSET = 0x4205,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy, Pod)]
+struct PtraceIoVec {
+    base: Vaddr,
+    length: usize,
 }
