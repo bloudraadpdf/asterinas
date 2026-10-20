@@ -312,6 +312,13 @@ impl VmoMapMode {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum EvictMode {
+    Reclaim,
+    #[cfg(any(feature = "filesystems_extra", ktest))]
+    Invalidate,
+}
+
 impl Vmo {
     /// Commits the page at `page_idx`, blocking on backend I/O if required.
     ///
@@ -491,6 +498,18 @@ impl Vmo {
     /// Returns the number of pages currently owned by this VMO.
     pub(crate) fn committed_pages(&self) -> usize {
         self.committed_pages.load(Ordering::Relaxed)
+    }
+
+    /// Checks whether an accessible page is resident without committing it.
+    pub(crate) fn is_page_resident(&self, offset: usize) -> bool {
+        if offset >= self.size() {
+            return false;
+        }
+        let guard = disable_preempt();
+        self.pages
+            .cursor(&guard, (offset / PAGE_SIZE) as u64)
+            .load()
+            .is_some_and(|page| matches!(page.state(), PageState::UpToDate | PageState::Dirty))
     }
 
     pub(super) fn preallocate_anonymous(&self, range: Range<usize>) -> Result<()> {
@@ -1177,7 +1196,11 @@ impl<'a> BackedVmo<'a> {
     ///
     /// Only pages in the `UpToDate` state are removed. Dirty and uninitialized
     /// pages are left in place.
-    pub(super) fn evict_up_to_date_pages(&self, range: &Range<usize>) -> Result<()> {
+    pub(super) fn evict_up_to_date_pages(
+        &self,
+        range: &Range<usize>,
+        mode: EvictMode,
+    ) -> Result<()> {
         if range.start >= self.size() {
             return Ok(());
         }
@@ -1199,10 +1222,17 @@ impl<'a> BackedVmo<'a> {
             .into_iter()
             .filter_map(|(idx, page)| {
                 let locked_page = page.lock();
-                if !locked_page.state().is_up_to_date() {
-                    return None;
+                match mode {
+                    EvictMode::Reclaim if !locked_page.try_evict_unpinned() => return None,
+                    #[cfg(any(feature = "filesystems_extra", ktest))]
+                    EvictMode::Invalidate => {
+                        if !locked_page.state().is_up_to_date() {
+                            return None;
+                        }
+                        locked_page.set_evicted();
+                    }
+                    _ => {}
                 }
-                locked_page.set_evicted();
                 Some((idx, locked_page))
             })
             .collect::<Vec<_>>();
@@ -1210,7 +1240,9 @@ impl<'a> BackedVmo<'a> {
             return Ok(());
         }
 
-        locked_rmap.unmap(page_idx_range.start * PAGE_SIZE..page_idx_range.end * PAGE_SIZE);
+        for (idx, _) in &locked_up_to_date_pages {
+            locked_rmap.unmap(idx * PAGE_SIZE..(idx + 1) * PAGE_SIZE);
+        }
 
         // As long as the pages are locked and their state is `Evicted`, no one can read from them.
         // Therefore, we can release the reverse-mapping lock now.

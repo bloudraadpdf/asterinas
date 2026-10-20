@@ -52,6 +52,7 @@ impl Vmar {
                 rmap.remove(self.weak_self.clone(), vm_mapping.map_to_addr());
             }
         }
+        self.locked_pages.lock().clear();
         inner.vm_mappings.clear();
         inner.total_vm = 0;
         inner.data_vm = 0;
@@ -107,6 +108,9 @@ impl Vmar {
 
         let mut last_mapping_end = range.start;
         for vm_mapping in inner.vm_mappings.find(&range) {
+            if vm_mapping.memory_locked() {
+                return_errno_with_message!(Errno::EINVAL, "locked pages cannot be discarded");
+            }
             if !vm_mapping.can_expand() {
                 return_errno_with_message!(Errno::EINVAL, "device mappings cannot be discarded");
             }

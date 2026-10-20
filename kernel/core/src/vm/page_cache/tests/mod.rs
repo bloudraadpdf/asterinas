@@ -6,12 +6,12 @@
 use alloc::vec;
 
 use ostd::{
-    mm::{VmIo, io::util::HasVmReaderWriter},
+    mm::{HasPaddr, VmIo, io::util::HasVmReaderWriter},
     prelude::ktest,
 };
 
 use self::utils::{IoCompletion, IoKind, MockPageCacheBackend, wait_until};
-use super::{PageCache, PageCacheBackend, Vmo, VmoCommitError, VmoMapMode};
+use super::{CachePagePin, PageCache, PageCacheBackend, Vmo, VmoCommitError, VmoMapMode};
 use crate::{prelude::*, thread::kernel_thread::ThreadOptions};
 
 mod utils;
@@ -22,13 +22,52 @@ fn resident_count_tracks_backend_eviction_and_truncation() {
     let backend = MockPageCacheBackend::new(2);
     let mut cache = new_backend_page_cache(&backend, 2);
     assert_eq!(cache.as_vmo().committed_pages(), 0);
+    assert!(!cache.as_vmo().is_page_resident(0));
     assert_eq!(cache.read_val::<u8>(0).unwrap(), 0);
     assert_eq!(cache.read_val::<u8>(PAGE_SIZE).unwrap(), 0);
     assert_eq!(cache.as_vmo().committed_pages(), 2);
+    assert!(cache.as_vmo().is_page_resident(0));
     cache.evict_range(0..PAGE_SIZE).unwrap();
     assert_eq!(cache.as_vmo().committed_pages(), 1);
+    assert!(!cache.as_vmo().is_page_resident(0));
     cache.resize(0, 2 * PAGE_SIZE).unwrap();
     assert_eq!(cache.as_vmo().committed_pages(), 0);
+}
+
+#[ktest]
+fn pinned_page_reclaim_and_forced_invalidation() {
+    let backend = MockPageCacheBackend::new(1);
+    backend.set_persisted_page_bytes(0, &[0x3c; PAGE_SIZE]);
+    let cache = new_backend_page_cache(&backend, 1);
+    let vmo = cache.as_vmo();
+    assert_eq!(cache.read_val::<u8>(0).unwrap(), 0x3c);
+    let (old_page, _) = vmo.try_commit_page(0, VmoMapMode::SharedRead).unwrap();
+    let pin = CachePagePin::try_new(old_page.clone()).unwrap();
+
+    cache.evict_range(0..PAGE_SIZE).unwrap();
+    assert!(vmo.is_page_resident(0));
+    assert_eq!(vmo.committed_pages(), 1);
+    assert_eq!(cache.read_val::<u8>(0).unwrap(), 0x3c);
+    assert_eq!(backend.read_count(0), 1);
+
+    // Model a direct backend write: invalidation must replace stale cached
+    // contents even while an old mapping still retains its memory-lock pin.
+    backend.set_persisted_page_bytes(0, &[0xa5; PAGE_SIZE]);
+    cache.invalidate_range(0..PAGE_SIZE).unwrap();
+    assert!(!vmo.is_page_resident(0));
+    assert_eq!(vmo.committed_pages(), 0);
+    assert_eq!(cache.read_val::<u8>(0).unwrap(), 0xa5);
+    assert_eq!(backend.read_count(0), 2);
+    let (new_page, _) = vmo.try_commit_page(0, VmoMapMode::SharedRead).unwrap();
+    assert_ne!(old_page.paddr(), new_page.paddr());
+    assert_eq!(old_page.reader().read_val::<u8>().unwrap(), 0x3c);
+
+    drop(pin);
+    cache.evict_range(0..PAGE_SIZE).unwrap();
+    assert!(!vmo.is_page_resident(0));
+    assert_eq!(vmo.committed_pages(), 0);
+    assert_eq!(cache.read_val::<u8>(0).unwrap(), 0xa5);
+    assert_eq!(backend.read_count(0), 3);
 }
 
 /// Creates a page cache with `num_pages` backend pages for test scenarios.

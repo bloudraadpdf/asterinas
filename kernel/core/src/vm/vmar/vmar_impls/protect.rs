@@ -90,16 +90,12 @@ impl Vmar {
             let vm_mapping_range = vm_mapping.range();
             let intersected_range = get_intersected_range(&range, &vm_mapping_range);
 
-            // Protects part of the taken `VmMapping`.
-            let (left, taken, right) = vm_mapping.split_range(&intersected_range);
-
-            // Puts the rest back.
-            if let Some(left) = left {
-                inner.insert_without_try_merge(self, left, rmap.as_deref_mut());
-            }
-            if let Some(right) = right {
-                inner.insert_without_try_merge(self, right, rmap.as_deref_mut());
-            }
+            let taken = inner.extract_mapping_range(
+                self,
+                vm_mapping,
+                &intersected_range,
+                rmap.as_deref_mut(),
+            );
 
             // Protects part of the `VmMapping`.
             let taken = taken.protect(self.vm_space(), new_perms);

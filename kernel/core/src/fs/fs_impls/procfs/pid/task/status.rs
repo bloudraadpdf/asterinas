@@ -159,6 +159,7 @@ impl ProcFileOps for StatusFileOps {
         )?;
 
         if let Some(vmar_ref) = process.lock_vmar().as_ref() {
+            writeln!(printer, "VmLck:\t{} kB", vmar_ref.locked_bytes() / 1024)?;
             let vsize = vmar_ref.get_mappings_total_size();
             let anon = vmar_ref.get_rss_counter(RssType::Anon) * (PAGE_SIZE / 1024);
             let file = vmar_ref.get_rss_counter(RssType::File) * (PAGE_SIZE / 1024);

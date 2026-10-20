@@ -2,11 +2,13 @@
 
 mod access_alien;
 mod fork;
+pub(super) mod locking;
 pub(super) mod map;
 pub(super) mod page_fault;
 pub(super) mod protect;
 mod query;
 pub(super) mod remap;
+mod residency;
 mod unmap;
 
 use core::{
@@ -43,6 +45,7 @@ const MAP_32BIT_HIGH_LIMIT: Vaddr = 0x8000_0000;
 pub(crate) struct Vmar {
     /// VMAR inner
     inner: RwMutex<VmarInner>,
+    locked_pages: SpinLock<Vec<locking::LockedPage>>,
     /// The attached `VmSpace`
     vm_space: Arc<VmSpace>,
     /// The RSS counters
@@ -65,6 +68,7 @@ impl Vmar {
         let rss_counters = array::from_fn(|_| PerCpuCounter::new());
         Arc::new_cyclic(move |weak_self| Vmar {
             inner: RwMutex::new(inner),
+            locked_pages: SpinLock::new(Vec::new()),
             vm_space: Arc::new(vm_space),
             rss_counters,
             process_vm,
@@ -292,6 +296,20 @@ impl VmarInner {
         self.vm_mappings.insert(vm_mapping);
     }
 
+    fn extract_mapping_range(
+        &mut self,
+        vmar: &Vmar,
+        mapping: VmMapping,
+        range: &Range<Vaddr>,
+        mut rmap: Option<&mut Rmap>,
+    ) -> VmMapping {
+        let (left, selected, right) = mapping.split_range(range);
+        for outside in [left, right].into_iter().flatten() {
+            self.insert_without_try_merge(vmar, outside, rmap.as_deref_mut());
+        }
+        selected
+    }
+
     /// Inserts a `VmMapping` into the `Vmar`, and attempts to merge it with
     /// neighboring mappings.
     ///
@@ -421,19 +439,19 @@ impl VmarInner {
             let vm_mapping_range = vm_mapping.range();
             let intersected_range = get_intersected_range(&range, &vm_mapping_range);
 
-            let (left, taken, right) = vm_mapping.split_range(&intersected_range);
-            if let Some(left) = left {
-                self.insert_without_try_merge(vmar, left, rmap.as_deref_mut());
-            }
-            if let Some(right) = right {
-                self.insert_without_try_merge(vmar, right, rmap.as_deref_mut());
-            }
+            let taken = self.extract_mapping_range(
+                vmar,
+                vm_mapping,
+                &intersected_range,
+                rmap.as_deref_mut(),
+            );
 
             // Note that `rmap` must be dropped before `taken`. Otherwise,
             // there is a possibility of a deadlock because a device mapping
             // may attempt to access its reverse mappings in `Drop`.
             drop(rmap);
 
+            vmar.release_locked_pages(intersected_range);
             rss_delta.add(taken.rss_type(), -(taken.unmap(&vmar.vm_space) as isize));
         }
 

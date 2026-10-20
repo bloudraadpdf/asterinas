@@ -60,6 +60,7 @@ use crate::{
 pub(crate) struct VmMapping {
     shm: Option<ShmMapping>,
     grows_down: bool,
+    memory_locked: bool,
     /// The size of mapping, in bytes. The map size can even be larger than the
     /// size of VMO. Those pages outside VMO range cannot be read or write.
     ///
@@ -128,6 +129,7 @@ impl VmMapping {
         Self {
             shm: None,
             grows_down: false,
+            memory_locked: false,
             map_size,
             map_to_addr,
             mapped_mem,
@@ -141,6 +143,28 @@ impl VmMapping {
     pub(super) fn with_grows_down(mut self, grows_down: bool) -> Self {
         self.grows_down = grows_down;
         self
+    }
+
+    pub(super) fn memory_locked(&self) -> bool {
+        self.memory_locked
+    }
+
+    pub(super) fn set_memory_locked(&mut self, locked: bool) {
+        self.memory_locked = locked;
+    }
+
+    pub(super) fn can_memory_lock(&self) -> bool {
+        if matches!(self.mapped_mem, MappedMemory::Device(_)) {
+            return false;
+        }
+        #[cfg(not(target_arch = "loongarch64"))]
+        if let Some(mapped) = self.vmo()
+            && let Some(vdso) = crate::vdso::vdso_vmo()
+            && Arc::ptr_eq(mapped.vmo(), &vdso)
+        {
+            return false;
+        }
+        true
     }
 
     pub(super) fn grows_down(&self) -> bool {
@@ -180,6 +204,7 @@ impl VmMapping {
     pub(super) fn new_fork(&self) -> VmMapping {
         VmMapping {
             shm: self.shm.clone(),
+            memory_locked: false,
             mapped_mem: self.mapped_mem.dup(),
             file: self.file.clone(),
             ..*self
@@ -188,6 +213,7 @@ impl VmMapping {
 
     pub(super) fn clone_for_remap_at(&self, va: Vaddr) -> VmMapping {
         let mut vm_mapping = self.new_fork();
+        vm_mapping.memory_locked = self.memory_locked;
         vm_mapping.map_to_addr = va;
         vm_mapping
     }
@@ -427,7 +453,7 @@ impl VmMapping {
     /// Returns whether this mapping is a COW mapping.
     ///
     /// Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/include/linux/mm.h#L1470-L1473>
-    fn is_cow(&self) -> bool {
+    pub(super) fn is_cow(&self) -> bool {
         !self.map_mode.is_shared() && self.perms.contains(VmPerms::MAY_WRITE)
     }
 }
@@ -1095,6 +1121,7 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     let is_adjacent = left.map_end() == right.map_to_addr();
     let is_type_equal = left.map_mode == right.map_mode
         && left.grows_down == right.grows_down
+        && left.memory_locked == right.memory_locked
         && left.shm.as_ref().map(ShmMapping::id) == right.shm.as_ref().map(ShmMapping::id)
         && left.handle_page_faults_around == right.handle_page_faults_around
         && left.perms == right.perms

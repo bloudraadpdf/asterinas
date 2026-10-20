@@ -80,6 +80,10 @@ impl RealTimeAttr {
         }
     }
 
+    pub(super) fn time_slice(&self) -> u64 {
+        self.time_slice.load(Relaxed)
+    }
+
     pub(crate) fn update(&self, prio: u8, policy: RealTimePolicy) {
         self.prio.store(prio, Relaxed);
         self.time_slice.store(policy.to_time_slice(), Relaxed);
