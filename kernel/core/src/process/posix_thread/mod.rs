@@ -43,6 +43,8 @@ mod posix_thread_ext;
 pub(crate) mod ptrace;
 mod robust_list;
 pub(crate) mod rseq;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod shadow_stack;
 mod thread_local;
 
 pub(crate) use builder::PosixThreadBuilder;
@@ -84,6 +86,9 @@ pub struct PosixThread {
     /// The per-thread signal [`Waker`], which will be used to wake up the thread
     /// when enqueuing a signal, along with the reason why the thread is paused.
     signalled_waker: SpinLock<Option<(Arc<Waker>, PauseReason)>>,
+
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack_control: Arc<shadow_stack::ShadowStackControl>,
 
     // Time
     /// A profiling clock measures the user CPU time and kernel CPU time in the thread.
@@ -209,6 +214,11 @@ impl PosixThread {
         let mut signalled_waker = self.signalled_waker.lock();
         assert!(signalled_waker.is_none());
         *signalled_waker = Some((waker, reason));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack_control(&self) -> &shadow_stack::ShadowStackControl {
+        &self.shadow_stack_control
     }
 
     /// Clears the signalled waker of this thread.

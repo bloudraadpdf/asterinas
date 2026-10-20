@@ -55,6 +55,9 @@ impl ToFaultSignal for CpuException {
                 // Reference: <https://elixir.bootlin.com/linux/v7.0/source/arch/x86/kernel/traps.c#L904-L911>
                 (SIGSEGV, SI_KERNEL, None)
             }
+            // Linux reports a null address for userspace control-protection faults.
+            // Reference: <https://elixir.bootlin.com/linux/v6.17/source/arch/x86/kernel/cet.c#L79>.
+            CpuException::ControlProtectionException => (SIGSEGV, SEGV_CPERR, None),
             CpuException::PageFault(raw_page_fault_info) => {
                 // FIXME: The code should depend on whether the faulting address is covered by a
                 // mapping, not just on the `PRESENT` bit.
@@ -84,5 +87,23 @@ impl ToFaultSignal for CpuException {
         };
 
         Some(FaultSignal::new(num, code, addr))
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+    use crate::process::signal::constants::{SEGV_CPERR, SIGSEGV};
+
+    #[ktest]
+    fn control_protection_fault_reports_segv_cperr_without_an_address() {
+        let mut context = UserContext::default();
+        context.set_instruction_pointer(0x1234);
+        assert_eq!(
+            CpuException::ControlProtectionException.to_fault_signal(&context),
+            Some(FaultSignal::new(SIGSEGV, SEGV_CPERR, None))
+        );
     }
 }

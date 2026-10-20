@@ -125,7 +125,8 @@ impl<R: UserReg> CpuSync<R> {
         R: Clone,
     {
         if self.location.get() == CanonicalValueLocation::OnCpu {
-            self.reg.borrow_mut().save_from_cpu();
+            let guard = ostd::irq::disable_local();
+            self.reg.borrow_mut().save_from_cpu(&guard);
             self.location.set(CanonicalValueLocation::Both);
         }
         self.reg.borrow().clone()
@@ -163,7 +164,7 @@ impl<R: UserReg> CpuSync<R> {
     pub(super) fn before_schedule(&self, guard: &DisabledLocalIrqGuard) {
         let loc = self.location.get();
         if loc == CanonicalValueLocation::OnCpu {
-            self.reg.borrow_mut().save_from_cpu_with_irq_disabled(guard);
+            self.reg.borrow_mut().save_from_cpu(guard);
         }
         if loc != CanonicalValueLocation::InMemory {
             self.location.set(CanonicalValueLocation::InMemory);
@@ -180,7 +181,7 @@ impl<R: UserReg> CpuSync<R> {
     /// and the canonical value location is marked `OnCpu`.
     pub(super) fn before_user_exec(&self, guard: &DisabledLocalIrqGuard) {
         if self.location.get() == CanonicalValueLocation::InMemory {
-            self.reg.borrow().restore_to_cpu_with_irq_disabled(guard);
+            self.reg.borrow().restore_to_cpu(guard);
         }
         self.location.set(CanonicalValueLocation::OnCpu);
     }
@@ -193,35 +194,11 @@ impl<R: UserReg> CpuSync<R> {
 /// (e.g. the user FS base, the user GS base, or the FPU XSAVE area)
 /// into a struct that implements this trait.
 pub(crate) trait UserReg {
-    /// Saves the current value from the CPU register(s) into `self`.
-    ///
-    /// May be invoked in any IRQ state.
-    fn save_from_cpu(&mut self);
+    /// Saves the current CPU register value with local IRQs disabled.
+    fn save_from_cpu(&mut self, guard: &DisabledLocalIrqGuard);
 
-    /// Saves the current value from the CPU register(s) into `self`,
-    /// with the caller's guarantee that local IRQs are disabled.
-    ///
-    /// Implementors may override to take a cheaper path
-    /// that is only safe with IRQs disabled
-    /// The default falls back to [`Self::save_from_cpu`].
-    fn save_from_cpu_with_irq_disabled(&mut self, _guard: &DisabledLocalIrqGuard) {
-        self.save_from_cpu();
-    }
-
-    /// Writes `self`'s value into the CPU register(s).
-    ///
-    /// May be invoked in any IRQ state.
-    fn restore_to_cpu(&self);
-
-    /// Writes `self`'s value into the CPU register(s),
-    /// with the caller's guarantee that local IRQs are disabled.
-    ///
-    /// Implementors may override to take a cheaper path
-    /// that is only safe with IRQs disabled
-    /// The default falls back to [`Self::restore_to_cpu`].
-    fn restore_to_cpu_with_irq_disabled(&self, _guard: &DisabledLocalIrqGuard) {
-        self.restore_to_cpu();
-    }
+    /// Restores the CPU register value with local IRQs disabled.
+    fn restore_to_cpu(&self, guard: &DisabledLocalIrqGuard);
 }
 
 /// Where the latest canonical value of a [`UserReg`] currently lives.
@@ -238,43 +215,44 @@ enum CanonicalValueLocation {
 // ---------- `UserReg` impls for OSTD register types ----------
 
 impl UserReg for ostd::arch::cpu::context::FpuContext {
-    fn save_from_cpu(&mut self) {
+    fn save_from_cpu(&mut self, _guard: &DisabledLocalIrqGuard) {
         self.save();
     }
 
-    fn restore_to_cpu(&self) {
+    fn restore_to_cpu(&self, _guard: &DisabledLocalIrqGuard) {
         self.load();
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 impl UserReg for ostd::arch::cpu::context::FsBase {
-    fn save_from_cpu(&mut self) {
+    fn save_from_cpu(&mut self, _guard: &DisabledLocalIrqGuard) {
         self.save();
     }
 
-    fn restore_to_cpu(&self) {
+    fn restore_to_cpu(&self, _guard: &DisabledLocalIrqGuard) {
         self.load();
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 impl UserReg for ostd::arch::cpu::context::GsBase {
-    fn save_from_cpu(&mut self) {
-        let guard = ostd::irq::disable_local();
-        self.save(&guard);
-    }
-
-    fn save_from_cpu_with_irq_disabled(&mut self, guard: &DisabledLocalIrqGuard) {
+    fn save_from_cpu(&mut self, guard: &DisabledLocalIrqGuard) {
         self.save(guard);
     }
 
-    fn restore_to_cpu(&self) {
-        let guard = ostd::irq::disable_local();
-        self.load(&guard);
+    fn restore_to_cpu(&self, guard: &DisabledLocalIrqGuard) {
+        self.load(guard);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl UserReg for ostd::arch::cpu::context::UserShadowStackContext {
+    fn save_from_cpu(&mut self, guard: &DisabledLocalIrqGuard) {
+        self.save(guard);
     }
 
-    fn restore_to_cpu_with_irq_disabled(&self, guard: &DisabledLocalIrqGuard) {
-        self.load(guard)
+    fn restore_to_cpu(&self, guard: &DisabledLocalIrqGuard) {
+        self.load(guard);
     }
 }

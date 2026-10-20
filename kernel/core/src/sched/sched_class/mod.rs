@@ -11,12 +11,12 @@ use ostd::{
     arch::read_tsc as sched_clock,
     cpu::{CpuId, CpuSet, PinCurrentCpu, all_cpus},
     irq::disable_local,
-    sync::{LocalIrqDisabled, SpinLock},
+    sync::{LocalIrqDisabled, SpinLock, WaitQueue},
     task::{
         AtomicCpuId, Task,
         scheduler::{
             EnqueueFlags, LocalRunQueue, Scheduler, UpdateFlags, enable_preemption_on_cpu,
-            info::CommonSchedInfo, inject_scheduler,
+            info::CommonSchedInfo, inject_scheduler, request_preemption,
         },
     },
     util::id_set::Id,
@@ -90,6 +90,18 @@ pub(crate) fn round_robin_interval(thread: &Arc<Thread>) -> Duration {
         _ => 0,
     };
     time::clocks_to_duration(clocks)
+}
+
+pub(crate) fn set_thread_affinity(thread: &Arc<Thread>, affinity: &CpuSet) {
+    let scheduler = CLASS_SCHEDULER.get().unwrap();
+    if let Some(cpu) = scheduler.change_affinity(thread, affinity) {
+        request_preemption(cpu);
+    }
+    thread.sched_attr().notify_placement_change();
+    thread
+        .sched_attr()
+        .placement_changed
+        .wait_until(|| scheduler.affinity_satisfied(thread).then_some(()));
 }
 
 pub(crate) fn set_thread_policy(thread: &Arc<Thread>, policy: SchedPolicy) -> Option<CpuId> {
@@ -191,13 +203,25 @@ trait SchedClassRq: Send + fmt::Debug {
 ///
 /// This is used to store the scheduling policy and runtime parameters for each
 /// scheduling class.
-#[derive(Debug)]
 pub(crate) struct SchedAttr {
     placement: SpinLock<(), LocalIrqDisabled>,
+    placement_changed: WaitQueue,
     policy: SchedPolicyState,
     last_cpu: AtomicCpuId,
     real_time: real_time::RealTimeAttr,
     fair: fair::FairAttr,
+}
+
+impl fmt::Debug for SchedAttr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchedAttr")
+            .field("placement", &self.placement)
+            .field("policy", &self.policy)
+            .field("last_cpu", &self.last_cpu)
+            .field("real_time", &self.real_time)
+            .field("fair", &self.fair)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SchedAttr {
@@ -205,6 +229,7 @@ impl SchedAttr {
     pub(crate) fn new(policy: SchedPolicy) -> Self {
         Self {
             placement: SpinLock::new(()),
+            placement_changed: WaitQueue::new(),
             policy: SchedPolicyState::new(policy),
             last_cpu: AtomicCpuId::default(),
             real_time: {
@@ -219,6 +244,10 @@ impl SchedAttr {
                 _ => Nice::default(),
             }),
         }
+    }
+
+    pub(crate) fn notify_placement_change(&self) {
+        self.placement_changed.wake_all();
     }
 
     /// Retrieves the current scheduling policy of the thread.
@@ -277,7 +306,7 @@ impl Scheduler for ClassScheduler {
         let _placement = thread.sched_attr().placement.lock();
 
         let (still_in_rq, cpu) = {
-            let selected_cpu_id = self.select_cpu(&thread, flags);
+            let selected_cpu_id = self.select_cpu(&thread);
 
             if let Err(task_cpu_id) = task.cpu().set_if_is_none(selected_cpu_id) {
                 debug_assert!(flags != EnqueueFlags::Spawn);
@@ -345,11 +374,7 @@ impl ClassScheduler {
         }
         update(attr);
         let queued = if old_policy != attr.effective_policy() {
-            match old_policy {
-                SchedPolicy::RealTime { rt_prio, .. } => rq.real_time.remove(&task, rt_prio.get()),
-                SchedPolicy::Fair(_) => rq.fair.remove(&task),
-                _ => false,
-            }
+            rq.remove_entity(&task, old_policy)
         } else {
             false
         };
@@ -360,6 +385,56 @@ impl ClassScheduler {
             rq.enqueue_entity((task, thread.clone()), None);
         }
         rq.needs_preemption().then_some(cpu)
+    }
+
+    fn affinity_satisfied(&self, thread: &Arc<Thread>) -> bool {
+        let _placement = thread.sched_attr().placement.lock();
+        thread
+            .task()
+            .and_then(|task| task.cpu().get())
+            .is_none_or(|cpu| {
+                thread
+                    .atomic_cpu_affinity()
+                    .contains(cpu, Ordering::Acquire)
+            })
+    }
+
+    fn change_affinity(&self, thread: &Arc<Thread>, affinity: &CpuSet) -> Option<CpuId> {
+        let attr = thread.sched_attr();
+        let _placement = attr.placement.lock();
+        thread
+            .atomic_cpu_affinity()
+            .store(affinity, Ordering::Release);
+        let task = thread.task()?;
+        let cpu = task.cpu().get()?;
+        if affinity.contains(cpu) {
+            return None;
+        }
+        let mut rq = self.rqs[cpu.as_usize()].lock();
+        if task.cpu().get() != Some(cpu) {
+            return None;
+        }
+        if rq
+            .current()
+            .is_some_and(|current| Arc::ptr_eq(current, &task))
+        {
+            let _ = rq.update_current(UpdateFlags::Tick);
+            return Some(cpu);
+        }
+        let removed = rq.remove_entity(&task, attr.effective_policy());
+        debug_assert!(removed);
+        if !removed {
+            return Some(cpu);
+        }
+        task.cpu().set_to_none();
+        drop(rq);
+
+        let destination = self.select_cpu(thread);
+        task.cpu().set_anyway(destination);
+        attr.set_last_cpu(destination);
+        let mut target = self.rqs[destination.as_usize()].lock();
+        target.enqueue_entity((task, thread.clone()), None);
+        target.needs_preemption().then_some(destination)
     }
 
     pub(crate) fn new() -> Self {
@@ -379,11 +454,13 @@ impl ClassScheduler {
     }
 
     // TODO: Implement a better algorithm and replace the current naive implementation.
-    fn select_cpu(&self, thread: &Thread, flags: EnqueueFlags) -> CpuId {
-        if let Some(last_cpu) = thread.sched_attr().last_cpu() {
+    fn select_cpu(&self, thread: &Thread) -> CpuId {
+        let affinity = thread.atomic_cpu_affinity().load(Ordering::Acquire);
+        if let Some(last_cpu) = thread.sched_attr().last_cpu()
+            && affinity.contains(last_cpu)
+        {
             return last_cpu;
         }
-        debug_assert!(flags == EnqueueFlags::Spawn);
 
         let guard = disable_local();
 
@@ -401,7 +478,6 @@ impl ClassScheduler {
             }
         };
 
-        let affinity = thread.atomic_cpu_affinity().load(Ordering::Relaxed);
         match self.last_chosen_cpu.get() {
             Some(cpu) => {
                 // Perform a round-robin selection starting after the last chosen CPU.
@@ -462,6 +538,24 @@ impl PerCpuClassRqSet {
             })
     }
 
+    fn remove_entity(&mut self, task: &Arc<Task>, policy: SchedPolicy) -> bool {
+        match policy {
+            SchedPolicy::RealTime { rt_prio, .. } => self.real_time.remove(task, rt_prio.get()),
+            SchedPolicy::Fair(_) => self.fair.remove(task),
+            _ => false,
+        }
+    }
+
+    fn current_needs_migration(&self) -> bool {
+        self.current.as_ref().is_some_and(|((task, thread), _)| {
+            task.cpu().get().is_some_and(|cpu| {
+                !thread
+                    .atomic_cpu_affinity()
+                    .contains(cpu, Ordering::Acquire)
+            })
+        })
+    }
+
     fn enqueue_entity(&mut self, (task, thread): SchedEntity, flags: Option<EnqueueFlags>) {
         match thread.sched_attr().policy_kind() {
             SchedPolicyKind::Stop => self.stop.enqueue(task, flags),
@@ -490,8 +584,14 @@ impl LocalRunQueue for PerCpuClassRqSet {
         self.pick_next_entity().and_then(|next| {
             // We guarantee that a task can appear at once in a `PerCpuClassRqSet`. So, the `next` cannot be the same
             // as the current task here.
+            let migrate = self.current_needs_migration();
             if let Some((old, _)) = self.current.replace((next, CurrentRuntime::new())) {
-                self.enqueue_entity(old, None);
+                if migrate {
+                    old.0.defer_enqueue();
+                    old.0.cpu().set_to_none();
+                } else {
+                    self.enqueue_entity(old, None);
+                }
             }
             self.current.as_ref().map(|((task, _), _)| task)
         })
@@ -516,7 +616,8 @@ impl LocalRunQueue for PerCpuClassRqSet {
             lookahead = 4;
         }
 
-        should_preempt
+        self.current_needs_migration()
+            || should_preempt
             || (lookahead >= 1 && !self.stop.is_empty())
             || (lookahead >= 2 && !self.real_time.is_empty())
             || (lookahead >= 3 && !self.fair.is_empty())

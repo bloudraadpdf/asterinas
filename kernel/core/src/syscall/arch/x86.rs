@@ -75,6 +75,7 @@ use super::{
     listxattr::{sys_flistxattr, sys_listxattr, sys_llistxattr},
     lseek::sys_lseek,
     madvise::sys_madvise,
+    map_shadow_stack::sys_map_shadow_stack,
     memfd_create::sys_memfd_create,
     mincore::sys_mincore,
     mkdir::{sys_mkdir, sys_mkdirat},
@@ -461,5 +462,6 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_FACCESSAT2 = 439       => sys_faccessat2(args[..4]);
     SYS_EPOLL_PWAIT2 = 441     => sys_epoll_pwait2(args[..6]);
     SYS_FCHMODAT2 = 452        => sys_fchmodat2(args[..4]);
+    SYS_MAP_SHADOW_STACK = 453 => sys_map_shadow_stack(args[..3]);
     SYS_LISTMOUNT = 458        => sys_listmount(args[..4]);
 }

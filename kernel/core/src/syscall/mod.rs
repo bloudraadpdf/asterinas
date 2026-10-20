@@ -93,6 +93,8 @@ mod listmount;
 mod listxattr;
 mod lseek;
 mod madvise;
+#[cfg(target_arch = "x86_64")]
+mod map_shadow_stack;
 mod memfd_create;
 mod mincore;
 mod mkdir;

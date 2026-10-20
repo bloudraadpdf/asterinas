@@ -47,6 +47,8 @@ fn restore_frame(ctx: &Context, user_ctx: &mut UserContext) -> Result<()> {
         user_space.read_bytes(fpu_address, context.as_bytes_mut())?;
         context
     };
+    #[cfg(target_arch = "x86_64")]
+    crate::process::posix_thread::shadow_stack::restore_signal(ctx)?;
     ucontext.uc_mcontext.copy_user_regs_to(user_ctx);
     let _ = set_new_stack(ucontext.uc_stack, ctx, user_ctx.stack_pointer());
     ctx.thread_local.supp_user_context().fpu().set(fpu_context);

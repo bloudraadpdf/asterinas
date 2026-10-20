@@ -10,6 +10,8 @@ pub(super) mod protect;
 mod query;
 pub(super) mod remap;
 mod residency;
+#[cfg(target_arch = "x86_64")]
+mod shadow_stack;
 mod unmap;
 
 use core::{
@@ -415,6 +417,18 @@ impl VmarInner {
         Ok(offset..(offset + size))
     }
 
+    fn alloc_free_region_hint(&mut self, offset: Vaddr, size: usize) -> Result<Range<Vaddr>> {
+        let range = self.alloc_free_region_exact(offset, size)?;
+        if self
+            .vm_mappings
+            .find_next(&offset)
+            .is_some_and(|next| range.end > next.map_to_addr().saturating_sub(next.start_gap()))
+        {
+            return_errno!(Errno::EEXIST);
+        }
+        Ok(range)
+    }
+
     /// Allocates a free region for mapping with a specific offset and size.
     ///
     /// If the provided range is already occupied, this function truncates all
@@ -518,7 +532,10 @@ impl VmarInner {
                 return Ok(region);
             }
 
-            prev_vm_mapping_start = vm_mapping.range().start;
+            prev_vm_mapping_start = vm_mapping
+                .range()
+                .start
+                .saturating_sub(vm_mapping.start_gap());
             if prev_vm_mapping_start <= low_limit {
                 break;
             }

@@ -250,6 +250,8 @@ fn do_execve_no_return(
         super::posix_thread::wake_clear_ctid(thread_local);
     }
     thread_local.rseq().reset();
+    #[cfg(target_arch = "x86_64")]
+    super::posix_thread::shadow_stack::reset(ctx);
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
     apply_exec_cred(process, &ctx.credentials_mut(), exec_cred)?;
     drop(vmar_guard);

@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_arch = "x86_64")]
-use ostd::arch::cpu::context::{FsBase, GsBase};
+use ostd::arch::cpu::context::{FsBase, GsBase, UserShadowStackContext};
 use ostd::{arch::cpu::context::UserContext, sync::Waiter};
 
 use super::{AsPosixThread, PosixThread};
@@ -166,6 +166,76 @@ impl PosixThread {
     pub(crate) fn ptrace_set_regs(&self, regs: arch_ptrace::CUserRegsStruct) -> Result<()> {
         let status = self.get_tracee_status()?;
         status.set_regs(regs)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn ptrace_check_stopped(&self) -> Result<()> {
+        let status = self.get_tracee_status()?;
+        let state = status.state.lock();
+        status.check_ptrace_stopped(&state)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn ptrace_arch_prctl(&self, code: u64, argument: usize) -> Result<Option<usize>> {
+        let status = self.get_tracee_status()?;
+        let mut state = status.state.lock();
+        status.check_ptrace_stopped(&state)?;
+        match code {
+            0x1001 | 0x1002 => {
+                if argument >= ostd::mm::MAX_USERSPACE_VADDR {
+                    return_errno!(Errno::EPERM);
+                }
+                if code == 0x1001 {
+                    state.gs_base = Some(GsBase::new(argument));
+                } else {
+                    state.fs_base = Some(FsBase::new(argument));
+                }
+                Ok(None)
+            }
+            0x1003 => Ok(Some(state.fs_base.unwrap().addr())),
+            0x1004 => Ok(Some(state.gs_base.unwrap().addr())),
+            0x5003 => {
+                self.shadow_stack_control().lock(argument as u64);
+                Ok(None)
+            }
+            0x5004 => {
+                self.shadow_stack_control().unlock(argument as u64);
+                Ok(None)
+            }
+            0x5005 => Ok(Some(self.shadow_stack_control().features() as usize)),
+            _ => return_errno!(Errno::EINVAL),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn ptrace_get_shadow_stack_pointer(&self) -> Result<usize> {
+        let status = self.get_tracee_status()?;
+        let state = status.state.lock();
+        status.check_ptrace_stopped(&state)?;
+        state
+            .shadow_stack
+            .as_ref()
+            .unwrap()
+            .stack_pointer()
+            .ok_or_else(|| Error::new(Errno::ENODEV))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn ptrace_set_shadow_stack_pointer(&self, pointer: usize) -> Result<()> {
+        let status = self.get_tracee_status()?;
+        let mut state = status.state.lock();
+        status.check_ptrace_stopped(&state)?;
+        state
+            .shadow_stack
+            .as_mut()
+            .unwrap()
+            .set_restored_stack_pointer(pointer)
+            .map_err(|error| match error {
+                ostd::arch::cpu::context::ShadowStackContextError::Disabled => {
+                    Error::new(Errno::ENODEV)
+                }
+                _ => Error::new(Errno::EINVAL),
+            })
     }
 
     /// Reads one word in the tracee's USER area.
@@ -501,6 +571,7 @@ impl TraceeStatus {
             let supp = ctx.thread_local.supp_user_context();
             state.fs_base = Some(supp.fs_base().get());
             state.gs_base = Some(supp.gs_base().get());
+            state.shadow_stack = Some(supp.shadow_stack().get());
             state.user_context = Some(user_ctx.clone());
             state.set_orig_syscall_ret(ctx.thread_local.orig_syscall_ret());
         }
@@ -535,6 +606,7 @@ impl TraceeStatus {
                 state.user_context = None;
                 state.fs_base = None;
                 state.gs_base = None;
+                state.shadow_stack = None;
                 state.clear_orig_syscall_ret();
             }
             state.is_tracing_syscall = false;
@@ -552,6 +624,7 @@ impl TraceeStatus {
             let supp = ctx.thread_local.supp_user_context();
             supp.fs_base().set(state.fs_base.take().unwrap());
             supp.gs_base().set(state.gs_base.take().unwrap());
+            supp.shadow_stack().set(state.shadow_stack.take().unwrap());
             ctx.thread_local
                 .set_orig_syscall_ret(state.take_orig_syscall_ret());
         }
@@ -795,6 +868,8 @@ struct TraceeState {
     /// The GS base of the tracee at the time of ptrace-stop.
     #[cfg(target_arch = "x86_64")]
     gs_base: Option<GsBase>,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: Option<UserShadowStackContext>,
     /// The value of `ThreadLocal::orig_syscall_ret` at the time of ptrace-stop,
     /// or [`Self::NOT_A_SYSCALL`] for non-syscall stops.
     #[cfg(target_arch = "x86_64")]
@@ -815,6 +890,8 @@ impl TraceeState {
             fs_base: None,
             #[cfg(target_arch = "x86_64")]
             gs_base: None,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: None,
             #[cfg(target_arch = "x86_64")]
             orig_syscall_ret: Self::NOT_A_SYSCALL,
         }

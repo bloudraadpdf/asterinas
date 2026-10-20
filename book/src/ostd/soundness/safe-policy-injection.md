@@ -44,6 +44,15 @@ The first CPU will eventually switch away from the task
 (setting `switched_to_cpu = false` in [`after_switching_to`](https://github.com/asterinas/asterinas/blob/9ea44ed2b60bc81a5efb18af79e41fc07bf3d523/ostd/src/task/processor.rs#L119)),
 at which point the second CPU can proceed.
 
+For CPU migration, the scheduler removes the current task
+and calls `Task::defer_enqueue` before it selects another task.
+OSTD saves the outgoing context,
+then enqueues that task on its destination CPU
+before it releases `switched_to_cpu`.
+The destination CPU must acquire the flag before it can resume the task.
+The post-schedule hook receives the previous task after this handoff,
+so the kernel can wake callers that wait for an affinity change.
+
 > **Safety Invariant.** A task never executes on two CPUs simultaneously, regardless of scheduler behavior.
 
 Running a task on two CPUs would mean

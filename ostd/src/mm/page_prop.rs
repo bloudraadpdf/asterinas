@@ -115,6 +115,10 @@ bitflags! {
         /// Has the memory page been written.
         const DIRTY     = 0b00010000;
 
+        /// An x86 userspace shadow-stack mapping; hardware writes use DIRTY instead of W.
+        #[cfg(target_arch = "x86_64")]
+        const SHADOW_STACK = 0b00100000;
+
         /// The second bit available for software use.
         const AVAIL2    = 0b10000000;
     }
@@ -145,6 +149,10 @@ bitflags! {
     pub(crate) struct PageTableFlags: u8 {
         /// The first bit available for software use.
         const AVAIL1    = 0b01000000;
+        /// An x86 userspace shadow-stack mapping; hardware writes use DIRTY instead of W.
+        #[cfg(target_arch = "x86_64")]
+        const SHADOW_STACK = 0b00100000;
+
         /// The second bit available for software use.
         const AVAIL2    = 0b10000000;
     }

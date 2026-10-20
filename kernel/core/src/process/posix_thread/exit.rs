@@ -119,6 +119,9 @@ fn exit_internal(
     drop_after!(posix_thread.file_table().lock().take());
     drop_after!(posix_thread.ns_proxy().lock().take());
 
+    #[cfg(target_arch = "x86_64")]
+    super::shadow_stack::reset(ctx);
+
     // Drop fields in `ThreadLocal`.
     drop_after!(thread_local.vmar().borrow_mut().take());
     drop_after!(thread_local.borrow_file_table_mut().remove());

@@ -160,7 +160,14 @@ impl From<&RawPageFaultInfo> for PageFaultInfo {
             VmPerms::READ
         };
 
-        PageFaultInfo::new(raw_info.addr, required_perms)
+        if raw_info
+            .error_code
+            .contains(PageFaultErrorCode::SHADOW_STACK)
+        {
+            PageFaultInfo::new(raw_info.addr, VmPerms::READ | VmPerms::WRITE).shadow_stack()
+        } else {
+            PageFaultInfo::new(raw_info.addr, required_perms)
+        }
     }
 }
 
@@ -867,6 +874,10 @@ impl fmt::Display for CpuInformation {
         write!(f, "flags\t\t:")?;
         for flag in self.flags.iter() {
             write!(f, " {}", flag)?;
+        }
+
+        if ostd::arch::cpu::context::UserShadowStackContext::is_available() {
+            write!(f, " user_shstk")?;
         }
 
         // TODO: Add the `vmx flags` field.

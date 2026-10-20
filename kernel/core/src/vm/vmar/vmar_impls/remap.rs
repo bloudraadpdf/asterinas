@@ -130,6 +130,8 @@ impl Vmar {
             )
         };
         let memory_locked = old_mapping.memory_locked();
+        #[cfg(target_arch = "x86_64")]
+        let shadow_stack = old_mapping.is_shadow_stack();
         let extra = if action == RemapOldMappingAction::Keep {
             new_size
         } else {
@@ -223,7 +225,16 @@ impl Vmar {
                 return Ok(old_range.start);
             }
 
-            inner.alloc_free_region(new_size, PAGE_SIZE)?
+            #[cfg(target_arch = "x86_64")]
+            if shadow_stack {
+                inner.alloc_shadow_stack_region(new_size)?
+            } else {
+                inner.alloc_free_region(new_size, PAGE_SIZE)?
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                inner.alloc_free_region(new_size, PAGE_SIZE)?
+            }
         };
 
         let old_mapping_addr = inner.check_lies_in_single_mapping(old_addr, old_size)?;

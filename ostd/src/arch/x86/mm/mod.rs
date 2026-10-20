@@ -71,6 +71,8 @@ bitflags::bitflags! {
         const HIGH_IGN1 =       1 << 52;
         /// Ignored by the hardware. Free to use.
         const HIGH_IGN2 =       1 << 53;
+        /// Software identity retained when a shadow-stack COW PTE has DIRTY clear.
+        const SHADOW_STACK =    1 << 54;
 
         /// Forbid execute codes on the page. The NXE bits in EFER msr must be set.
         const NO_EXECUTE =      1 << 63;
@@ -199,7 +201,8 @@ impl PageTableEntry {
             | parse_flags!(!self.0, PteFlags::NO_EXECUTE, PageFlags::X)
             | parse_flags!(self.0, PteFlags::ACCESSED, PageFlags::ACCESSED)
             | parse_flags!(self.0, PteFlags::DIRTY, PageFlags::DIRTY)
-            | parse_flags!(self.0, PteFlags::HIGH_IGN2, PageFlags::AVAIL2);
+            | parse_flags!(self.0, PteFlags::HIGH_IGN2, PageFlags::AVAIL2)
+            | parse_flags!(self.0, PteFlags::SHADOW_STACK, PageFlags::SHADOW_STACK);
 
         let priv_flags = parse_flags!(self.0, PteFlags::USER, PrivFlags::USER)
             | parse_flags!(self.0, PteFlags::GLOBAL, PrivFlags::GLOBAL)
@@ -225,7 +228,13 @@ impl PageTableEntry {
         PageTableFlags::from_bits(bits as u8).unwrap()
     }
 
-    fn new_page(paddr: Paddr, level: PagingLevel, prop: PageProperty) -> Self {
+    fn new_page(paddr: Paddr, level: PagingLevel, mut prop: PageProperty) -> Self {
+        if prop.flags.contains(PageFlags::SHADOW_STACK) {
+            prop.flags.remove(PageFlags::W);
+        } else if !prop.flags.contains(PageFlags::W) {
+            // RO+DIRTY is the hardware shadow-stack encoding, not an ordinary dirty page.
+            prop.flags.remove(PageFlags::DIRTY);
+        }
         let mut flags = PteFlags::HUGE.bits();
 
         flags |= parse_flags!(prop.flags.bits(), PageFlags::R, PteFlags::PRESENT)
@@ -239,6 +248,11 @@ impl PageTableEntry {
                 PteFlags::HIGH_IGN1
             )
             | parse_flags!(prop.flags.bits(), PageFlags::AVAIL2, PteFlags::HIGH_IGN2)
+            | parse_flags!(
+                prop.flags.bits(),
+                PageFlags::SHADOW_STACK,
+                PteFlags::SHADOW_STACK
+            )
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::USER, PteFlags::USER)
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::GLOBAL, PteFlags::GLOBAL);
         #[cfg(feature = "cvm_guest")]
@@ -319,5 +333,44 @@ pub(super) fn enable_essential_features() {
         Efer::update(|efer| {
             *efer |= EferFlags::NO_EXECUTE_ENABLE;
         });
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use super::*;
+    use crate::{mm::CachePolicy, prelude::*};
+
+    #[ktest]
+    fn shadow_stack_identity_survives_cow_and_dirty_transitions() {
+        let flags = PageFlags::R | PageFlags::W | PageFlags::DIRTY | PageFlags::SHADOW_STACK;
+        let page = PageTableEntry::new_page(
+            0x1000,
+            1,
+            PageProperty::new_user(flags, CachePolicy::Writeback),
+        );
+        assert_eq!(page.0 & PteFlags::WRITABLE.bits(), 0);
+        assert_ne!(page.0 & PteFlags::DIRTY.bits(), 0);
+        assert!(page.prop().flags.contains(PageFlags::SHADOW_STACK));
+        let cow = PageTableEntry(page.0 & !PteFlags::DIRTY.bits());
+        assert!(cow.prop().flags.contains(PageFlags::SHADOW_STACK));
+        assert!(!cow.prop().flags.contains(PageFlags::DIRTY));
+        let dirty = PageTableEntry(cow.0 | PteFlags::DIRTY.bits());
+        assert!(
+            dirty
+                .prop()
+                .flags
+                .contains(PageFlags::SHADOW_STACK | PageFlags::DIRTY)
+        );
+        let ordinary = PageTableEntry::new_page(
+            0x2000,
+            1,
+            PageProperty::new_user(PageFlags::R | PageFlags::DIRTY, CachePolicy::Writeback),
+        );
+        assert_eq!(
+            ordinary.0 & (PteFlags::WRITABLE | PteFlags::DIRTY).bits(),
+            0
+        );
+        assert!(!ordinary.prop().flags.contains(PageFlags::SHADOW_STACK));
     }
 }

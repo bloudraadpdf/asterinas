@@ -15,7 +15,7 @@ use core::{
     cell::{Cell, SyncUnsafeCell},
     ops::Deref,
     ptr::NonNull,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use kernel_stack::KernelStack;
@@ -35,15 +35,15 @@ use crate::{
 
 static PRE_SCHEDULE_HANDLER: Once<fn(&DisabledLocalIrqGuard)> = Once::new();
 
-static POST_SCHEDULE_HANDLER: Once<fn()> = Once::new();
+static POST_SCHEDULE_HANDLER: Once<fn(Option<&Task>)> = Once::new();
 
 /// Injects a handler to be executed before scheduling.
 pub fn inject_pre_schedule_handler(handler: fn(&DisabledLocalIrqGuard)) {
     PRE_SCHEDULE_HANDLER.call_once(|| handler);
 }
 
-/// Injects a handler to be executed after scheduling.
-pub fn inject_post_schedule_handler(handler: fn()) {
+/// Injects a handler receiving the previous task after its context has been saved.
+pub fn inject_post_schedule_handler(handler: fn(Option<&Task>)) {
     POST_SCHEDULE_HANDLER.call_once(|| handler);
 }
 
@@ -69,6 +69,7 @@ pub struct Task {
     /// This is to enforce not context switching to an already running task.
     /// See [`processor::switch_to_task`] for more details.
     switched_to_cpu: AtomicBool,
+    requeue_after_switch: AtomicBool,
 
     schedule_info: TaskScheduleInfo,
 }
@@ -105,6 +106,14 @@ impl Task {
     #[track_caller]
     pub fn yield_now() {
         scheduler::yield_now()
+    }
+
+    /// Defers re-enqueueing a removed current task until its context is saved.
+    ///
+    /// The scheduler calls this instead of putting the outgoing task back on a
+    /// runqueue when it must choose a new CPU. It must then select another task.
+    pub fn defer_enqueue(&self) {
+        self.requeue_after_switch.store(true, Ordering::Release);
     }
 
     /// Kicks the task scheduler to run the task.
@@ -234,6 +243,7 @@ impl TaskOptions {
             ctx: SyncUnsafeCell::new(ctx),
             kstack,
             switched_to_cpu: AtomicBool::new(false),
+            requeue_after_switch: AtomicBool::new(false),
             schedule_info: TaskScheduleInfo {
                 cpu: AtomicCpuId::default(),
             },

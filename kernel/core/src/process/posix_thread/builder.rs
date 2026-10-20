@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
 #[cfg(target_arch = "x86_64")]
-use ostd::arch::cpu::context::{FsBase, GsBase};
+use ostd::arch::cpu::context::{FsBase, GsBase, UserShadowStackContext};
 use ostd::{
     arch::cpu::context::{FpuContext, UserContext},
     cpu::CpuSet,
@@ -48,6 +48,8 @@ pub(crate) struct PosixThreadBuilder {
     sched_policy: SchedPolicy,
     supp_user_context: SuppUserContext,
     rseq_registration: Option<super::rseq::Registration>,
+    #[cfg(target_arch = "x86_64")]
+    shadow_stack: super::shadow_stack::ShadowStackState,
     user_ns: Option<Arc<UserNamespace>>,
     ns_proxy: Option<Arc<NsProxy>>,
     sem_undo: Option<SemUndoOwner>,
@@ -78,6 +80,8 @@ impl PosixThreadBuilder {
             sched_policy: SchedPolicy::Fair(Nice::default()),
             supp_user_context: SuppUserContext::new(),
             rseq_registration: None,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack: super::shadow_stack::ShadowStackState::default(),
             user_ns: None,
             ns_proxy: None,
             sem_undo: None,
@@ -146,6 +150,14 @@ impl PosixThreadBuilder {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack_context(self, context: UserShadowStackContext) -> Self {
+        Self {
+            supp_user_context: self.supp_user_context.with_shadow_stack_context(context),
+            ..self
+        }
+    }
+
     pub(crate) fn user_ns(mut self, user_ns: Arc<UserNamespace>) -> Self {
         self.user_ns = Some(user_ns);
         self
@@ -166,6 +178,12 @@ impl PosixThreadBuilder {
         self
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn shadow_stack(mut self, state: super::shadow_stack::ShadowStackState) -> Self {
+        self.shadow_stack = state;
+        self
+    }
+
     pub(crate) fn build(self) -> Arc<Task> {
         let Self {
             identity,
@@ -183,6 +201,8 @@ impl PosixThreadBuilder {
             sched_policy,
             supp_user_context,
             rseq_registration,
+            #[cfg(target_arch = "x86_64")]
+            shadow_stack,
             user_ns,
             ns_proxy,
             default_timer_slack_ns,
@@ -197,6 +217,9 @@ impl PosixThreadBuilder {
 
         let fs = fs
             .unwrap_or_else(|| Arc::new(ThreadFsInfo::new(ns_proxy.mnt_ns().new_path_resolver())));
+
+        #[cfg(target_arch = "x86_64")]
+        let shadow_stack_control = shadow_stack.shared();
 
         Arc::new_cyclic(|weak_task| {
             let posix_thread = {
@@ -217,6 +240,8 @@ impl PosixThreadBuilder {
                     sig_mask,
                     sig_queues,
                     signalled_waker: SpinLock::new(None),
+                    #[cfg(target_arch = "x86_64")]
+                    shadow_stack_control,
                     prof_clock,
                     virtual_timer_manager,
                     prof_timer_manager,
@@ -252,6 +277,10 @@ impl PosixThreadBuilder {
             );
 
             thread_local.rseq().inherit(rseq_registration);
+            #[cfg(target_arch = "x86_64")]
+            {
+                *thread_local.shadow_stack().borrow_mut() = shadow_stack;
+            }
             task::create_new_user_task(user_ctx, thread, thread_local)
         })
     }
