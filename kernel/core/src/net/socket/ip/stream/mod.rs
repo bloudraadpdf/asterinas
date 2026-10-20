@@ -480,6 +480,17 @@ impl SocketPrivate for StreamSocket {
 }
 
 impl Socket for StreamSocket {
+    fn busy_poll(&self, budget: u16) -> Option<usize> {
+        let iface = {
+            let state = self.state.read();
+            match state.as_ref() {
+                State::Listen(listener) => listener.busy_poll_iface()?,
+                state => state.iface()?.clone(),
+            }
+        };
+        Some(iface.poll_with_budget(budget))
+    }
+
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;
 

@@ -20,6 +20,7 @@ use crate::{
 pub(crate) struct PollableIface<E: Ext> {
     interface: smoltcp::iface::Interface,
     pending_conns: PendingConnSet<E>,
+    deferred_tcp: Option<(smoltcp::wire::IpRepr, smoltcp::wire::TcpRepr<'static>)>,
 }
 
 impl<E: Ext> PollableIface<E> {
@@ -27,7 +28,22 @@ impl<E: Ext> PollableIface<E> {
         Self {
             interface,
             pending_conns: PendingConnSet::new(),
+            deferred_tcp: None,
         }
+    }
+
+    pub(super) fn take_deferred_tcp(
+        &mut self,
+    ) -> Option<(smoltcp::wire::IpRepr, smoltcp::wire::TcpRepr<'static>)> {
+        self.deferred_tcp.take()
+    }
+
+    pub(super) fn defer_tcp(
+        &mut self,
+        reply: (smoltcp::wire::IpRepr, smoltcp::wire::TcpRepr<'static>),
+    ) {
+        debug_assert!(self.deferred_tcp.is_none());
+        self.deferred_tcp = Some(reply);
     }
 
     pub(super) fn as_mut(&mut self) -> PollableIfaceMut<'_, E> {

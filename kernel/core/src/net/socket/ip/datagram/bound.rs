@@ -72,6 +72,10 @@ impl BoundDatagram {
         }
     }
 
+    pub(super) fn busy_poll_iface(&self) -> Option<Arc<Iface>> {
+        self.bound_socket.busy_poll_iface()
+    }
+
     pub(super) fn bound_ports(&self) -> impl Iterator<Item = &BoundUdpPort> {
         self.bound_socket.bound_ports()
     }

@@ -84,6 +84,10 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for EtherIface<D, E> {
         self.common.poll(&self.driver, self);
     }
 
+    fn poll_with_budget(&self, budget: u16) -> usize {
+        self.common.poll_with_budget(&self.driver, self, budget)
+    }
+
     fn mtu(&self) -> usize {
         self.driver
             .with(|device| device.capabilities().max_transmission_unit)

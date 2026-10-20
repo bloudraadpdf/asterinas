@@ -120,6 +120,18 @@ Unsupported flags in events:
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/epoll_ctl.2.html).
 
+Epoll descriptors also support the `EPIOCSPARAMS` and `EPIOCGPARAMS` ioctls.
+Busy polling uses the last eligible socket observed while delivering readiness,
+with a packet budget and a microsecond limit. The overall epoll timeout and
+pending signals also stop the loop. These limits are checked between bounded
+network batches; they are not hard real-time guarantees.
+
+`prefer_busy_poll` enables polling even when `busy_poll_usecs` is zero, in which
+case one bounded batch is attempted. It is an optimization hint: Asterinas does
+not implement Linux NAPI interrupt deferral or promise exclusive driver polling.
+General transmit work runs in the background poll rather than extending an epoll
+busy-poll batch.
+
 ### `poll` and `ppoll`
 
 Supported functionality in SCML:

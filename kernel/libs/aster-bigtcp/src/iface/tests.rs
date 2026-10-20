@@ -203,13 +203,53 @@ fn multi_iface_listener_has_one_backlog_capacity_and_option_set() {
     }
 }
 
+fn listen_many(
+    ifaces: &[Arc<dyn Iface<TestExt>>],
+    backlog: usize,
+) -> (u16, Vec<TcpListener<TestExt>>) {
+    let ports = BoundTcpPort::bind_many(ifaces.to_vec(), any(0), false).unwrap();
+    let port = ports[0].port();
+    let listeners = TcpListener::new_listen_many(ports, backlog, &options(), ())
+        .unwrap_or_else(|_| panic!("group listen failed"));
+    (port, listeners)
+}
+
+#[ktest]
+fn multi_iface_listener_remembers_receive_interface_after_accept() {
+    let ifaces = ifaces();
+    let (port, listeners) = listen_many(&ifaces, 4);
+    assert!(
+        listeners
+            .iter()
+            .all(|listener| listener.last_receive_iface().is_none())
+    );
+    let first = connect(&ifaces[1], port);
+    assert!(
+        listeners
+            .iter()
+            .all(|listener| { listener.last_receive_iface() == Some(ifaces[1].index()) })
+    );
+    let (accepted_first, _) = listeners[0].accept().unwrap();
+    assert!(listeners[0].accept().is_none());
+    assert_eq!(listeners[0].last_receive_iface(), Some(ifaces[1].index()));
+    let second = connect(&ifaces[0], port);
+    assert!(
+        listeners
+            .iter()
+            .all(|listener| { listener.last_receive_iface() == Some(ifaces[0].index()) })
+    );
+    let (accepted_second, _) = listeners[1].accept().unwrap();
+    for connection in [&first, &second, &accepted_first, &accepted_second] {
+        connection.reset();
+    }
+    listeners.iter().for_each(|listener| listener.close());
+    ifaces.iter().for_each(|iface| iface.poll());
+}
+
 #[ktest]
 fn multi_iface_close_releases_pending_connections_on_every_interface() {
     let ifaces = ifaces();
-    let ports = BoundTcpPort::bind_many(ifaces.clone(), any(0), false).unwrap();
-    let port = ports[0].port();
-    let listeners = TcpListener::new_listen_many(ports, 4, &options(), ())
-        .unwrap_or_else(|_| panic!("group listen failed"));
+    let (port, listeners) = listen_many(&ifaces, 4);
     let first = connect(&ifaces[0], port);
     let second = connect(&ifaces[1], port);
     assert!(matches!(first.connect_state(), ConnectState::Connected));
@@ -396,8 +436,13 @@ mod udp {
         let sender = socket(&ifaces);
         let receiver = socket(&ifaces);
         let target = destination(&receiver, &ifaces[1]);
+        assert!(receiver.busy_poll_iface().is_none());
         sender.send(&ifaces[1], target, payload(1, 7)).unwrap();
         ifaces[1].poll();
+        assert_eq!(
+            receiver.busy_poll_iface().unwrap().index(),
+            ifaces[1].index()
+        );
         let arrival = receiver
             .recv(ReceiveBehavior::Peek, |data, meta| {
                 assert_eq!(data, &[7]);
@@ -422,6 +467,18 @@ mod udp {
             })
             .unwrap();
         assert!(!receiver.can_recv());
+        sender
+            .send(
+                &ifaces[0],
+                destination(&receiver, &ifaces[0]),
+                payload(1, 9),
+            )
+            .unwrap();
+        ifaces[0].poll();
+        assert_eq!(
+            receiver.busy_poll_iface().unwrap().index(),
+            ifaces[0].index()
+        );
     }
 
     #[ktest]
@@ -468,5 +525,242 @@ mod udp {
         second
             .recv(ReceiveBehavior::Recv, |data, _| assert_eq!(data, &[3]))
             .unwrap();
+    }
+}
+
+mod ingress_budget {
+    use alloc::{collections::VecDeque, vec};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::{
+        device::{DeviceCapabilities, NetError},
+        iface::BoundUdpPort,
+        packet::{FreshTxPacket, LinkLayer, RxPacket, TxPacket},
+        socket::{ReceiveBehavior, UdpSocket},
+    };
+
+    #[derive(Debug)]
+    struct Device {
+        loopback: Loopback,
+        packets: VecDeque<Vec<u8>>,
+        received: usize,
+        sent: usize,
+        egress_checks: AtomicUsize,
+        notifications: usize,
+    }
+
+    impl AnyNetworkDevice for Device {
+        fn mac_addr(&self) -> crate::device::EthernetAddress {
+            self.loopback.mac_addr()
+        }
+        fn capabilities(&self) -> DeviceCapabilities {
+            self.loopback.capabilities()
+        }
+        fn can_receive(&self) -> bool {
+            !self.packets.is_empty()
+        }
+        fn can_send(&self) -> bool {
+            self.egress_checks.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        fn receive(&mut self) -> Result<RxPacket<LinkLayer>, NetError> {
+            let Some(bytes) = self.packets.pop_front() else {
+                return Err(NetError::NotReady);
+            };
+            let mut builder = FreshTxPacket::<LinkLayer>::alloc(bytes.len())
+                .map_err(|_| NetError::NoMemory)?
+                .to_builder();
+            let written = builder
+                .append_writer()
+                .write(&mut ostd::mm::VmReader::from(bytes.as_slice()));
+            builder.commit(written);
+            self.received += 1;
+            Ok(builder.build().to_rx_packet().unwrap())
+        }
+        fn send(&mut self, packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
+            self.sent += 1;
+            self.loopback.send(packet)
+        }
+        fn alloc_tx_buffer(payload_len: usize) -> Result<FreshTxPacket, ostd::Error> {
+            Loopback::alloc_tx_buffer(payload_len)
+        }
+        fn free_processed_tx_buffers(&mut self) {}
+        fn notify_poll_end(&mut self) {
+            self.notifications += 1;
+        }
+    }
+
+    struct Driver(Arc<SpinLock<Device, BottomHalfDisabled>>);
+    impl WithDevice for Driver {
+        type Device = Device;
+        fn with<F, R>(&self, operation: F) -> R
+        where
+            F: FnOnce(&mut dyn AnyNetworkDevice) -> R,
+        {
+            operation(&mut *self.0.lock())
+        }
+    }
+
+    fn device_iface() -> (
+        Arc<dyn Iface<TestExt>>,
+        Arc<SpinLock<Device, BottomHalfDisabled>>,
+    ) {
+        let device = Arc::new(SpinLock::new(Device {
+            loopback: Loopback::new(),
+            packets: VecDeque::new(),
+            received: 0,
+            sent: 0,
+            egress_checks: AtomicUsize::new(0),
+            notifications: 0,
+        }));
+        let iface = IpIface::new(
+            Driver(device.clone()),
+            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24),
+            None,
+            InterfaceName::from_str_truncated("budget"),
+            NoScheduler,
+            InterfaceType::LOOPBACK,
+            InterfaceFlags::UP | InterfaceFlags::LOOPBACK,
+        );
+        (iface, device)
+    }
+
+    #[ktest]
+    fn ingress_budget_limits_packets_including_discarded_input() {
+        let (iface, device) = device_iface();
+        device.lock().packets.extend([vec![0], vec![0], vec![0]]);
+        assert_eq!(iface.poll_with_budget(0), 0);
+        assert_eq!(device.lock().notifications, 0);
+        assert_eq!(iface.poll_with_budget(1), 1);
+        assert_eq!(device.lock().packets.len(), 2);
+        assert_eq!(iface.poll_with_budget(1), 1);
+        assert_eq!(iface.poll_with_budget(8), 1);
+        assert_eq!(iface.poll_with_budget(8), 0);
+        let device = device.lock();
+        assert_eq!(device.received, 3);
+        assert_eq!(device.egress_checks.load(Ordering::Relaxed), 0);
+        assert_eq!(device.sent, 0);
+        assert_eq!(device.notifications, 4);
+    }
+
+    fn udp_packet(port: u16, value: u8) -> Vec<u8> {
+        let mut bytes = vec![
+            0x45, 0, 0, 29, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 2, 192, 0, 2, 1, 0xac, 0x00, 0, 0,
+            0, 9, 0, 0, value,
+        ];
+        bytes[22..24].copy_from_slice(&port.to_be_bytes());
+        bytes
+    }
+
+    #[ktest]
+    fn busy_poll_delivers_device_udp_but_leaves_general_loopback_egress_pending() {
+        let (iface, device) = device_iface();
+        let ports = BoundUdpPort::bind_many(vec![iface.clone()], any(0), false).unwrap();
+        let receiver =
+            UdpSocket::new_bind(ports, ()).unwrap_or_else(|_| panic!("UDP receiver bind failed"));
+        let target = IpEndpoint::new(
+            iface.ipv4_cidr().unwrap().address().into(),
+            receiver.local_endpoint().port,
+        );
+        device
+            .lock()
+            .packets
+            .extend([udp_packet(target.port, 7), udp_packet(target.port, 9)]);
+        assert_eq!(iface.poll_with_budget(1), 1);
+        receiver
+            .recv(ReceiveBehavior::Recv, |bytes, _| assert_eq!(bytes, &[7]))
+            .unwrap();
+        assert!(!receiver.can_recv());
+        assert_eq!(device.lock().packets.len(), 1);
+        assert_eq!(receiver.busy_poll_iface().unwrap().index(), iface.index());
+        assert_eq!(iface.poll_with_budget(1), 1);
+        receiver
+            .recv(ReceiveBehavior::Recv, |bytes, _| assert_eq!(bytes, &[9]))
+            .unwrap();
+        receiver
+            .send(&iface, target, vec![11].into_boxed_slice())
+            .unwrap();
+        assert_eq!(iface.poll_with_budget(1), 0);
+        assert!(!receiver.can_recv());
+        assert_eq!(device.lock().egress_checks.load(Ordering::Relaxed), 0);
+        iface.poll();
+        receiver
+            .recv(ReceiveBehavior::Recv, |bytes, _| assert_eq!(bytes, &[11]))
+            .unwrap();
+    }
+
+    #[ktest]
+    fn exhausted_local_tcp_allowance_retains_reply_for_the_next_poll() {
+        let (iface, device) = device_iface();
+        let bound = iface.bind_tcp(BindPortConfig::new(any(0), false)).unwrap();
+        let port = bound.port();
+        let listener = TcpListener::new_listen(bound, 4, &options(), ())
+            .unwrap_or_else(|_| panic!("TCP listener bind failed"));
+        let mut syn = vec![
+            0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 192, 0, 2, 1, 192, 0, 2, 1, 0xac, 0, 0, 0, 0,
+            0, 0, 1, 0, 0, 0, 0, 0x50, 2, 0xff, 0xff, 0, 0, 0, 0,
+        ];
+        syn[22..24].copy_from_slice(&port.to_be_bytes());
+        device.lock().packets.push_back(syn);
+        {
+            let mut device = device.lock();
+            let mut interface = iface.common().interface();
+            let mut sockets = iface.common().sockets();
+            let mut actions = Vec::new();
+            // IpIface implements PollPhy; use a local stateless adapter to process IP framing.
+            let phy = TestIpPhy;
+            let reply = {
+                let mut context = super::super::poll::PollContext::new(
+                    interface.as_mut(),
+                    &sockets,
+                    &mut actions,
+                );
+                context.limit_local_tcp(1);
+                assert_eq!(context.poll_ingress(&mut *device, &phy, 1), 1);
+                assert_eq!(context.remaining_local_tcp_steps(), 0);
+                context
+                    .take_deferred_tcp()
+                    .expect("local SYN-ACK must be retained")
+            };
+            for action in actions {
+                match action {
+                    super::super::poll::SocketTableAction::AddTcpConn(connection) => {
+                        assert!(sockets.insert_connection(connection).is_ok());
+                    }
+                    super::super::poll::SocketTableAction::DelTcpConn(key) => {
+                        sockets.remove_dead_tcp_connection(&key);
+                    }
+                }
+            }
+            interface.defer_tcp(reply);
+            assert_eq!(device.sent, 0);
+        }
+        assert_eq!(iface.poll_with_budget(1), 0);
+        assert!(iface.common().interface().take_deferred_tcp().is_none());
+        assert_eq!(device.lock().sent, 0);
+        listener.close();
+        iface.poll();
+    }
+
+    struct TestIpPhy;
+    impl super::super::common::PollPhy for TestIpPhy {
+        fn process(
+            &self,
+            packet: RxPacket<LinkLayer>,
+            _: &mut smoltcp::iface::Context,
+        ) -> Option<super::super::common::PhyProcessResult> {
+            Some(super::super::common::PhyProcessResult::Ip(packet.peel(0)))
+        }
+        fn dispatch(
+            &self,
+            packet: super::super::common::TxPacketWithDst,
+            _: &mut smoltcp::iface::Context,
+        ) -> Option<TxPacket<LinkLayer>> {
+            Some(packet.packet.pack(0))
+        }
+        fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error> {
+            Loopback::alloc_tx_buffer(payload_len)
+        }
     }
 }

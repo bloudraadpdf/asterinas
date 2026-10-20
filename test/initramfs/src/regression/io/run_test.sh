@@ -5,6 +5,7 @@
 set -e
 
 ./epoll/epoll_err
+./epoll/epoll_params
 ./epoll/poll_err
 ./epoll/test_epoll_pwait.sh
 

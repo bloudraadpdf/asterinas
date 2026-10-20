@@ -6,6 +6,7 @@ use keyable_arc::KeyableWeak;
 
 use super::{
     EpollCtl, EpollEvent, EpollFlags,
+    busy_poll::BusyPoll,
     entry::{Entry, EntryKey, ReadySet},
 };
 use crate::{
@@ -21,8 +22,9 @@ use crate::{
     process::{
         PidNamespace,
         posix_thread::ThreadLocal,
-        signal::{PollHandle, Pollable},
+        signal::{PollHandle, Pollable, Poller},
     },
+    time::clocks::MonotonicClock,
     util::ioctl::RawIoctl,
 };
 
@@ -48,6 +50,7 @@ pub(crate) struct EpollFile {
     ready: Arc<ReadySet>,
     /// The common state for this epoll file.
     common: FileCommon,
+    busy_poll: BusyPoll,
 }
 
 impl EpollFile {
@@ -60,6 +63,7 @@ impl EpollFile {
             ready: Arc::new(ReadySet::new()),
             // Reference: <https://elixir.bootlin.com/linux/v7.0/source/fs/eventpoll.c#L2191>.
             common: FileCommon::new(pseudo_path, AccessMode::O_RDWR, StatusFlags::empty()),
+            busy_poll: BusyPoll::new(),
         })
     }
 
@@ -195,22 +199,29 @@ impl EpollFile {
         max_events: usize,
         timeout: Option<&Duration>,
     ) -> Result<Vec<EpollEvent>> {
+        let start = MonotonicClock::get().read_time();
+        let deadline = timeout.map(|duration| start.saturating_add(*duration));
         let mut ep_events = Vec::new();
+        self.pop_multi_ready(max_events, &mut ep_events);
+        if !ep_events.is_empty() {
+            return Ok(ep_events);
+        }
+        if timeout.is_some_and(Duration::is_zero) {
+            return_errno!(Errno::ETIME);
+        }
 
-        self.wait_events(IoEvents::IN, timeout, || {
+        let remaining = deadline.map(|end| end.saturating_sub(MonotonicClock::get().read_time()));
+        let mut poller = Poller::new(remaining.as_ref());
+        self.poll(IoEvents::IN, Some(poller.as_handle_mut()));
+        loop {
+            self.busy_poll
+                .run(deadline, || !self.poll(IoEvents::IN, None).is_empty());
             self.pop_multi_ready(max_events, &mut ep_events);
-
-            if ep_events.is_empty() {
-                return Err(Error::with_message(
-                    Errno::EAGAIN,
-                    "there are no available events",
-                ));
+            if !ep_events.is_empty() {
+                return Ok(ep_events);
             }
-
-            Ok(())
-        })?;
-
-        Ok(ep_events)
+            poller.wait()?;
+        }
     }
 
     fn pop_multi_ready(&self, max_events: usize, ep_events: &mut Vec<EpollEvent>) {
@@ -241,6 +252,7 @@ impl EpollFile {
 
             // Save the event in the output vector, if any.
             if let Some(event) = ep_event {
+                self.busy_poll.remember(entry.file_weak());
                 ep_events.push(event);
             }
 
@@ -266,8 +278,8 @@ impl Pollable for EpollFile {
 
 // Implement the common methods required by FileHandle
 impl FileLike for EpollFile {
-    fn ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
-        return_errno_with_message!(Errno::ENOTTY, "epoll files do not support ioctl");
+    fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
+        self.busy_poll.ioctl(raw_ioctl)
     }
 
     fn common(&self) -> &FileCommon {
