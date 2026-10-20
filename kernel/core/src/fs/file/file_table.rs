@@ -219,8 +219,8 @@ impl FileTable {
 
     pub(crate) fn close_file(&mut self, fd: FileDesc) -> Option<ClosedFile> {
         let removed_entry = self.table.remove(fd.into())?;
-        // POSIX record locks are process-associated and Linux drops them when any fd for the inode is
-        // closed by that process, even if duplicated descriptors still exist.
+        // POSIX record locks are process-associated and Linux drops them when a non-O_PATH fd for
+        // the inode is closed by that process, even if duplicated descriptors still exist.
         //
         // Reference: <https://man7.org/linux/man-pages/man2/fcntl_locking.2.html>
         Some(ClosedFile::new(

@@ -134,6 +134,38 @@ FN_TEST(process_exit_releases_locks)
 }
 END_TEST()
 
+FN_TEST(close_o_path_keeps_locks)
+{
+	int fd = CHECK(open(TEST_FILE, O_RDWR));
+	int path_fd = CHECK(open(TEST_FILE, O_PATH));
+	int duplicate = CHECK(dup(path_fd));
+
+	TEST_SUCC(try_write_lock(fd, 0, 100));
+	TEST_SUCC(close(path_fd));
+	TEST_RES(child_try_write_lock(0, 100), _ret == EAGAIN);
+	TEST_SUCC(close(duplicate));
+	TEST_RES(child_try_write_lock(0, 100), _ret == EAGAIN);
+	TEST_SUCC(close(fd));
+	TEST_RES(child_try_write_lock(0, 100), _ret == 0);
+}
+END_TEST()
+
+FN_TEST(dup2_replacing_o_path_keeps_locks)
+{
+	int fd = CHECK(open(TEST_FILE, O_RDWR));
+	int path_fd = CHECK(open(TEST_FILE, O_PATH));
+	int unrelated_fd = CHECK(open("/dev/null", O_RDONLY));
+
+	TEST_SUCC(try_write_lock(fd, 0, 100));
+	TEST_RES(dup2(unrelated_fd, path_fd), _ret == path_fd);
+	TEST_RES(child_try_write_lock(0, 100), _ret == EAGAIN);
+	TEST_SUCC(close(path_fd));
+	TEST_SUCC(close(unrelated_fd));
+	TEST_SUCC(close(fd));
+	TEST_RES(child_try_write_lock(0, 100), _ret == 0);
+}
+END_TEST()
+
 FN_TEST(forked_process_close_keeps_parent_locks)
 {
 	int fd = TEST_SUCC(open(TEST_FILE, O_RDWR));
