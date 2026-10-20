@@ -58,16 +58,8 @@ pub(super) fn sys_renameat2(
             FsPath::from_fd_at(old_dirfd, old_parent_path_name, EmptyPathStr::Reject)?;
         (path_resolver.lookup(&old_fs_path)?, old_name)
     };
-    let old_path = path_resolver.lookup_at_path(&old_parent_path, old_name)?;
-    if old_path.type_() != InodeType::Dir && old_path_name.ends_with('/') {
-        return_errno_with_message!(Errno::ENOTDIR, "the old path is not a directory");
-    }
-
     let new_path_name = new_path_name.to_string_lossy();
     let (new_parent_path, new_name) = {
-        if old_path.type_() != InodeType::Dir && new_path_name.ends_with('/') {
-            return_errno_with_message!(Errno::EISDIR, "the new path is a directory");
-        }
         let (new_parent_path_name, new_name) = new_path_name
             .split_dirname_and_basename()
             .map_err(SplitPathError::reject_root_as_busy)?;
@@ -78,6 +70,14 @@ pub(super) fn sys_renameat2(
             new_name.to_string(),
         )
     };
+
+    let old_path = path_resolver.lookup_at_path(&old_parent_path, old_name)?;
+    if old_path.type_() != InodeType::Dir && old_path_name.ends_with('/') {
+        return_errno_with_message!(Errno::ENOTDIR, "the old path is not a directory");
+    }
+    if old_path.type_() != InodeType::Dir && new_path_name.ends_with('/') {
+        return_errno_with_message!(Errno::ENOTDIR, "the old path is not a directory");
+    }
 
     old_parent_path.rename(old_name, &new_parent_path, &new_name, mode)?;
 

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#define _GNU_SOURCE
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "../../common/test.h"
@@ -131,5 +134,64 @@ FN_TEST(rename_between_hardlinks_is_noop_on_ext2)
 	cleanup_test_files(EXT2_BASE_DIR);
 	TEST_SUCC(verify_same_dir_rename(EXT2_BASE_DIR));
 	cleanup_test_files(EXT2_BASE_DIR);
+}
+END_TEST()
+
+FN_TEST(renameat_checks_destination_parent_before_missing_source)
+{
+	char directory[] = "/tmp/renameat_parent_XXXXXX";
+	CHECK_WITH(mkdtemp(directory), _ret != NULL);
+	int dirfd = CHECK(open(directory, O_RDONLY | O_DIRECTORY));
+	int file_fd =
+		CHECK(openat(dirfd, "file", O_CREAT | O_EXCL | O_RDWR, 0600));
+	int closed_fd = CHECK(dup(dirfd));
+	CHECK(close(closed_fd));
+	char missing[256];
+	make_path(missing, sizeof(missing), directory, "missing");
+
+	TEST_ERRNO(renameat(dirfd, "missing", -1, "new"), EBADF);
+	TEST_ERRNO(renameat(dirfd, "missing", closed_fd, "new"), EBADF);
+	TEST_ERRNO(renameat(dirfd, "missing", file_fd, "new"), ENOTDIR);
+	TEST_ERRNO(renameat(dirfd, "missing/old", -1, "new"), ENOENT);
+	TEST_ERRNO(renameat(dirfd, "missing", -1, directory), ENOENT);
+	TEST_ERRNO(renameat(-1, missing, dirfd, "new"), ENOENT);
+
+	unsigned int flags[] = { 0, RENAME_NOREPLACE, RENAME_EXCHANGE };
+	for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); ++i) {
+		TEST_ERRNO(syscall(SYS_renameat2, dirfd, "missing", -1, "new",
+				   flags[i]),
+			   EBADF);
+	}
+
+	TEST_SUCC(close(file_fd));
+	TEST_SUCC(unlinkat(dirfd, "file", 0));
+	TEST_SUCC(close(dirfd));
+	TEST_SUCC(rmdir(directory));
+}
+END_TEST()
+
+FN_TEST(renameat_destination_trailing_slash_requires_directory_source)
+{
+	char directory[] = "/tmp/renameat_slash_XXXXXX";
+	CHECK_WITH(mkdtemp(directory), _ret != NULL);
+	int dirfd = CHECK(open(directory, O_RDONLY | O_DIRECTORY));
+	int fd = CHECK(openat(dirfd, "file", O_CREAT | O_EXCL | O_RDWR, 0600));
+	CHECK(close(fd));
+	fd = CHECK(openat(dirfd, "existing", O_CREAT | O_EXCL | O_RDWR, 0600));
+	CHECK(close(fd));
+	CHECK(mkdirat(dirfd, "source_dir", 0700));
+	CHECK(mkdirat(dirfd, "existing_dir", 0700));
+
+	TEST_ERRNO(renameat(dirfd, "file", dirfd, "existing/"), ENOTDIR);
+	TEST_ERRNO(renameat(dirfd, "file", dirfd, "missing/"), ENOTDIR);
+	TEST_SUCC(renameat(dirfd, "source_dir", dirfd, "missing_dir/"));
+	TEST_ERRNO(renameat(dirfd, "missing_dir", dirfd, "existing/"), ENOTDIR);
+	TEST_SUCC(renameat(dirfd, "missing_dir", dirfd, "existing_dir/"));
+
+	TEST_SUCC(unlinkat(dirfd, "existing_dir", AT_REMOVEDIR));
+	TEST_SUCC(unlinkat(dirfd, "existing", 0));
+	TEST_SUCC(unlinkat(dirfd, "file", 0));
+	TEST_SUCC(close(dirfd));
+	TEST_SUCC(rmdir(directory));
 }
 END_TEST()
