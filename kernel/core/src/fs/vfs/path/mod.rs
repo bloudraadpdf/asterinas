@@ -901,6 +901,13 @@ impl Path {
     pub(crate) fn chmod(&self, mut mode: InodeMode, ctx: &Context) -> Result<()> {
         self.check_mount_writable()?;
 
+        if self.type_() == InodeType::SymLink {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "symbolic link permissions cannot be changed"
+            );
+        }
+
         // FIXME: Keep the ownership checks and mode update in one inode critical
         // section. `metadata()` returns a snapshot, so a concurrent `chown()` can
         // change the owner or group before `set_mode()` runs.

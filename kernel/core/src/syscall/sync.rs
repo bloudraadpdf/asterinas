@@ -2,10 +2,7 @@
 
 use super::SyscallReturn;
 use crate::{
-    fs::file::{
-        StatusFlags,
-        file_table::{RawFileDesc, get_file_fast},
-    },
+    fs::file::file_table::{RawFileDesc, get_file_fast},
     prelude::*,
 };
 
@@ -21,9 +18,7 @@ pub(super) fn sys_syncfs(raw_fd: RawFileDesc, ctx: &Context) -> Result<SyscallRe
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
-    if file.status_flags().contains(StatusFlags::O_PATH) {
-        return_errno_with_message!(Errno::EBADF, "the file is opened as a path");
-    }
+    file.common().check_not_path()?;
     file.path().fs().sync()?;
     Ok(SyscallReturn::Return(0))
 }
