@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use ostd::timer::Jiffies;
+use aster_time::read_monotonic_time;
 
 use self::timer_manager::PosixTimerManager;
 use super::{
@@ -149,7 +149,7 @@ pub struct Process {
     /// A manager that manages timer resources and utilities of the process.
     timer_manager: PosixTimerManager,
     /// Process start time since boot.
-    start_time: Jiffies,
+    start_time: Duration,
 
     // Namespaces
     /// The user namespace
@@ -266,7 +266,7 @@ impl Process {
                 exit_signal: AtomicSigNum::new_empty(),
                 prof_clock,
                 timer_manager,
-                start_time: Jiffies::elapsed(),
+                start_time: read_monotonic_time(),
                 user_ns: Mutex::new(user_ns),
             }
         })
@@ -330,7 +330,7 @@ impl Process {
     }
 
     /// Returns the process start time since boot.
-    pub(crate) fn start_time(&self) -> Jiffies {
+    pub(crate) fn start_time(&self) -> Duration {
         self.start_time
     }
 

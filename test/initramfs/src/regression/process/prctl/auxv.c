@@ -13,6 +13,12 @@
 
 int main(int argc, char **argv)
 {
+	assert(getauxval(AT_CLKTCK) == 100);
+	assert(sysconf(_SC_CLK_TCK) == 100);
+#if defined(__x86_64__)
+	const char *platform = (const char *)getauxval(AT_PLATFORM);
+	assert(platform != NULL && !strcmp(platform, "x86_64"));
+#endif
 	uintptr_t vector[128] = { 0 };
 	long size = syscall(SYS_prctl, GET_AUXV, vector, sizeof(vector), 0, 0);
 	assert(size > 0 && (size_t)size <= sizeof(vector));

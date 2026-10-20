@@ -4,6 +4,8 @@
 
 set -e
 
+./clktck
+
 ./clock_nanosleep/nanosleep_err
 
 ./gettimeofday/gettimeofday
