@@ -2,12 +2,16 @@
 
 //! The implementation of robust list is from occlum.
 
+use core::sync::atomic::{Ordering, fence};
+
 use ostd::{mm::VmIo, task::Task};
 
 use crate::{
     context::current_userspace,
     prelude::*,
-    process::posix_thread::futex::{FutexVisibility, futex_wake},
+    process::posix_thread::futex::{
+        FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, FutexVisibility, futex_wake,
+    },
     thread::Tid,
 };
 
@@ -44,11 +48,11 @@ impl RobustListHead {
     }
 
     /// Return the pending futex address if exist
-    fn pending_futex_addr(&self) -> Option<Vaddr> {
+    fn pending_futex_addr(&self) -> Option<RobustFutex> {
         if self.list_op_pending == 0 {
             None
         } else {
-            self.futex_addr(self.list_op_pending & !1)
+            self.futex_entry(self.list_op_pending)
         }
     }
 
@@ -57,6 +61,29 @@ impl RobustListHead {
         self.futex_offset
             .checked_add(entry_ptr as isize)
             .map(|result| result as Vaddr)
+    }
+
+    fn futex_entry(&self, tagged_entry: Vaddr) -> Option<RobustFutex> {
+        let address = self.futex_addr(tagged_entry & !1)?;
+        Some(if tagged_entry & 1 == 0 {
+            RobustFutex::Ordinary(address)
+        } else {
+            RobustFutex::PriorityInheritance(address)
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RobustFutex {
+    Ordinary(Vaddr),
+    PriorityInheritance(Vaddr),
+}
+
+impl RobustFutex {
+    pub(crate) fn address(self) -> Vaddr {
+        match self {
+            Self::Ordinary(address) | Self::PriorityInheritance(address) => address,
+        }
     }
 }
 
@@ -71,7 +98,7 @@ impl<'a> FutexIter<'a> {
     pub(crate) fn new(robust_list: &'a RobustListHead, head_addr: Vaddr) -> Self {
         Self {
             robust_list,
-            entry_ptr: robust_list.list.next & !1,
+            entry_ptr: robust_list.list.next,
             head_addr,
             count: 0,
         }
@@ -92,30 +119,30 @@ impl<'a> FutexIter<'a> {
 const ROBUST_LIST_LIMIT: isize = 2048;
 
 impl Iterator for FutexIter<'_> {
-    type Item = Vaddr;
+    type Item = RobustFutex;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_end() {
             return None;
         }
 
-        while self.entry_ptr != self.head_addr {
+        while self.entry_ptr & !1 != self.head_addr {
             if self.count == ROBUST_LIST_LIMIT {
                 break;
             }
-            if self.entry_ptr == 0 {
+            if self.entry_ptr & !1 == 0 {
                 return None;
             }
-            let futex_addr = if self.entry_ptr != (self.robust_list.list_op_pending & !1) {
-                self.robust_list.futex_addr(self.entry_ptr)
+            let futex_addr = if self.entry_ptr & !1 != (self.robust_list.list_op_pending & !1) {
+                self.robust_list.futex_entry(self.entry_ptr)
             } else {
                 None
             };
-            let Ok(robust_list) = current_userspace!().read_val::<RobustList>(self.entry_ptr)
+            let Ok(robust_list) = current_userspace!().read_val::<RobustList>(self.entry_ptr & !1)
             else {
                 return None;
             };
-            self.entry_ptr = robust_list.next & !1;
+            self.entry_ptr = robust_list.next;
             self.count += 1;
             if futex_addr.is_some() {
                 return futex_addr;
@@ -126,16 +153,13 @@ impl Iterator for FutexIter<'_> {
     }
 }
 
-const FUTEX_WAITERS: u32 = 0x8000_0000;
-const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
-const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
-
 /// Attempts to wake a robust futex owned by the given thread.
 ///
 /// If the futex at `futex_addr` is still owned by `tid`, it is marked with
 /// `FUTEX_OWNER_DIED` and one waiter (if any) is woken.
 /// If the futex is owned by another thread, the operation is canceled.
-pub(crate) fn wake_robust_futex(futex_addr: Vaddr, tid: Tid) -> Result<()> {
+pub(crate) fn wake_robust_futex(futex: RobustFutex, tid: Tid) -> Result<()> {
+    let futex_addr = futex.address();
     if !futex_addr.is_multiple_of(align_of::<u32>()) {
         return_errno_with_message!(
             Errno::EINVAL,
@@ -151,6 +175,7 @@ pub(crate) fn wake_robust_futex(futex_addr: Vaddr, tid: Tid) -> Result<()> {
     let (reader, writer) = user_space.reader_writer(futex_addr, size_of::<u32>())?;
 
     let mut old_val: u32 = reader.atomic_load()?;
+    fence(Ordering::Release);
     loop {
         // This futex may be held by another thread. If so, do nothing.
         if old_val & FUTEX_TID_MASK != tid {
@@ -162,7 +187,7 @@ pub(crate) fn wake_robust_futex(futex_addr: Vaddr, tid: Tid) -> Result<()> {
             (cur_val, false) => old_val = cur_val, // Try again with `cur_val`.
             (_, true) => {
                 // Wake up one waiter and break out from the loop.
-                if new_val & FUTEX_WAITERS != 0 {
+                if new_val & FUTEX_WAITERS != 0 && matches!(futex, RobustFutex::Ordinary(_)) {
                     debug!("wake the robust futex at {:#x}", futex_addr);
                     futex_wake(futex_addr, 1, FutexVisibility::Shared)?;
                 }

@@ -41,7 +41,7 @@ mod thread_local;
 
 pub(crate) use builder::PosixThreadBuilder;
 pub(crate) use exit::{do_exit, do_exit_group};
-pub(super) use exit::{sigkill_other_threads, wake_clear_ctid};
+pub(super) use exit::{release_futexes, sigkill_other_threads, wake_clear_ctid};
 pub(crate) use personality::Personality;
 pub use posix_thread_ext::AsPosixThread;
 pub(crate) use robust_list::RobustListHead;
@@ -53,6 +53,7 @@ pub struct PosixThread {
     task: Weak<Task>,
 
     robust_list: AtomicUsize,
+    pi_exit: futex::pi::PiExitState,
 
     // Mutable part
     identity: Rcu<Arc<PidIdentity>>,
@@ -111,6 +112,10 @@ pub struct PosixThread {
 }
 
 impl PosixThread {
+    pub(crate) fn pi_exit(&self) -> &futex::pi::PiExitState {
+        &self.pi_exit
+    }
+
     pub(crate) fn robust_list(&self) -> &AtomicUsize {
         &self.robust_list
     }

@@ -159,6 +159,25 @@ pub(super) struct RealTimeClassRq {
 }
 
 impl RealTimeClassRq {
+    pub(super) fn highest_priority(&self) -> Option<u8> {
+        self.array.iter().filter_map(PrioArray::peek_prio).min()
+    }
+
+    pub(super) fn remove(&mut self, task: &Arc<Task>, priority: u8) -> bool {
+        for array in &mut self.array {
+            let queue = &mut array.queue[usize::from(priority)];
+            if let Some(index) = queue.iter().position(|queued| Arc::ptr_eq(queued, task)) {
+                queue.remove(index);
+                if queue.is_empty() {
+                    array.map.set(usize::from(priority), false);
+                }
+                self.nr_running -= 1;
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn new(cpu: CpuId) -> RealTimeClassRq {
         RealTimeClassRq {
             cpu,
@@ -205,6 +224,11 @@ impl SchedClassRq for RealTimeClassRq {
             return None;
         }
 
+        let active = self.array[usize::from(self.index)].peek_prio();
+        let inactive = self.array[usize::from(!self.index)].peek_prio();
+        if inactive.is_some_and(|priority| active.is_none_or(|active| priority < active)) {
+            self.swap_arrays();
+        }
         (self.active_array().pop())
             .or_else(|| {
                 self.swap_arrays();
@@ -219,19 +243,17 @@ impl SchedClassRq for RealTimeClassRq {
         attr: &SchedAttr,
         flags: UpdateFlags,
     ) -> bool {
-        let attr = &attr.real_time;
-
         match flags {
-            UpdateFlags::Tick | UpdateFlags::Yield => match attr.time_slice.load(Relaxed) {
-                0 => {
-                    self.active_array().peek_prio().is_some()
-                        || self
-                            .inactive_array()
-                            .peek_prio()
-                            .is_some_and(|prio| prio < attr.prio.load(Relaxed))
-                }
-                ts => ts <= rt.period_delta && !self.is_empty(),
-            },
+            UpdateFlags::Tick | UpdateFlags::Yield => {
+                let current = attr.real_time.prio.load(Relaxed);
+                let slice = attr.real_time.time_slice.load(Relaxed);
+                self.highest_priority().is_some_and(|priority| {
+                    priority < current
+                        || (priority == current
+                            && (flags == UpdateFlags::Yield
+                                || (slice != 0 && slice <= rt.period_delta)))
+                })
+            }
             UpdateFlags::Wait | UpdateFlags::Exit => !self.is_empty(),
         }
     }

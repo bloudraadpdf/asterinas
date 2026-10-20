@@ -238,6 +238,7 @@ fn do_execve_no_return(
     // Wait for all other threads to terminate,
     // then promote the current thread to be the process's main thread if necessary.
     wait_other_threads_exit(ctx)?;
+    super::posix_thread::release_futexes(ctx);
     make_current_main_thread(ctx);
 
     // Activate the new VMAR in the current context and apply file-capability changes,
@@ -251,12 +252,8 @@ fn do_execve_no_return(
     apply_exec_cred(process, &ctx.credentials_mut(), exec_cred)?;
     drop(vmar_guard);
     drop(old_vmar);
+    super::posix_thread::futex::pi::finish_exec(ctx);
 
-    // After the program has been successfully loaded, the virtual memory of the current process
-    // is initialized. Hence, it is necessary to clear the previously recorded robust list.
-    ctx.posix_thread
-        .robust_list()
-        .store(0, core::sync::atomic::Ordering::Relaxed);
     thread_local.clear_child_tid().set(0);
 
     // Set up the CPU context.

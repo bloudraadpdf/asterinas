@@ -4,6 +4,10 @@
 
 set -e
 
+./futex/pi_word
+./futex/pi_shared
+./futex/pi_owner_exit
+
 ./pipe/pipe_err
 ./pipe/process_pipe_available
 ./pipe/short_rw

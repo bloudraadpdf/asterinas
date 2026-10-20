@@ -395,11 +395,12 @@ pub(crate) fn handle_syscall(ctx: &Context, user_ctx: &mut UserContext) {
     );
 
     match syscall_return {
-        Ok(return_value) => {
-            if let SyscallReturn::Return(return_value) = return_value {
+        Ok(return_value) => match return_value {
+            SyscallReturn::Return(return_value) => {
                 user_ctx.set_syscall_ret(return_value as usize);
             }
-        }
+            SyscallReturn::NoReturn => ctx.thread_local.set_orig_syscall_ret(None),
+        },
         Err(err) => {
             debug!("syscall return error: {:?}", err);
             let errno = err.error() as i32;

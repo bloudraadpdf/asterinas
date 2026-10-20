@@ -8,7 +8,7 @@ use crate::{
     prelude::*,
     process::posix_thread::futex::{
         FutexFlags, FutexOp, FutexVisibility, futex_op_and_flags_from_u32, futex_requeue,
-        futex_wait, futex_wait_bitset, futex_wake, futex_wake_bitset, futex_wake_op,
+        futex_wait, futex_wait_bitset, futex_wake, futex_wake_bitset, futex_wake_op, pi,
     },
     syscall::SyscallReturn,
     time::{
@@ -44,13 +44,8 @@ pub(super) fn sys_futex(
             Duration::try_from(time_spec)?
         };
 
-        let is_real_time = futex_flags.contains(FutexFlags::FUTEX_CLOCK_REALTIME);
-        if is_real_time && futex_op == FutexOp::FUTEX_WAIT {
-            // Reference:
-            // <https://github.com/torvalds/linux/commit/4fbf5d6837bf81fd7a27d771358f4ee6c4f243f8>
-            return_errno_with_message!(Errno::ENOSYS, "FUTEX_WAIT cannot use CLOCK_REALTIME");
-        }
-
+        let is_real_time = futex_flags.contains(FutexFlags::FUTEX_CLOCK_REALTIME)
+            || futex_op == FutexOp::FUTEX_LOCK_PI;
         let timeout = {
             // For `FUTEX_WAIT`, `timeout` is interpreted as a relative value. This differs from
             // other futex operations, where `timeout` is interpreted as an absolute value.
@@ -77,23 +72,48 @@ pub(super) fn sys_futex(
     };
 
     let visibility = FutexVisibility::from(futex_flags);
+    let is_pi = matches!(
+        futex_op,
+        FutexOp::FUTEX_LOCK_PI
+            | FutexOp::FUTEX_LOCK_PI2
+            | FutexOp::FUTEX_TRYLOCK_PI
+            | FutexOp::FUTEX_UNLOCK_PI
+    );
+    let timeout = if matches!(
+        futex_op,
+        FutexOp::FUTEX_WAIT
+            | FutexOp::FUTEX_WAIT_BITSET
+            | FutexOp::FUTEX_LOCK_PI
+            | FutexOp::FUTEX_LOCK_PI2
+    ) {
+        get_futex_timeout(utime_addr)?
+    } else {
+        None
+    };
+    if futex_flags.contains(FutexFlags::FUTEX_CLOCK_REALTIME)
+        && !matches!(
+            futex_op,
+            FutexOp::FUTEX_WAIT_BITSET | FutexOp::FUTEX_LOCK_PI2
+        )
+    {
+        return_errno_with_message!(
+            Errno::ENOSYS,
+            "this futex command cannot use CLOCK_REALTIME"
+        );
+    }
     let res = match futex_op {
         FutexOp::FUTEX_WAIT => {
-            let timeout = get_futex_timeout(utime_addr)?;
             futex_wait(futex_addr as _, futex_val as _, timeout, ctx, visibility).map(|_| 0)
         }
-        FutexOp::FUTEX_WAIT_BITSET => {
-            let timeout = get_futex_timeout(utime_addr)?;
-            futex_wait_bitset(
-                futex_addr as _,
-                futex_val as _,
-                timeout,
-                bitset as _,
-                ctx,
-                visibility,
-            )
-            .map(|_| 0)
-        }
+        FutexOp::FUTEX_WAIT_BITSET => futex_wait_bitset(
+            futex_addr as _,
+            futex_val as _,
+            timeout,
+            bitset as _,
+            ctx,
+            visibility,
+        )
+        .map(|_| 0),
         FutexOp::FUTEX_WAKE => {
             let max_count = futex_val_to_max_count(futex_val);
             futex_wake(futex_addr as _, max_count, visibility)
@@ -103,10 +123,16 @@ pub(super) fn sys_futex(
             futex_wake_bitset(futex_addr as _, max_count, bitset as _, visibility)
         }
         FutexOp::FUTEX_REQUEUE => {
-            let max_nwakes = futex_val_to_max_count(futex_val);
-            // `utime_addr` is used as the maximum number of requeues in this case.
-            // When `utime_addr` is 0 or negative, it means no requeues.
-            let max_nrequeues = (utime_addr as i32).max(0) as usize;
+            let max_nwakes = futex_val as i32;
+            let max_nrequeues = utime_addr as i32;
+            if max_nwakes < 0 || max_nrequeues < 0 {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "futex requeue counts cannot be negative"
+                );
+            }
+            let max_nwakes = max_nwakes as usize;
+            let max_nrequeues = max_nrequeues as usize;
             futex_requeue(
                 futex_addr as _,
                 max_nwakes,
@@ -128,6 +154,13 @@ pub(super) fn sys_futex(
                 visibility,
             )
         }
+        FutexOp::FUTEX_LOCK_PI | FutexOp::FUTEX_LOCK_PI2 => {
+            pi::lock_pi(futex_addr, pi::PiLockMode::Wait, timeout, visibility, ctx).map(|_| 0)
+        }
+        FutexOp::FUTEX_TRYLOCK_PI => {
+            pi::lock_pi(futex_addr, pi::PiLockMode::Try, None, visibility, ctx).map(|_| 0)
+        }
+        FutexOp::FUTEX_UNLOCK_PI => pi::unlock_pi(futex_addr, visibility, ctx).map(|_| 0),
         _ => {
             warn!("futex op = {:?}", futex_op);
             return_errno_with_message!(Errno::ENOSYS, "unsupported futex op");
@@ -135,6 +168,7 @@ pub(super) fn sys_futex(
     }
     .map_err(|err| match err.error() {
         Errno::ETIME => Error::new(Errno::ETIMEDOUT),
+        Errno::EINTR if is_pi => Error::new(Errno::ERESTARTNOINTR),
         Errno::EINTR => Error::new(Errno::ERESTARTSYS),
         _ => err,
     })?;
