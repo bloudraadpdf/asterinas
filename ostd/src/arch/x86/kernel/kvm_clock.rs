@@ -18,7 +18,10 @@ use crate::{
 
 // KVM feature bits and MSR values.
 // Reference: <https://elixir.bootlin.com/linux/v7.0/source/arch/x86/include/uapi/asm/kvm_para.h>.
+const KVM_FEATURE_CLOCKSOURCE: u32 = 0;
 const KVM_FEATURE_CLOCKSOURCE2: u32 = 3;
+const MSR_KVM_WALL_CLOCK: u32 = 0x11;
+const MSR_KVM_SYSTEM_TIME: u32 = 0x12;
 const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
 const WALL_CLOCK_OFFSET: usize = 64;
 const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
@@ -38,7 +41,7 @@ impl_frame_meta_for!(PvclockPageMeta);
 /// Guest-visible layout of the KVM pvclock page.
 ///
 /// This is Linux's `struct pvclock_vcpu_time_info`. KVM writes this structure
-/// directly into the page we hand it via `MSR_KVM_SYSTEM_TIME_NEW`.
+/// directly into the page registered with the selected system-time MSR.
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v7.0/source/arch/x86/include/asm/pvclock-abi.h#L26>.
 #[repr(C, align(4))]
@@ -71,9 +74,7 @@ impl PvclockPage {
     fn setup() -> Option<&'static Self> {
         static PVCLOCK_PAGE: Once<PvclockPage> = Once::new();
 
-        if !has_kvm_clocksource2() {
-            return None;
-        }
+        let (system_time_msr, wall_clock_msr) = kvm_clock_msrs()?;
 
         if let Some(page) = PVCLOCK_PAGE.get() {
             return Some(page);
@@ -85,18 +86,12 @@ impl PvclockPage {
         Some(PVCLOCK_PAGE.call_once(|| {
             // SAFETY: `frame` is a live page that will be retained by
             // `PVCLOCK_PAGE`, and this MSR is supported per
-            // `has_kvm_clocksource2()` above.
+            // `kvm_clock_msrs()` above.
             unsafe {
-                msr::wrmsr(
-                    MSR_KVM_SYSTEM_TIME_NEW,
-                    frame.paddr() as u64 | KVM_MSR_ENABLE_BIT,
-                );
+                msr::wrmsr(system_time_msr, frame.paddr() as u64 | KVM_MSR_ENABLE_BIT);
                 // The aligned wall-clock area is disjoint from the vCPU time area
                 // and retained in the same typed frame for the hypervisor's lifetime.
-                msr::wrmsr(
-                    MSR_KVM_WALL_CLOCK_NEW,
-                    (frame.paddr() + WALL_CLOCK_OFFSET) as u64,
-                );
+                msr::wrmsr(wall_clock_msr, (frame.paddr() + WALL_CLOCK_OFFSET) as u64);
             };
             Self(frame)
         }))
@@ -248,9 +243,17 @@ fn read_consistent<T>(version: impl Fn() -> u32, data: impl Fn() -> T) -> Option
     None
 }
 
-fn has_kvm_clocksource2() -> bool {
-    crate::if_tdx_enabled!({ false } else {
-        cpuid::query_if_running_under_kvm() && cpuid::query_kvm_feature(KVM_FEATURE_CLOCKSOURCE2)
+fn kvm_clock_msrs() -> Option<(u32, u32)> {
+    crate::if_tdx_enabled!({ None } else {
+        if !cpuid::query_if_running_under_kvm() {
+            return None;
+        }
+        [
+            (KVM_FEATURE_CLOCKSOURCE2, MSR_KVM_SYSTEM_TIME_NEW, MSR_KVM_WALL_CLOCK_NEW),
+            (KVM_FEATURE_CLOCKSOURCE, MSR_KVM_SYSTEM_TIME, MSR_KVM_WALL_CLOCK),
+        ]
+        .into_iter()
+        .find_map(|(feature, system, wall)| cpuid::query_kvm_feature(feature).then_some((system, wall)))
     })
 }
 
