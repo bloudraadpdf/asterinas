@@ -9,7 +9,8 @@ use ostd::{arch::cpu::context::UserContext, task::Task};
 use crate::{
     prelude::*,
     process::signal::{
-        constants::{BUS_ADRERR, SIGBUS},
+        constants::{BUS_ADRERR, SEGV_ACCERR, SEGV_MAPERR, SIGBUS, SIGSEGV},
+        force_fault_signal,
         signals::{fault::FaultSignal, kernel::KernelSignal},
     },
     thread::kernel_thread::AsKernelThread,
@@ -30,14 +31,27 @@ pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception:
                 return;
             }
             Err(error) if error.error() == Errno::ENOSPC => {
-                ctx.posix_thread.enqueue_signal(Box::new(FaultSignal::new(
-                    SIGBUS,
-                    BUS_ADRERR,
-                    Some(page_fault_info.address() as u64),
-                )));
+                force_fault_signal(
+                    FaultSignal::new(SIGBUS, BUS_ADRERR, Some(page_fault_info.address() as u64)),
+                    ctx,
+                );
                 return;
             }
-            Err(_) => {}
+            Err(_) => {
+                let address = page_fault_info.address();
+                let mapped = address
+                    .checked_add(1)
+                    .is_some_and(|end| vmar.query(address..end).iter().next().is_some());
+                force_fault_signal(
+                    FaultSignal::new(
+                        SIGSEGV,
+                        if mapped { SEGV_ACCERR } else { SEGV_MAPERR },
+                        Some(address as u64),
+                    ),
+                    ctx,
+                );
+                return;
+            }
         }
     }
 
@@ -82,7 +96,7 @@ fn generate_fault_signal(exception: CpuException, ctx: &Context, user_ctx: &User
     let Some(signal) = exception.to_fault_signal(user_ctx) else {
         panic!("`{:?}` cannot be handled via signals", exception);
     };
-    ctx.posix_thread.enqueue_signal(Box::new(signal));
+    force_fault_signal(signal, ctx);
 }
 
 pub(super) fn page_fault_handler(info: &CpuException) -> Result<(), ()> {

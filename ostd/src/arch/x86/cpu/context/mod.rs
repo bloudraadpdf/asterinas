@@ -365,10 +365,9 @@ impl UserContextApiInternal for UserContext {
 
         // Return when it is syscall or cpu exception type is Fault or Trap.
         loop {
-            crate::task::scheduler::might_preempt();
-
-            let guard = crate::irq::disable_local();
-            hooks.pre_user_run(&guard);
+            let Some(guard) = crate::user::prepare_user_run(hooks) else {
+                break ReturnReason::KernelEvent;
+            };
             self.user_context.run(guard);
 
             let exception =
@@ -584,18 +583,128 @@ pub struct FpuContext {
     area_size: usize,
 }
 
+/// The user-space representation of an FPU state image.
+#[derive(Clone, Copy, Debug)]
+pub enum FpuStateFormat {
+    /// A 512-byte FXSAVE image containing x87 and SSE state.
+    Legacy,
+    /// A standard, non-compacted XSAVE image and its advertised features.
+    Xsave {
+        /// The features described by the user-space image.
+        features: u64,
+    },
+}
+
+/// An FPU state image which cannot be restored on the current processor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidFpuState {
+    /// The image length does not contain its advertised state components.
+    Length,
+    /// The image advertises features which cannot be restored.
+    Features,
+    /// The MXCSR value contains reserved bits.
+    Mxcsr,
+    /// The XSAVE header is compacted or contains nonzero reserved fields.
+    Header,
+}
+
 impl FpuContext {
     /// Creates a new FPU context.
     pub fn new() -> Self {
-        let mut area_size = size_of::<FxSaveArea>();
-        if let Some(xsave_area_size) = XSAVE_AREA_SIZE.get() {
-            area_size = area_size.max(*xsave_area_size);
-        }
-
         Self {
             xsave_area: Box::new(XSaveArea::new()),
-            area_size,
+            area_size: Self::max_image_size(),
         }
+    }
+
+    /// Returns the maximum image size supported by the current processor.
+    pub fn max_image_size() -> usize {
+        XSAVE_AREA_SIZE
+            .get()
+            .map_or(size_of::<FxSaveArea>(), |size| {
+                size_of::<FxSaveArea>().max(*size)
+            })
+    }
+
+    /// Returns the XSAVE features supported by this FPU context, if enabled.
+    pub fn xsave_features() -> Option<u64> {
+        XSTATE_MAX_FEATURES
+            .get()
+            .map(|features| XCr0::read().bits() & *features & XFEATURE_MASK_USER_RESTORE)
+    }
+
+    /// Returns the standard XSAVE image size needed for the requested features.
+    pub fn xsave_image_size(features: u64) -> Result<usize, InvalidFpuState> {
+        let supported = Self::xsave_features().ok_or(InvalidFpuState::Features)?;
+        let mut size = size_of::<FxSaveArea>() + 64;
+        for bit in 2..64 {
+            if features & supported & (1_u64 << bit) == 0 {
+                continue;
+            }
+            let component = super::cpuid::cpuid(0x0d, bit).ok_or(InvalidFpuState::Features)?;
+            let end = (component.ebx as usize)
+                .checked_add(component.eax as usize)
+                .ok_or(InvalidFpuState::Length)?;
+            if component.eax == 0 || end > Self::max_image_size() {
+                return Err(InvalidFpuState::Length);
+            }
+            size = size.max(end);
+        }
+        Ok(size)
+    }
+
+    /// Imports and validates a user-space FPU image before it can be restored.
+    pub fn from_bytes(bytes: &[u8], format: FpuStateFormat) -> Result<Self, InvalidFpuState> {
+        let mut context = Self::new();
+        match format {
+            FpuStateFormat::Legacy => {
+                if bytes.len() != size_of::<FxSaveArea>() {
+                    return Err(InvalidFpuState::Length);
+                }
+                context.as_bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+                context.xsave_area.features = 3;
+            }
+            FpuStateFormat::Xsave { features } => {
+                let supported = Self::xsave_features().ok_or(InvalidFpuState::Features)?;
+                let requested = features & supported;
+                if bytes.len() < size_of::<FxSaveArea>() + 64 || bytes.len() > context.area_size {
+                    return Err(InvalidFpuState::Length);
+                }
+                context.as_bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+                let hardware = XSTATE_MAX_FEATURES
+                    .get()
+                    .map_or(0, |features| XCr0::read().bits() & *features);
+                if context.xsave_area.features & !hardware != 0 {
+                    return Err(InvalidFpuState::Features);
+                }
+                if context.xsave_area.compaction != 0
+                    || context.xsave_area.reserved.iter().any(|value| *value != 0)
+                {
+                    return Err(InvalidFpuState::Header);
+                }
+                let restored = context.xsave_area.features & requested;
+                if Self::xsave_image_size(restored)? > bytes.len() {
+                    return Err(InvalidFpuState::Length);
+                }
+                context.xsave_area.features = restored;
+                if requested & 2 == 0 {
+                    context.xsave_area.fxsave_area.mxcsr = 0x1f80;
+                }
+            }
+        }
+        static MXCSR_MASK: Once<u32> = Once::new();
+        let mask = *MXCSR_MASK.call_once(|| {
+            let mut hardware = Self::new();
+            hardware.save();
+            match hardware.xsave_area.fxsave_area.mxcsr_mask {
+                0 => 0xffbf,
+                mask => mask,
+            }
+        });
+        if context.xsave_area.fxsave_area.mxcsr & !mask != 0 {
+            return Err(InvalidFpuState::Mxcsr);
+        }
+        Ok(context)
     }
 
     /// Saves CPU's current FPU context to this instance.
@@ -631,8 +740,7 @@ impl FpuContext {
         &self.xsave_area.as_bytes()[..self.area_size]
     }
 
-    /// Returns the FPU context as a mutable byte slice.
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
         &mut self.xsave_area.as_mut_bytes()[..self.area_size]
     }
 }

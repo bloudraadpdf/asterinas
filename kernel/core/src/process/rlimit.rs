@@ -144,7 +144,7 @@ impl RLimit64 {
 
     /// Gets the rlimit with synchronization.
     ///
-    /// Only called when handling the `getrlimit` or `prlimit` syscall.
+    /// Returns a consistent soft/hard limit pair.
     pub(crate) fn get_raw_rlimit(&self) -> RawRLimit64 {
         let _guard = self.lock.lock();
         RawRLimit64 {

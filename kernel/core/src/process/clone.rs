@@ -629,6 +629,11 @@ fn clone_child_process(
                 child_vmar,
             )
             .sig_mask(child_sig_mask)
+            .rseq_registration(if clone_flags.contains(CloneFlags::CLONE_VM) {
+                None
+            } else {
+                thread_local.rseq().registration()
+            })
             .file_table(child_file_table)
             .fs(child_fs)
             .fpu_context(child_fpu_context)

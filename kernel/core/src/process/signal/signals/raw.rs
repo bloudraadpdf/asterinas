@@ -42,6 +42,10 @@ impl RawSignal {
         }
     }
 
+    pub(crate) fn discard_info(&mut self) {
+        self.info = siginfo_t::new(self.num(), super::super::constants::SI_USER);
+    }
+
     pub(crate) fn from_process(info: siginfo_t, sender: Arc<PidIdentity>) -> Self {
         Self {
             info,

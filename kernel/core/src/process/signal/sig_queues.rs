@@ -4,9 +4,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
     constants::*,
+    pending_quota::{PendingCharge, PendingScope},
     sig_mask::{SigMask, SigSet},
     sig_num::SigNum,
-    signals::Signal,
+    signals::{Signal, raw::RawSignal},
 };
 use crate::{
     events::IoEvents,
@@ -37,12 +38,61 @@ impl SigQueues {
 
     pub(crate) fn enqueue(&self, signal: Box<dyn Signal>) {
         let mut queues = self.queues.lock();
-        if queues.enqueue(signal) {
+        if queues.enqueue(PendingSignal {
+            signal,
+            charge: None,
+        }) {
             self.count.fetch_add(1, Ordering::Relaxed);
             // Avoid holding lock when notifying observers
             drop(queues);
             self.signalfd_pollee.notify(IoEvents::IN);
         }
+    }
+
+    pub(crate) fn enqueue_queued(&self, mut signal: RawSignal, scope: PendingScope) -> Result<()> {
+        let mut queues = self.queues.lock();
+        if queues.closed {
+            return Ok(());
+        }
+        let number = signal.num();
+        if number.is_std() && queues.get_std_queue(number).is_some() {
+            return Ok(());
+        }
+        if !number.is_std() {
+            queues
+                .get_rt_queue_mut(number)
+                .try_reserve(1)
+                .map_err(|_| Error::new(Errno::EAGAIN))?;
+        }
+        let charge = match scope.charge() {
+            Ok(charge) => Some(charge),
+            Err(_) if number.is_std() => {
+                signal.discard_info();
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let inserted = queues.enqueue(PendingSignal {
+            signal: Box::new(signal),
+            charge,
+        });
+        debug_assert!(inserted);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        drop(queues);
+        self.signalfd_pollee.notify(IoEvents::IN);
+        Ok(())
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let mut queues = self.queues.lock();
+        queues.closed = true;
+        for pending in &mut queues.std_queues {
+            *pending = None;
+        }
+        for pending in &mut queues.rt_queues {
+            pending.clear();
+        }
+        self.count.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn dequeue(&self, blocked: &SigMask) -> Option<Box<dyn Signal>> {
@@ -56,7 +106,7 @@ impl SigQueues {
         if signal.is_some() {
             self.count.fetch_sub(1, Ordering::Relaxed);
         }
-        signal
+        signal.map(PendingSignal::into_signal)
     }
 
     /// Returns the pending signals
@@ -98,9 +148,31 @@ impl Default for SigQueues {
     }
 }
 
+struct PendingSignal {
+    signal: Box<dyn Signal>,
+    charge: Option<PendingCharge>,
+}
+
+impl PendingSignal {
+    fn into_signal(self) -> Box<dyn Signal> {
+        let Self { signal, charge } = self;
+        drop(charge);
+        signal
+    }
+}
+
+impl core::ops::Deref for PendingSignal {
+    type Target = dyn Signal;
+
+    fn deref(&self) -> &Self::Target {
+        self.signal.as_ref()
+    }
+}
+
 struct Queues {
-    std_queues: Vec<Option<Box<dyn Signal>>>,
-    rt_queues: Vec<VecDeque<Box<dyn Signal>>>,
+    closed: bool,
+    std_queues: Vec<Option<PendingSignal>>,
+    rt_queues: Vec<VecDeque<PendingSignal>>,
 }
 
 impl Queues {
@@ -108,12 +180,16 @@ impl Queues {
         let std_queues = (0..COUNT_STD_SIGS).map(|_| None).collect();
         let rt_queues = (0..COUNT_RT_SIGS).map(|_| Default::default()).collect();
         Self {
+            closed: false,
             std_queues,
             rt_queues,
         }
     }
 
-    fn enqueue(&mut self, signal: Box<dyn Signal>) -> bool {
+    fn enqueue(&mut self, signal: PendingSignal) -> bool {
+        if self.closed {
+            return false;
+        }
         let signum = signal.num();
         if signum.is_std() {
             // Standard signals
@@ -144,7 +220,7 @@ impl Queues {
         true
     }
 
-    fn dequeue(&mut self, blocked: &SigMask) -> Option<Box<dyn Signal>> {
+    fn dequeue(&mut self, blocked: &SigMask) -> Option<PendingSignal> {
         // Deliver standard signals.
         //
         // According to signal(7):
@@ -213,7 +289,7 @@ impl Queues {
         let mut dequeued_signals = 0;
 
         let has_pending = self.std_queues.iter_mut().any(|signal| {
-            let Some(signal_ref) = signal.as_ref().map(AsRef::as_ref) else {
+            let Some(signal_ref) = signal.as_ref().map(|pending| pending.signal.as_ref()) else {
                 return false;
             };
 
@@ -239,7 +315,7 @@ impl Queues {
             }
 
             // Dequeue signals that should be ignored but not blocked.
-            if sig_dispositions.will_ignore(signal.as_ref()) {
+            if sig_dispositions.will_ignore(signal.signal.as_ref()) {
                 dequeued_signals += rt_queue.len();
                 rt_queue.clear();
                 return false;
@@ -261,25 +337,25 @@ impl Queues {
         }
     }
 
-    fn get_std_queue(&self, signum: SigNum) -> &Option<Box<dyn Signal>> {
+    fn get_std_queue(&self, signum: SigNum) -> &Option<PendingSignal> {
         debug_assert!(signum.is_std());
         let idx = (signum.as_u8() - MIN_STD_SIG_NUM) as usize;
         &self.std_queues[idx]
     }
 
-    fn get_std_queue_mut(&mut self, signum: SigNum) -> &mut Option<Box<dyn Signal>> {
+    fn get_std_queue_mut(&mut self, signum: SigNum) -> &mut Option<PendingSignal> {
         debug_assert!(signum.is_std());
         let idx = (signum.as_u8() - MIN_STD_SIG_NUM) as usize;
         &mut self.std_queues[idx]
     }
 
-    fn get_rt_queue(&self, signum: SigNum) -> &VecDeque<Box<dyn Signal>> {
+    fn get_rt_queue(&self, signum: SigNum) -> &VecDeque<PendingSignal> {
         debug_assert!(signum.is_real_time());
         let idx = (signum.as_u8() - MIN_RT_SIG_NUM) as usize;
         &self.rt_queues[idx]
     }
 
-    fn get_rt_queue_mut(&mut self, signum: SigNum) -> &mut VecDeque<Box<dyn Signal>> {
+    fn get_rt_queue_mut(&mut self, signum: SigNum) -> &mut VecDeque<PendingSignal> {
         debug_assert!(signum.is_real_time());
         let idx = (signum.as_u8() - MIN_RT_SIG_NUM) as usize;
         &mut self.rt_queues[idx]

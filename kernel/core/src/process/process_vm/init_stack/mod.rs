@@ -17,9 +17,12 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use align_ext::AlignExt;
+
 use self::aux_vec::{AuxKey, AuxVec};
 use crate::{
     prelude::*,
+    process::{Process, ResourceType},
     util::random::getrandom,
     vm::{
         page_cache::{Vmo, VmoOptions},
@@ -98,8 +101,6 @@ pub(crate) struct InitStack {
     ///
     /// The stack grows down from this address.
     initial_top: Vaddr,
-    /// The maximum size of the stack.
-    max_size: usize,
     /// The current stack pointer.
     ///
     /// Before initialization, `pos` points to `initial_top`.
@@ -115,7 +116,6 @@ impl Clone for InitStack {
     fn clone(&self) -> Self {
         Self {
             initial_top: self.initial_top,
-            max_size: self.max_size,
             pos: AtomicUsize::new(self.pos.load(Ordering::Relaxed)),
             auxv_range: SpinLock::new(self.auxv_range.lock().clone()),
             saved_auxv: SpinLock::new(self.saved_auxv.lock().clone()),
@@ -141,11 +141,9 @@ impl InitStack {
             nr_random_padding_pages as usize + NR_FIXED_PADDING_PAGES
         };
         let initial_top = VMAR_CAP_ADDR - PAGE_SIZE * nr_pages_padding;
-        let max_size = INIT_STACK_SIZE;
 
         Self {
             initial_top,
-            max_size,
             pos: AtomicUsize::new(initial_top),
             auxv_range: SpinLock::new(0..0),
             saved_auxv: SpinLock::new(Vec::new()),
@@ -185,18 +183,18 @@ impl InitStack {
     ) -> Result<()> {
         self.set_uninitialized();
 
-        let vmo = {
-            let vmo_options = VmoOptions::new(self.max_size);
-            vmo_options.alloc()?
-        };
-        let vmar_map_options = {
-            let map_addr = self.initial_top - self.max_size;
-            debug_assert!(map_addr.is_multiple_of(PAGE_SIZE));
-            vmar.new_map(self.max_size, perms)
-                .offset(VmarMapOffset::FixedNoReplace(map_addr))
-                .vmo(vmo.clone())
-        };
-        vmar_map_options.build()?;
+        let stack_limit = Process::current()
+            .map(|process| {
+                process
+                    .resource_limits()
+                    .get_rlimit(ResourceType::RLIMIT_STACK)
+                    .get_cur()
+            })
+            .unwrap_or(INIT_STACK_SIZE as u64)
+            .min(self.initial_top as u64) as usize;
+        let argument_limit = (stack_limit / 4).clamp(32 * PAGE_SIZE, 6 * 1024 * 1024);
+        // Identity offsets allow downward extension without allocating untouched pages.
+        let vmo = VmoOptions::new(self.initial_top).alloc()?;
 
         let writer = InitStackWriter {
             pos: &self.pos,
@@ -205,13 +203,27 @@ impl InitStack {
             envp,
             auxvec,
             execfn,
-            map_addr: self.initial_top - self.max_size,
+            map_addr: self.initial_top - argument_limit,
         };
         let (auxv_range, argv_range, envp_range) = writer.write()?;
+        let used = self.initial_top - self.pos().align_down(PAGE_SIZE);
+        if used > stack_limit {
+            return_errno!(Errno::E2BIG);
+        }
+        let extra = (stack_limit - used)
+            .min(32 * PAGE_SIZE)
+            .align_down(PAGE_SIZE);
+        let bottom = self.pos().align_down(PAGE_SIZE) - extra;
+        vmar.new_map(self.initial_top - bottom, perms)
+            .offset(VmarMapOffset::FixedNoReplace(bottom))
+            .vmo(vmo.clone())
+            .vmo_offset(bottom)
+            .grows_down()
+            .build()?;
 
         let mut saved_auxv = vec![0; auxv_range.len()];
         vmo.read(
-            auxv_range.start - (self.initial_top - self.max_size),
+            auxv_range.start,
             &mut VmWriter::from(saved_auxv.as_mut_slice()).to_fallible(),
         )?;
         *self.saved_auxv.lock() = saved_auxv;
@@ -399,7 +411,7 @@ impl InitStackWriter<'_> {
         let new_pos = self.reserve_pos(size_of::<u64>(), align_of::<u64>())?;
         let bytes = val.to_ne_bytes();
         let mut reader = VmReader::from(bytes.as_slice()).to_fallible();
-        self.vmo.write(new_pos - self.map_addr, &mut reader)?;
+        self.vmo.write(new_pos, &mut reader)?;
         Ok(new_pos as u64)
     }
 
@@ -415,7 +427,7 @@ impl InitStackWriter<'_> {
     fn write_bytes(&self, bytes: &[u8]) -> Result<u64> {
         let new_pos = self.reserve_pos(bytes.len(), align_of::<u8>())?;
         let mut reader = VmReader::from(bytes).to_fallible();
-        self.vmo.write(new_pos - self.map_addr, &mut reader)?;
+        self.vmo.write(new_pos, &mut reader)?;
         Ok(new_pos as u64)
     }
 

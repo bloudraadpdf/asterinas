@@ -138,3 +138,13 @@ pub trait UserModeHooks {
 pub struct DummyUserHooks;
 
 impl UserModeHooks for DummyUserHooks {}
+
+pub(crate) fn prepare_user_run(hooks: &impl UserModeHooks) -> Option<DisabledLocalIrqGuard> {
+    crate::task::scheduler::might_preempt();
+    if hooks.has_kernel_event() {
+        return None;
+    }
+    let guard = crate::irq::disable_local();
+    hooks.pre_user_run(&guard);
+    Some(guard)
+}

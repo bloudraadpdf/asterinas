@@ -12,7 +12,12 @@ use spin::Once;
 
 use super::{
     Credentials, Process,
-    signal::{sig_mask::AtomicSigMask, sig_num::SigNum, sig_queues::SigQueues, signals::Signal},
+    signal::{
+        sig_mask::AtomicSigMask,
+        sig_num::SigNum,
+        sig_queues::SigQueues,
+        signals::{Signal, raw::RawSignal},
+    },
 };
 use crate::{
     events::IoEvents,
@@ -37,6 +42,7 @@ mod personality;
 mod posix_thread_ext;
 pub(crate) mod ptrace;
 mod robust_list;
+pub(crate) mod rseq;
 mod thread_local;
 
 pub(crate) use builder::PosixThreadBuilder;
@@ -293,6 +299,30 @@ impl PosixThread {
         }
         self.sig_queues.enqueue(signal);
         self.wake_signalled_waker();
+    }
+
+    pub(crate) fn enqueue_queued_signal(&self, signal: RawSignal) -> Result<()> {
+        let process = self
+            .weak_process()
+            .upgrade()
+            .ok_or_else(|| Error::new(Errno::ESRCH))?;
+        if !process.prepare_signal(&signal) {
+            return Ok(());
+        }
+        if !self.has_signal_blocked(signal.num())
+            && !self.is_traced()
+            && process
+                .sig_dispositions()
+                .lock()
+                .lock()
+                .will_ignore(&signal)
+        {
+            return Ok(());
+        }
+        let scope = super::signal::pending_quota::PendingScope::new(&process, self);
+        self.sig_queues.enqueue_queued(signal, scope)?;
+        self.wake_signalled_waker();
+        Ok(())
     }
 
     pub(crate) fn register_signalfd_poller(&self, poller: &mut PollHandle, mask: IoEvents) {

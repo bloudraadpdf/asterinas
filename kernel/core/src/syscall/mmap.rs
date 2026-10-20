@@ -78,6 +78,12 @@ fn do_sys_mmap(
 
     let map_addr = {
         let mut options = vmar.new_map(len, vm_perms);
+        if option.flags().contains(MMapFlags::MAP_GROWSDOWN) {
+            if option.typ().is_shared() || !option.flags().contains(MMapFlags::MAP_ANONYMOUS) {
+                return_errno!(Errno::EINVAL);
+            }
+            options = options.grows_down();
+        }
 
         if option.flags().is_fixed() {
             if option.flags().contains(MMapFlags::MAP_FIXED_NOREPLACE) {

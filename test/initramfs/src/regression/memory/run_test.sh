@@ -4,6 +4,8 @@
 
 set -e
 
+./mmap/data_account
+./mmap/grow_down
 ./mmap/mmap_and_fork
 ./mmap/mmap_and_mprotect
 ./mmap/mmap_and_mremap

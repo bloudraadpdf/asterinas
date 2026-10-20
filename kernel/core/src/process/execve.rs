@@ -89,7 +89,8 @@ pub(crate) fn do_execve(
     let exec_cred = prepare_exec_cred(program_to_load.elf_path(), ctx)?;
 
     let new_vmar = VmarHandle::new(ProcessVm::new(executable_path.clone()));
-    let elf_load_info = program_to_load.load_to_vmar(&new_vmar, &path_resolver)?;
+    let elf_load_info =
+        program_to_load.load_to_vmar(&new_vmar, &path_resolver, exec_cred.identity())?;
 
     // Ensure no other thread is concurrently performing exit_group or execve.
     // If such an operation is in progress, return EAGAIN.
@@ -248,6 +249,7 @@ fn do_execve_no_return(
     if ctx.user_space().vmar().has_multiple_handles() {
         super::posix_thread::wake_clear_ctid(thread_local);
     }
+    thread_local.rseq().reset();
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
     apply_exec_cred(process, &ctx.credentials_mut(), exec_cred)?;
     drop(vmar_guard);

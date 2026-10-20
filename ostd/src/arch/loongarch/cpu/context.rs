@@ -145,10 +145,9 @@ impl UserContext {
 impl UserContextApiInternal for UserContext {
     fn execute<T: UserModeHooks>(&mut self, hooks: &T) -> ReturnReason {
         let ret = loop {
-            crate::task::scheduler::might_preempt();
-
-            let guard = crate::irq::disable_local();
-            hooks.pre_user_run(&guard);
+            let Some(guard) = crate::user::prepare_user_run(hooks) else {
+                break ReturnReason::KernelEvent;
+            };
             self.user_context.run(guard);
 
             let cause = loongArch64::register::estat::read().cause();

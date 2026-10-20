@@ -112,9 +112,11 @@ use super::{
     removexattr::{sys_fremovexattr, sys_lremovexattr, sys_removexattr},
     rename::{sys_rename, sys_renameat, sys_renameat2},
     rmdir::sys_rmdir,
+    rseq::sys_rseq,
     rt_sigaction::sys_rt_sigaction,
     rt_sigpending::sys_rt_sigpending,
     rt_sigprocmask::sys_rt_sigprocmask,
+    rt_sigqueueinfo::{sys_rt_sigqueueinfo, sys_rt_tgsigqueueinfo},
     rt_sigreturn::sys_rt_sigreturn,
     rt_sigsuspend::sys_rt_sigsuspend,
     rt_sigtimedwait::sys_rt_sigtimedwait,
@@ -316,6 +318,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_CAPSET = 126           => sys_capset(args[..2]);
     SYS_RT_SIGPENDING = 127    => sys_rt_sigpending(args[..2]);
     SYS_RT_SIGTIMEDWAIT = 128  => sys_rt_sigtimedwait(args[..4]);
+    SYS_RT_SIGQUEUEINFO = 129  => sys_rt_sigqueueinfo(args[..3]);
     SYS_RT_SIGSUSPEND = 130    => sys_rt_sigsuspend(args[..2]);
     SYS_SIGALTSTACK = 131      => sys_sigaltstack(args[..2], &user_ctx);
     SYS_UTIME = 132            => sys_utime(args[..2]);
@@ -418,6 +421,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_INOTIFY_INIT1 = 294     => sys_inotify_init1(args[..1]);
     SYS_PREADV = 295           => sys_preadv(args[..5]);
     SYS_PWRITEV = 296          => sys_pwritev(args[..5]);
+    SYS_RT_TGSIGQUEUEINFO = 297 => sys_rt_tgsigqueueinfo(args[..4]);
     SYS_PRLIMIT64 = 302        => sys_prlimit64(args[..4]);
     SYS_SYNCFS = 306           => sys_syncfs(args[..1]);
     SYS_RECVMMSG = 299         => sys_recvmmsg(args[..5]);
@@ -433,6 +437,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PREADV2 = 327          => sys_preadv2(args[..6]);
     SYS_PWRITEV2 = 328         => sys_pwritev2(args[..6]);
     SYS_STATX = 332            => sys_statx(args[..5]);
+    SYS_RSEQ = 334 => sys_rseq(args[..4]);
     SYS_PIDFD_SEND_SIGNAL = 424 => sys_pidfd_send_signal(args[..4]);
     SYS_MOVE_MOUNT = 429        => sys_move_mount(args[..5]);
     SYS_FSOPEN = 430           => sys_fsopen(args[..2]);

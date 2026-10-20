@@ -102,6 +102,17 @@ impl Vmar {
                 "remap: there is no mapping at the old address"
             )
         };
+        let extra = if action == RemapOldMappingAction::Keep {
+            new_size
+        } else {
+            new_size.saturating_sub(old_size)
+        };
+        if extra != 0 {
+            inner.check_extra_size_fits_rlimit(extra)?;
+            if old_mapping.is_data() {
+                inner.check_extra_data_fits_rlimit(extra)?;
+            }
+        }
         if new_size > old_size {
             if !old_mapping.can_expand() {
                 return_errno_with_message!(
@@ -115,7 +126,6 @@ impl Vmar {
             {
                 return_errno_with_message!(Errno::EINVAL, "remap: the file offset overflows");
             }
-            inner.check_extra_size_fits_rlimit(new_size - old_size)?;
         }
 
         // Shrink the old mapping first.

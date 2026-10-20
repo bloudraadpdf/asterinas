@@ -5,7 +5,10 @@ use align_ext::AlignExt;
 use super::SyscallReturn;
 use crate::{
     prelude::*,
-    vm::{perms::VmPerms, vmar::VMAR_CAP_ADDR},
+    vm::{
+        perms::VmPerms,
+        vmar::{ProtectDirection, VMAR_CAP_ADDR},
+    },
 };
 
 pub(super) fn sys_mprotect(
@@ -14,7 +17,16 @@ pub(super) fn sys_mprotect(
     perms: u64,
     ctx: &Context,
 ) -> Result<SyscallReturn> {
-    let vm_perms = VmPerms::from_user_bits(perms as u32)?;
+    const DOWN: u32 = 0x0100_0000;
+    const UP: u32 = 0x0200_0000;
+    let bits = perms as u32;
+    let direction = match bits & (DOWN | UP) {
+        0 => ProtectDirection::None,
+        DOWN => ProtectDirection::Down,
+        UP => ProtectDirection::Up,
+        _ => return_errno!(Errno::EINVAL),
+    };
+    let vm_perms = VmPerms::from_user_bits(bits & !(DOWN | UP))?;
     debug!(
         "addr = 0x{:x}, len = 0x{:x}, perms = {:?}",
         addr, len, vm_perms
@@ -50,7 +62,7 @@ pub(super) fn sys_mprotect(
 
     let user_space = ctx.user_space();
     let vmar = user_space.vmar();
-    vmar.protect(vm_perms, addr_range)?;
+    vmar.protect(vm_perms, addr_range, direction)?;
 
     Ok(SyscallReturn::Return(0))
 }

@@ -58,6 +58,7 @@ use crate::{
 /// [`Vmar`]: crate::vm::vmar::Vmar
 pub(crate) struct VmMapping {
     shm: Option<ShmMapping>,
+    grows_down: bool,
     /// The size of mapping, in bytes. The map size can even be larger than the
     /// size of VMO. Those pages outside VMO range cannot be read or write.
     ///
@@ -125,6 +126,7 @@ impl VmMapping {
     ) -> Self {
         Self {
             shm: None,
+            grows_down: false,
             map_size,
             map_to_addr,
             mapped_mem,
@@ -133,6 +135,45 @@ impl VmMapping {
             handle_page_faults_around,
             perms,
         }
+    }
+
+    pub(super) fn with_grows_down(mut self, grows_down: bool) -> Self {
+        self.grows_down = grows_down;
+        self
+    }
+
+    pub(super) fn grows_down(&self) -> bool {
+        self.grows_down
+    }
+
+    pub(super) fn is_data(&self) -> bool {
+        self.is_data_with_perms(self.perms)
+    }
+
+    pub(super) fn is_data_with_perms(&self, perms: VmPerms) -> bool {
+        perms.contains(VmPerms::WRITE) && !self.map_mode.is_shared() && !self.grows_down
+    }
+
+    pub(super) fn can_grow_down_to(&self, address: Vaddr) -> bool {
+        if !self.grows_down || address >= self.map_to_addr {
+            return false;
+        }
+        match &self.mapped_mem {
+            MappedMemory::Anonymous => true,
+            MappedMemory::Vmo(vmo) => vmo.offset >= self.map_to_addr - address,
+            MappedMemory::Device(_) => false,
+        }
+    }
+
+    pub(super) fn grow_down(mut self, address: Vaddr) -> Self {
+        debug_assert!(self.can_grow_down_to(address));
+        let extra = self.map_to_addr - address;
+        if let MappedMemory::Vmo(vmo) = &mut self.mapped_mem {
+            vmo.offset -= extra;
+        }
+        self.map_to_addr = address;
+        self.map_size = NonZeroUsize::new(self.map_size.get() + extra).unwrap();
+        self
     }
 
     pub(super) fn new_fork(&self) -> VmMapping {
@@ -297,7 +338,12 @@ impl VmMapping {
             '-'
         };
         let shared_char = if self.map_mode.is_shared() { 's' } else { 'p' };
-        let offset = self.vmo().map(|vmo| vmo.offset).unwrap_or(0);
+        let offset = self
+            .file
+            .as_ref()
+            .and_then(|_| self.vmo())
+            .map(|vmo| vmo.offset)
+            .unwrap_or(0);
         let (dev_major, dev_minor) = self
             .inode()
             .and_then(|inode| {
@@ -1075,6 +1121,7 @@ impl Drop for MappedVmo {
 fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     let is_adjacent = left.map_end() == right.map_to_addr();
     let is_type_equal = left.map_mode == right.map_mode
+        && left.grows_down == right.grows_down
         && left.shm.as_ref().map(ShmMapping::id) == right.shm.as_ref().map(ShmMapping::id)
         && left.handle_page_faults_around == right.handle_page_faults_around
         && left.perms == right.perms

@@ -89,9 +89,23 @@ pub(in crate::process) struct ExecCred {
     permitted: CapSet,
     effective: CapSet,
     ambient: CapSet,
+    identity: ExecIdentity,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::process) struct ExecIdentity {
+    pub uid: Uid,
+    pub euid: Uid,
+    pub gid: Gid,
+    pub egid: Gid,
+    pub secure: bool,
 }
 
 impl ExecCred {
+    pub(in crate::process) fn identity(&self) -> ExecIdentity {
+        self.identity
+    }
+
     pub(in crate::process) const fn will_change_ids(&self) -> bool {
         self.setuid.is_some() || self.setgid.is_some()
     }
@@ -658,12 +672,27 @@ impl Credentials_ {
         let (permitted, effective, ambient) =
             self.calculate_capsets_for_exec(file_capabilities, no_new_privs, new_euid, new_egid)?;
 
+        let id_changed = new_euid != self.euid()
+            || (new_egid != self.fsgid() && !self.groups().contains(&new_egid));
+        let secure = id_changed
+            || new_euid != self.ruid()
+            || new_egid != self.rgid()
+            || (!self.ruid().is_root()
+                && (file_capabilities.is_some_and(FileCapabilities::has_effective_flag)
+                    || !ambient.contains(permitted)));
         Ok(ExecCred {
             setuid,
             setgid,
             permitted,
             effective,
             ambient,
+            identity: ExecIdentity {
+                uid: self.ruid(),
+                euid: new_euid,
+                gid: self.rgid(),
+                egid: new_egid,
+                secure,
+            },
         })
     }
 
