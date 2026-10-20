@@ -17,10 +17,9 @@ use crate::{
     thread::{Thread, Tid},
 };
 
-/// Sends a signal to a process, using the current process as the sender.
+/// Sends a process-directed signal to the process containing the target PID or TID.
 ///
-/// The credentials of the current process will be checked to determine
-/// if it is authorized to send the signal to this particular target process.
+/// Checks the sender's credentials against the addressed thread's credentials.
 ///
 /// If `signal` is `None`, this method will only check permission without sending
 /// any signal.
@@ -40,12 +39,27 @@ pub(crate) fn kill(pid: Pid, signal: Option<Box<dyn Signal>>, ctx: &Context) -> 
         return kill_process(ctx.process.as_ref(), Some(signal), ctx);
     }
 
-    // Slow path
-    let process = pid_table::pid_table_mut()
-        .get_process(pid)
-        .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target process does not exist"))?;
+    let thread = signal_thread(pid)?;
+    let receiver = thread.as_posix_thread().unwrap();
+    let process = receiver
+        .weak_process()
+        .upgrade()
+        .ok_or_else(|| Error::new(Errno::ESRCH))?;
+    if process.pid_in(ctx.process.pid_namespace()) == 0 {
+        return_errno_with_message!(
+            Errno::ESRCH,
+            "the target process is outside the PID namespace"
+        );
+    }
 
-    kill_process(&process, signal, ctx)
+    // Linux checks the addressed task's credentials even for process-directed signals.
+    // Reference: <https://elixir.bootlin.com/linux/v6.17/source/kernel/signal.c#L1449>.
+    check_signal_perm(receiver, ctx, signal.as_ref().map(|signal| signal.num()))?;
+    if let Some(signal) = signal {
+        process.enqueue_signal(signal);
+    }
+
+    Ok(())
 }
 
 /// Sends a signal to all processes in a group, using the current process
