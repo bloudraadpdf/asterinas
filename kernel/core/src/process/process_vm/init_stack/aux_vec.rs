@@ -42,7 +42,10 @@ pub(crate) enum AuxKey {
     AT_RANDOM = 25, /* address of 16 random bytes */
     AT_HWCAP2 = 26, /* extension of AT_HWCAP */
 
-    /* 28...30 not used */
+    AT_RSEQ_FEATURE_SIZE = 27,
+    AT_RSEQ_ALIGN = 28,
+
+    /* 29...30 not used */
     AT_EXECFN = 31, /* filename of program */
     AT_SYSINFO = 32,
     AT_SYSINFO_EHDR = 33, /* the start address of the page containing the VDSO */

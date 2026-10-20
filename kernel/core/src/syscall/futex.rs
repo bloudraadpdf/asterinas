@@ -72,13 +72,6 @@ pub(super) fn sys_futex(
     };
 
     let visibility = FutexVisibility::from(futex_flags);
-    let is_pi = matches!(
-        futex_op,
-        FutexOp::FUTEX_LOCK_PI
-            | FutexOp::FUTEX_LOCK_PI2
-            | FutexOp::FUTEX_TRYLOCK_PI
-            | FutexOp::FUTEX_UNLOCK_PI
-    );
     let timeout = if matches!(
         futex_op,
         FutexOp::FUTEX_WAIT
@@ -101,6 +94,14 @@ pub(super) fn sys_futex(
             "this futex command cannot use CLOCK_REALTIME"
         );
     }
+    let interrupt_error = match futex_op {
+        FutexOp::FUTEX_LOCK_PI
+        | FutexOp::FUTEX_LOCK_PI2
+        | FutexOp::FUTEX_TRYLOCK_PI
+        | FutexOp::FUTEX_UNLOCK_PI => Errno::ERESTARTNOINTR,
+        FutexOp::FUTEX_WAIT | FutexOp::FUTEX_WAIT_BITSET if timeout.is_some() => Errno::EINTR,
+        _ => Errno::ERESTARTSYS,
+    };
     let res = match futex_op {
         FutexOp::FUTEX_WAIT => {
             futex_wait(futex_addr as _, futex_val as _, timeout, ctx, visibility).map(|_| 0)
@@ -168,8 +169,7 @@ pub(super) fn sys_futex(
     }
     .map_err(|err| match err.error() {
         Errno::ETIME => Error::new(Errno::ETIMEDOUT),
-        Errno::EINTR if is_pi => Error::new(Errno::ERESTARTNOINTR),
-        Errno::EINTR => Error::new(Errno::ERESTARTSYS),
+        Errno::EINTR => Error::new(interrupt_error),
         _ => err,
     })?;
 

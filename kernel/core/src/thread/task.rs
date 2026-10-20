@@ -16,7 +16,12 @@ use crate::{
     prelude::*,
     process::{
         posix_thread::{AsPosixThread, FIRST_POSIX_TID, ThreadLocal, ptrace::PtraceStopResult},
-        signal::{HandlePendingSignal, PauseReason, handle_pending_signal},
+        signal::{
+            HandlePendingSignal, PauseReason,
+            constants::{SI_KERNEL, SIGSEGV},
+            force_fault_signal, handle_pending_signal,
+            signals::fault::FaultSignal,
+        },
     },
     syscall::handle_syscall,
     thread::{AsThread, exception::handle_exception},
@@ -70,6 +75,16 @@ pub(crate) fn create_new_user_task(
         }
 
         while !current_thread.is_exited() {
+            if let Err(error) = ctx
+                .thread_local
+                .rseq()
+                .prepare(user_mode.context_mut(), &ctx)
+            {
+                debug!("rseq resume failed: {:?}", error);
+                force_fault_signal(FaultSignal::new(SIGSEGV, SI_KERNEL, None), &ctx);
+                handle_pending_signal(user_mode.context_mut(), &ctx);
+                continue;
+            }
             // Execute the user code
             let return_reason = user_mode.execute(&ctx);
 
@@ -138,7 +153,7 @@ pub(crate) fn create_new_user_task(
 
 impl UserModeHooks for Context<'_> {
     fn has_kernel_event(&self) -> bool {
-        self.has_pending()
+        self.has_pending() || self.thread_local.rseq().pending()
     }
 
     fn pre_user_run(&self, guard: &DisabledLocalIrqGuard) {

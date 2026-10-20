@@ -39,6 +39,7 @@ pub(crate) struct ThreadLocal {
 
     // Supplementary userspace CPU context.
     supp_user_context: SuppUserContext,
+    rseq: super::rseq::RseqState,
 
     // Signal.
     /// Stack address, size, and flags for the signal handler.
@@ -77,6 +78,7 @@ impl ThreadLocal {
             file_table: RefCell::new(Some(file_table)),
             fs: RefCell::new(fs),
             supp_user_context,
+            rseq: super::rseq::RseqState::new(),
             sig_stack: RefCell::new(SigStack::default()),
             sig_mask_saved: Cell::new(None),
             orig_syscall_ret: Cell::new(None),
@@ -179,6 +181,10 @@ impl ThreadLocal {
         // If the filesystem information is not shared, its reference count should be exactly 2:
         // one reference is held by `ThreadLocal` and the other by `PosixThread`.
         Arc::strong_count(&self.fs.borrow()) > 2
+    }
+
+    pub(crate) fn rseq(&self) -> &super::rseq::RseqState {
+        &self.rseq
     }
 
     pub(crate) fn supp_user_context(&self) -> &SuppUserContext {

@@ -5,6 +5,13 @@ use core::ops::Range;
 use super::{Interval, Vmar, util::get_intersected_range};
 use crate::{prelude::*, vm::perms::VmPerms};
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProtectDirection {
+    None,
+    Down,
+    Up,
+}
+
 impl Vmar {
     /// Change the permissions of the memory mappings in the specified range.
     ///
@@ -14,20 +21,44 @@ impl Vmar {
     /// Note that pages before the unmapped hole are still protected.
     ///
     /// [`ENOMEM`]: Errno::ENOMEM
-    pub(crate) fn protect(&self, perms: VmPerms, range: Range<usize>) -> Result<()> {
+    pub(crate) fn protect(
+        &self,
+        perms: VmPerms,
+        mut range: Range<usize>,
+        direction: ProtectDirection,
+    ) -> Result<()> {
         debug_assert!(range.start.is_multiple_of(PAGE_SIZE));
         debug_assert!(range.end.is_multiple_of(PAGE_SIZE));
 
         let mut inner = self.inner.write();
+        match direction {
+            ProtectDirection::None => {}
+            ProtectDirection::Up => return_errno!(Errno::EINVAL),
+            ProtectDirection::Down => {
+                let mapping = inner
+                    .vm_mappings
+                    .find_one(&range.start)
+                    .ok_or_else(|| Error::new(Errno::ENOMEM))?;
+                if !mapping.grows_down() {
+                    return_errno!(Errno::EINVAL);
+                }
+                range.start = mapping.map_to_addr();
+            }
+        }
 
         let mut protect_mappings = Vec::new();
 
         for vm_mapping in inner.vm_mappings.find(&range) {
-            protect_mappings.push((vm_mapping.range(), vm_mapping.perms()))
+            protect_mappings.push((
+                vm_mapping.range(),
+                vm_mapping.perms(),
+                vm_mapping.is_data(),
+                vm_mapping.is_data_with_perms(perms),
+            ))
         }
 
         let mut last_mapping_end = range.start;
-        for (vm_mapping_range, vm_mapping_perms) in protect_mappings {
+        for (vm_mapping_range, vm_mapping_perms, was_data, is_data) in protect_mappings {
             if last_mapping_end < vm_mapping_range.start {
                 return_errno_with_message!(
                     Errno::ENOMEM,
@@ -41,6 +72,11 @@ impl Vmar {
             }
             let new_perms = perms | (vm_mapping_perms & VmPerms::ALL_MAY_PERMS);
             new_perms.check()?;
+
+            if !was_data && is_data {
+                let intersected = get_intersected_range(&range, &vm_mapping_range);
+                inner.check_extra_data_fits_rlimit(intersected.len())?;
+            }
 
             let Some((vm_mapping, mut rmap_to_remove)) = inner.remove(&vm_mapping_range.start)
             else {

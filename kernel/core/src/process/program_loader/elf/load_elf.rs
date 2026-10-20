@@ -5,7 +5,6 @@
 use core::ops::Range;
 
 use align_ext::AlignExt;
-use ostd::task::Task;
 
 use super::{
     elf_file::{ElfHeaders, LoadablePhdr},
@@ -18,9 +17,9 @@ use crate::{
     },
     prelude::*,
     process::{
-        posix_thread::AsPosixThread,
+        credentials::ExecIdentity,
         process_vm::{AuxKey, AuxVec},
-        program_loader::open_executable_file,
+        program_loader::{ProgramToLoad, open_executable_file},
     },
     util::random::getrandom,
     vm::{
@@ -52,20 +51,28 @@ pub(crate) struct ElfLoadInfo {
 ///
 /// This function will map ELF segments and
 /// initialize the init stack and heap.
-pub(crate) fn load_elf_to_vmar(
+pub(in crate::process) fn load_elf_to_vmar(
     vmar: &Vmar,
-    elf_file: Arc<dyn FileLike>,
     path_resolver: &PathResolver,
-    elf_headers: ElfHeaders,
-    execfn: CString,
-    argv: Vec<CString>,
-    envp: Vec<CString>,
+    program: ProgramToLoad,
+    identity: ExecIdentity,
 ) -> Result<ElfLoadInfo> {
+    let ProgramToLoad {
+        elf_file,
+        elf_headers,
+        execfn,
+        argv,
+        envp,
+    } = program;
     let ldso = lookup_and_parse_ldso(&elf_headers, &elf_file, path_resolver)?;
 
-    #[cfg_attr(target_arch = "loongarch64", expect(unused_mut))]
     let (elf_mapped_info, entry_point, mut aux_vec) =
         map_vmos_and_build_aux_vec(vmar, ldso, &elf_headers, &elf_file)?;
+    aux_vec.set(AuxKey::AT_UID, u32::from(identity.uid) as u64);
+    aux_vec.set(AuxKey::AT_EUID, u32::from(identity.euid) as u64);
+    aux_vec.set(AuxKey::AT_GID, u32::from(identity.gid) as u64);
+    aux_vec.set(AuxKey::AT_EGID, u32::from(identity.egid) as u64);
+    aux_vec.set(AuxKey::AT_SECURE, u64::from(identity.secure));
     vmar.process_vm()
         .set_code_range(elf_mapped_info.code_range.clone());
     vmar.process_vm()
@@ -155,28 +162,12 @@ fn map_vmos_and_build_aux_vec(
 
     let elf_mapped_info = map_segment_vmos(parsed_elf, vmar, elf_file, ldso_load_info.is_some())?;
 
-    let mut aux_vec = {
+    let aux_vec = {
         let ldso_base = ldso_load_info
             .as_ref()
             .map(|load_info| load_info.range.relocated_start());
         init_aux_vec(parsed_elf, &elf_mapped_info.full_range, ldso_base)?
     };
-
-    // Set AT_SECURE based on setuid/setgid bits and `no_new_privs`.
-    //
-    // FIXME: We should fetch the setuid/setgid bits and `no_new_privs` from
-    // the execve entry and pass them here, rather than re-fetching them here.
-    let mode = elf_file.path().mode()?;
-    let secure = if mode.has_set_uid() || mode.has_set_gid() {
-        let task = Task::current().unwrap();
-        match task.as_posix_thread() {
-            Some(posix_thread) if !posix_thread.credentials().no_new_privs() => 1,
-            _ => 0,
-        }
-    } else {
-        0
-    };
-    aux_vec.set(AuxKey::AT_SECURE, secure);
 
     let entry_point = if let Some(ldso_load_info) = ldso_load_info {
         ldso_load_info.entry_point
@@ -465,6 +456,8 @@ fn init_aux_vec(
     let mut aux_vec = AuxVec::new();
 
     aux_vec.set(AuxKey::AT_PAGESZ, PAGE_SIZE as _);
+    aux_vec.set(AuxKey::AT_RSEQ_FEATURE_SIZE, 28);
+    aux_vec.set(AuxKey::AT_RSEQ_ALIGN, 32);
 
     let Some(ph_vaddr) = elf_map_range.relocated_addr_of(elf.find_vaddr_of_phdrs()?) else {
         return_errno_with_message!(
@@ -511,11 +504,13 @@ fn map_vdso_to_vmar(vmar: &Vmar) -> Option<Vaddr> {
     vmar.protect(
         data_perms,
         vdso_data_base..(vdso_data_base + VDSO_VMO_LAYOUT.data_segment_size),
+        crate::vm::vmar::ProtectDirection::None,
     )
     .unwrap();
     vmar.protect(
         text_perms,
         vdso_text_base..(vdso_text_base + VDSO_VMO_LAYOUT.text_segment_size),
+        crate::vm::vmar::ProtectDirection::None,
     )
     .unwrap();
     Some(vdso_text_base)

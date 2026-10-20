@@ -3,13 +3,18 @@
 use super::{
     Pgid, Pid, Process, pid_table,
     posix_thread::AsPosixThread,
-    signal::{constants::SIGCONT, sig_num::SigNum, signals::Signal},
+    signal::{
+        c_types::siginfo_t,
+        constants::SIGCONT,
+        sig_num::SigNum,
+        signals::{Signal, raw::RawSignal},
+    },
 };
 use crate::{
     prelude::*,
     process::{credentials::capabilities::CapSet, posix_thread::PosixThread},
     security::lsm::hooks as lsm_hooks,
-    thread::Tid,
+    thread::{Thread, Tid},
 };
 
 /// Sends a signal to a process, using the current process as the sender.
@@ -93,9 +98,35 @@ pub(crate) fn tgkill(
     signal: Option<Box<dyn Signal>>,
     ctx: &Context,
 ) -> Result<()> {
-    let thread = pid_table::pid_table_mut()
+    let thread = checked_thread(tid, tgid, signal.as_ref().map(|signal| signal.num()), ctx)?;
+    let target_posix_thread = thread.as_posix_thread().unwrap();
+
+    if thread.is_exited() {
+        return Ok(());
+    }
+
+    if let Some(signal) = signal {
+        // We've checked the permission issues above.
+        // FIXME: We should take some lock while checking the permission to avoid race conditions.
+        target_posix_thread.enqueue_signal(signal);
+    }
+
+    Ok(())
+}
+
+fn signal_thread(tid: Tid) -> Result<Arc<Thread>> {
+    pid_table::pid_table_mut()
         .get_thread(tid)
-        .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target thread does not exist"))?;
+        .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target thread does not exist"))
+}
+
+fn checked_thread(
+    tid: Tid,
+    tgid: Option<Pid>,
+    signum: Option<SigNum>,
+    ctx: &Context,
+) -> Result<Arc<Thread>> {
+    let thread = signal_thread(tid)?;
     let target_posix_thread = thread.as_posix_thread().unwrap();
     if target_posix_thread
         .process()
@@ -120,19 +151,60 @@ pub(crate) fn tgkill(
     }
 
     // Check permission
-    let signum = signal.as_ref().map(|signal| signal.num());
     check_signal_perm(target_posix_thread, ctx, signum)?;
 
-    if thread.is_exited() {
-        return Ok(());
-    }
+    Ok(thread)
+}
 
+pub(crate) enum QueuedSignalTarget {
+    Process(Pid),
+    Thread { tid: Tid, tgid: Pid },
+}
+
+fn queued_payload(info: siginfo_t, ctx: &Context) -> Result<Option<RawSignal>> {
+    let number = u8::try_from(info.si_signo).map_err(|_| Error::new(Errno::EINVAL))?;
+    if number == 0 {
+        return Ok(None);
+    }
+    SigNum::try_from(number)?;
+    Ok(Some(RawSignal::from_user(
+        info,
+        ctx.process.pid_namespace().clone(),
+    )))
+}
+
+pub(crate) fn queue_signal(
+    target: QueuedSignalTarget,
+    info: siginfo_t,
+    ctx: &Context,
+) -> Result<()> {
+    let (tid, group) = match &target {
+        QueuedSignalTarget::Process(pid) => (*pid, None),
+        QueuedSignalTarget::Thread { tid, tgid } => (*tid, Some(*tgid)),
+    };
+    let thread = signal_thread(tid)?;
+    let receiver = thread.as_posix_thread().unwrap();
+    let process = receiver
+        .weak_process()
+        .upgrade()
+        .ok_or_else(|| Error::new(Errno::ESRCH))?;
+    if group.is_some_and(|group| process.pid() != group) {
+        return_errno!(Errno::ESRCH);
+    }
+    let signal = queued_payload(info, ctx)?;
+    if process.pid_in(ctx.process.pid_namespace()) == 0 {
+        return_errno!(Errno::ESRCH);
+    }
+    check_signal_perm(receiver, ctx, signal.as_ref().map(|signal| signal.num()))?;
     if let Some(signal) = signal {
-        // We've checked the permission issues above.
-        // FIXME: We should take some lock while checking the permission to avoid race conditions.
-        target_posix_thread.enqueue_signal(signal);
+        match target {
+            QueuedSignalTarget::Process(_) => process.enqueue_queued_signal(receiver, signal)?,
+            QueuedSignalTarget::Thread { .. } if !thread.is_exited() => {
+                receiver.enqueue_queued_signal(signal)?
+            }
+            QueuedSignalTarget::Thread { .. } => {}
+        }
     }
-
     Ok(())
 }
 
@@ -163,19 +235,28 @@ pub(crate) fn kill_all<S: Signal + Clone>(signal: Option<S>, ctx: &Context) -> R
 }
 
 fn kill_process(process: &Process, signal: Option<Box<dyn Signal>>, ctx: &Context) -> Result<()> {
+    check_process_signal_perm(process, signal.as_ref().map(|signal| signal.num()), ctx)?;
+
+    if let Some(signal) = signal {
+        process.enqueue_signal(signal);
+    }
+
+    Ok(())
+}
+
+fn check_process_signal_perm(
+    process: &Process,
+    signum: Option<SigNum>,
+    ctx: &Context,
+) -> Result<()> {
     if process.pid_in(ctx.process.pid_namespace()) == 0 {
         return_errno_with_message!(
             Errno::ESRCH,
             "the target process is outside the PID namespace"
         );
     }
-    let signum = signal.as_ref().map(|signal| signal.num());
     let target_main_thread = process.main_thread();
     check_signal_perm(target_main_thread.as_posix_thread().unwrap(), ctx, signum)?;
-
-    if let Some(signal) = signal {
-        process.enqueue_signal(signal);
-    }
 
     Ok(())
 }

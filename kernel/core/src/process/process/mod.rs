@@ -16,7 +16,7 @@ use super::{
     signal::{
         sig_disposition::SigDispositions,
         sig_num::{AtomicSigNum, SigNum},
-        signals::Signal,
+        signals::{Signal, raw::RawSignal},
     },
     status::ProcessStatus,
     task_set::TaskSet,
@@ -687,6 +687,30 @@ impl Process {
 
         self.sig_queues.enqueue(signal);
 
+        self.wake_signal_waiters();
+    }
+
+    pub(crate) fn enqueue_queued_signal(
+        &self,
+        thread: &super::posix_thread::PosixThread,
+        signal: RawSignal,
+    ) -> Result<()> {
+        if !self.prepare_signal(&signal) {
+            return Ok(());
+        }
+        if !thread.has_signal_blocked(signal.num())
+            && !thread.is_traced()
+            && self.sig_dispositions.lock().lock().will_ignore(&signal)
+        {
+            return Ok(());
+        }
+        let scope = super::signal::pending_quota::PendingScope::new(self, thread);
+        self.sig_queues.enqueue_queued(signal, scope)?;
+        self.wake_signal_waiters();
+        Ok(())
+    }
+
+    fn wake_signal_waiters(&self) {
         for task in self.tasks.lock().as_slice() {
             let posix_thread = task.as_posix_thread().unwrap();
             // FIXME: This behavior differs a bit from Linux.

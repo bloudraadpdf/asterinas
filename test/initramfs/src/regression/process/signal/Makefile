@@ -2,9 +2,11 @@
 
 ifneq ($(HOST_PLATFORM), x86_64-linux)
 C_OBJS_FILTER += \
+	cpu_contract \
 	fault_signals \
 	sigaltstack \
 	signal_fpu \
+	signal_xstate \
 	signal_rflags_df \
 	signal_test \
 	sigtrap

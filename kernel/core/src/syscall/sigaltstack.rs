@@ -20,16 +20,15 @@ pub(super) fn sys_sigaltstack(
     );
 
     let sp = user_ctx.stack_pointer();
-
-    if old_sig_stack_addr != 0 {
-        let stack = get_old_stack(ctx, sp)?;
-        ctx.user_space()
-            .write_val::<stack_t>(old_sig_stack_addr, &stack)?;
-    }
-
-    if sig_stack_addr != 0 {
-        let stack = ctx.user_space().read_val::<stack_t>(sig_stack_addr)?;
+    let stack = (sig_stack_addr != 0)
+        .then(|| ctx.user_space().read_val::<stack_t>(sig_stack_addr))
+        .transpose()?;
+    let old_stack = get_old_stack(ctx, sp)?;
+    if let Some(stack) = stack {
         set_new_stack(stack, ctx, sp)?;
+    }
+    if old_sig_stack_addr != 0 {
+        ctx.user_space().write_val(old_sig_stack_addr, &old_stack)?;
     }
 
     Ok(SyscallReturn::Return(0))

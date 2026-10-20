@@ -47,6 +47,7 @@ pub(crate) struct PosixThreadBuilder {
     sig_queues: SigQueues,
     sched_policy: SchedPolicy,
     supp_user_context: SuppUserContext,
+    rseq_registration: Option<super::rseq::Registration>,
     user_ns: Option<Arc<UserNamespace>>,
     ns_proxy: Option<Arc<NsProxy>>,
     sem_undo: Option<SemUndoOwner>,
@@ -76,11 +77,20 @@ impl PosixThreadBuilder {
             sig_queues: SigQueues::new(),
             sched_policy: SchedPolicy::Fair(Nice::default()),
             supp_user_context: SuppUserContext::new(),
+            rseq_registration: None,
             user_ns: None,
             ns_proxy: None,
             sem_undo: None,
             default_timer_slack_ns: 50_000, // 50 usec default slack
         }
+    }
+
+    pub(crate) fn rseq_registration(
+        mut self,
+        registration: Option<super::rseq::Registration>,
+    ) -> Self {
+        self.rseq_registration = registration;
+        self
     }
 
     pub(crate) fn process(mut self, process: Weak<Process>) -> Self {
@@ -172,6 +182,7 @@ impl PosixThreadBuilder {
             sig_queues,
             sched_policy,
             supp_user_context,
+            rseq_registration,
             user_ns,
             ns_proxy,
             default_timer_slack_ns,
@@ -240,6 +251,7 @@ impl PosixThreadBuilder {
                 sem_undo,
             );
 
+            thread_local.rseq().inherit(rseq_registration);
             task::create_new_user_task(user_ctx, thread, thread_local)
         })
     }

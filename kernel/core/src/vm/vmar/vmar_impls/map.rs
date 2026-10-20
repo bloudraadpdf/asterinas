@@ -71,6 +71,7 @@ impl Vmar {
 /// Options for creating a new mapping.
 pub(crate) struct VmarMapOptions<'a, 'b> {
     shm: Option<PendingAttachment>,
+    grows_down: bool,
     parent: &'a Vmar,
     mappable: Option<MappableObject<'b>>,
     file: Option<Arc<dyn FileLike>>,
@@ -124,6 +125,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
     fn new(parent: &'a Vmar, size: usize, perms: VmPerms) -> Self {
         Self {
             shm: None,
+            grows_down: false,
             parent,
             mappable: None,
             file: None,
@@ -225,6 +227,11 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         self
     }
 
+    pub(crate) fn grows_down(mut self) -> Self {
+        self.grows_down = true;
+        self
+    }
+
     /// Sets the mapping to handle surrounding pages when handling page fault.
     pub(crate) fn handle_page_faults_around(mut self) -> Self {
         self.handle_page_faults_around = true;
@@ -272,6 +279,7 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
         self.check_options()?;
         let Self {
             shm,
+            grows_down,
             parent,
             mappable,
             file,
@@ -299,6 +307,23 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
                     Err(err)
                 }
             })?;
+
+        if perms.contains(VmPerms::WRITE) && !map_mode.is_shared() && !grows_down {
+            let replaced = match offset {
+                VmarMapOffset::FixedReplace(base) => inner
+                    .vm_mappings
+                    .find(&(base..base + map_size))
+                    .filter(|mapping| mapping.is_data())
+                    .map(|mapping| {
+                        let start = base.max(mapping.map_to_addr());
+                        let end = (base + map_size).min(mapping.map_end());
+                        end - start
+                    })
+                    .sum(),
+                _ => 0,
+            };
+            inner.check_extra_data_fits_rlimit(map_size - replaced)?;
+        }
 
         // Allocates a free region.
         debug!(
@@ -392,7 +417,8 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
             map_mode,
             handle_page_faults_around,
             perms | may_perms,
-        );
+        )
+        .with_grows_down(grows_down);
 
         if let Some(pending) = shm {
             vm_mapping.install_shm(pending.publish());

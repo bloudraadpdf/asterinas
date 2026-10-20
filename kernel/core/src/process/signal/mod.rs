@@ -4,6 +4,7 @@ pub(crate) mod c_types;
 pub(crate) mod constants;
 mod pause;
 mod pending;
+pub(crate) mod pending_quota;
 mod poll;
 pub(crate) mod sig_action;
 pub(crate) mod sig_disposition;
@@ -12,10 +13,12 @@ pub(crate) mod sig_num;
 pub(crate) mod sig_queues;
 mod sig_stack;
 pub(crate) mod signals;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod x86_fpu;
 
 use align_ext::AlignExt;
 use c_types::{siginfo_t, ucontext_t};
-use constants::SIGSEGV;
+use constants::{SI_KERNEL, SIGSEGV};
 use ostd::{
     arch::cpu::context::{FpuContext, UserContext},
     mm::VmIo,
@@ -29,6 +32,7 @@ use sig_action::{SigAction, SigActionFlags, SigDefaultAction};
 use sig_mask::SigMask;
 use sig_num::SigNum;
 pub(crate) use sig_stack::{SigStack, SigStackFlags, SigStackStatus};
+use signals::{Signal, fault::FaultSignal};
 
 use super::posix_thread::ThreadLocal;
 use crate::{
@@ -44,6 +48,20 @@ use crate::{
 pub(crate) trait SignalContext {
     /// Sets signal handler arguments.
     fn set_arguments(&mut self, sig_num: SigNum, siginfo_addr: usize, ucontext_addr: usize);
+}
+
+pub(crate) fn force_fault_signal(signal: FaultSignal, ctx: &Context) {
+    let number = signal.num();
+    let mask = ctx.posix_thread.sig_mask();
+    {
+        let dispositions = ctx.process.sig_dispositions().lock();
+        let mut dispositions = dispositions.lock();
+        if mask.contains(number) || matches!(dispositions.get(number), SigAction::Ign) {
+            dispositions.set_default(number);
+        }
+    }
+    ctx.set_sig_mask(mask - number);
+    ctx.posix_thread.enqueue_signal(Box::new(signal));
 }
 
 fn restart_interrupted_syscall(user_ctx: &mut UserContext, original: usize) {
@@ -67,6 +85,18 @@ fn restart_interrupted_syscall(user_ctx: &mut UserContext, original: usize) {
 
 /// Handles a pending signal for the current process.
 pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
+    while matches!(
+        handle_one_pending_signal(user_ctx, ctx),
+        SignalProgress::ForcedFault
+    ) {}
+}
+
+enum SignalProgress {
+    Complete,
+    ForcedFault,
+}
+
+fn handle_one_pending_signal(user_ctx: &mut UserContext, ctx: &Context) -> SignalProgress {
     // FIXME: This function may handle or suppress only one signal per trap, delaying
     // other pending unmasked signals until the next trap. Consider a looped scan.
     //
@@ -98,7 +128,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
     } else {
         // Fast path: There is no signal mask to restore.
         if restore_sig_mask.is_none() {
-            return;
+            return SignalProgress::Complete;
         }
         // Restore the signal mask first.
         let _ = restore_sig_mask.take();
@@ -107,7 +137,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
         if let Some(dequeued_signal) = dequeue_pending_signal(ctx) {
             dequeued_signal
         } else {
-            return;
+            return SignalProgress::Complete;
         }
     };
 
@@ -126,12 +156,12 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                     //
                     // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/kernel/signal.c#L2770>
                     requeue_signal(ctx, dequeued);
-                    return;
+                    return SignalProgress::Complete;
                 }
 
                 (dequeued.unwrap(), get_sig_action(ctx, sig_num))
             }
-            PtraceStopResult::Continued(None) => return,
+            PtraceStopResult::Continued(None) => return SignalProgress::Complete,
             PtraceStopResult::Interrupted => {
                 match dequeue_pending_signal(ctx) {
                     Some((dequeued, action)) if dequeued.num() == SIGKILL => {
@@ -139,7 +169,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                     }
                     // SIGKILL was consumed by a sibling thread; this thread will be
                     // terminated as part of the process-wide exit.
-                    _ => return,
+                    _ => return SignalProgress::Complete,
                 }
             }
             PtraceStopResult::NotTraced(dequeued) => (dequeued.unwrap().unwrap(), sig_action),
@@ -186,13 +216,15 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 signal.to_info(ctx.process.pid_namespace()),
             ) {
                 debug!("Failed to handle user signal: {:?}", e);
-                // If signal handling fails, the process should be terminated with SIGSEGV.
-                // Reference: <https://elixir.bootlin.com/linux/v6.13/source/kernel/signal.c#L3082>
-                //
-                // FIXME: Linux converts a signal-frame setup failure into a SIGSEGV delivery,
-                // instead of killing the process directly.
-                // This can be observed in LTP test `signal06`.
-                do_exit_group(TermStatus::Killed(SIGSEGV), ctx, user_ctx);
+                if sig_num == SIGSEGV {
+                    ctx.process
+                        .sig_dispositions()
+                        .lock()
+                        .lock()
+                        .set_default(SIGSEGV);
+                }
+                force_fault_signal(FaultSignal::new(SIGSEGV, SI_KERNEL, None), ctx);
+                return SignalProgress::ForcedFault;
             }
         }
         SigAction::Dfl if !ctx.process.accepts_signal(signal.as_ref()) => {
@@ -220,6 +252,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
             }
         }
     }
+    SignalProgress::Complete
 }
 
 /// A guard that restores the signal mask on drop.
@@ -307,6 +340,7 @@ pub(crate) fn handle_user_signal(
     user_ctx: &mut UserContext,
     sig_info: siginfo_t,
 ) -> Result<()> {
+    ctx.thread_local.rseq().before_signal(user_ctx, ctx)?;
     debug!("sig_num = {:?}, signame = {}", sig_num, sig_num.sig_name());
     debug!("handler_addr = 0x{:x}", handler_addr);
     debug!("flags = {:?}", flags);
@@ -322,10 +356,16 @@ pub(crate) fn handle_user_signal(
         mask += sig_num;
     }
 
-    // Block signals in `mask` while running the signal handler.
     let old_mask = ctx.posix_thread.sig_mask();
     let mask_to_restore = mask_to_restore.unwrap_or(old_mask);
-    ctx.set_sig_mask(old_mask + mask);
+
+    let alternate_bounds = {
+        let stack = ctx.thread_local.sig_stack().borrow();
+        let selected =
+            use_alternate_signal_stack(flags, ctx.thread_local, user_ctx.stack_pointer()).is_some();
+        (selected || stack.contains(user_ctx.stack_pointer()))
+            .then(|| stack.base()..stack.base() + stack.size())
+    };
 
     // Set up the signal stack.
     let mut stack_pointer = if let Some(sp) =
@@ -339,7 +379,8 @@ pub(crate) fn handle_user_signal(
         // Prevent corruption of the current stack. Architectures like as x86-64 have red zones
         // that can be accessed below the SP. Signal handlers must not write to these zones.
         // FIXME: This may not be necessary for all architectures.
-        sp.wrapping_sub(128)
+        sp.checked_sub(128)
+            .ok_or_else(|| Error::new(Errno::EFAULT))?
     };
 
     let user_space = ctx.user_space();
@@ -349,23 +390,13 @@ pub(crate) fn handle_user_signal(
         stack_pointer,
         size_of::<siginfo_t>(),
         align_of::<siginfo_t>(),
-    );
-    user_space.write_val(stack_pointer as _, &sig_info)?;
+    )?;
     let siginfo_addr = stack_pointer;
 
     // 2. Write `ucontext_t`.
 
     // Save the current signal stack information.
-    let uc_stack = {
-        let mut sig_stack = ctx.thread_local.sig_stack().borrow_mut();
-        let stack = stack_t::from(&*sig_stack);
-
-        if sig_stack.flags().contains(SigStackFlags::SS_AUTODISARM) {
-            sig_stack.reset();
-        }
-
-        stack
-    };
+    let uc_stack = stack_t::from(&*ctx.thread_local.sig_stack().borrow());
 
     let mut ucontext = ucontext_t {
         uc_stack,
@@ -376,11 +407,14 @@ pub(crate) fn handle_user_signal(
     // Save general-purpose registers.
     ucontext.uc_mcontext.copy_user_regs_from(user_ctx);
 
-    // Clone and reset the FPU context.
     let supp = ctx.thread_local.supp_user_context();
     let fpu_context = supp.fpu().get();
+    #[cfg(target_arch = "x86_64")]
+    let image = x86_fpu::encode(&fpu_context)?;
+    #[cfg(target_arch = "x86_64")]
+    let fpu_context_bytes = image.bytes.as_slice();
+    #[cfg(not(target_arch = "x86_64"))]
     let fpu_context_bytes = fpu_context.as_bytes();
-    supp.fpu().set(FpuContext::new());
 
     cfg_select! {
         target_arch = "x86_64" => {
@@ -388,18 +422,17 @@ pub(crate) fn handle_user_signal(
             // user program can use the XSAVE/XRSTOR instructions at that address,
             // if necessary.
             let fpu_context_addr =
-                alloc_aligned_in_user_stack(stack_pointer, fpu_context_bytes.len(), 64);
+                alloc_aligned_in_user_stack(stack_pointer, fpu_context_bytes.len(), 64)?;
             let ucontext_addr = alloc_aligned_in_user_stack(
                 fpu_context_addr,
                 size_of::<ucontext_t>(),
                 align_of::<ucontext_t>(),
-            );
+            )?;
             ucontext
                 .uc_mcontext
                 .set_fpu_context_addr(fpu_context_addr as _);
 
-            const UC_FP_XSTATE: u64 = 1 << 0;
-            ucontext.uc_flags = UC_FP_XSTATE;
+            ucontext.uc_flags = image.flags;
         }
         target_arch = "riscv64" => {
             // Reference:
@@ -412,7 +445,7 @@ pub(crate) fn handle_user_signal(
                 stack_pointer,
                 size_of::<ucontext_t>() + FP_STATE_SIZE,
                 align_of::<ucontext_t>(),
-            );
+            )?;
             let fpu_context_addr = (ucontext_addr as usize) + size_of::<ucontext_t>();
         }
         any(target_arch = "loongarch64", target_arch = "aarch64") => {
@@ -422,7 +455,7 @@ pub(crate) fn handle_user_signal(
                 stack_pointer,
                 size_of::<ucontext_t>() + fpu_context_bytes.len(),
                 align_of::<ucontext_t>(),
-            );
+            )?;
             // FIXME: Set the FPU flags
             // Example: <https://elixir.bootlin.com/linux/v6.15.7/source/arch/loongarch/kernel/signal.c#L805>
             let fpu_context_addr = (ucontext_addr as usize) + size_of::<ucontext_t>();
@@ -431,9 +464,6 @@ pub(crate) fn handle_user_signal(
             compile_error!("unsupported target");
         }
     }
-
-    user_space.write_bytes(fpu_context_addr as _, fpu_context_bytes)?;
-    user_space.write_val(ucontext_addr as _, &ucontext)?;
 
     // Align the SP to the 16-byte boundary. This is required by the x86-64 ABI before calling any
     // function.
@@ -457,9 +487,24 @@ pub(crate) fn handle_user_signal(
             }
         }
     };
+    #[cfg(target_arch = "x86_64")]
+    let final_sp = stack_pointer
+        .checked_sub(size_of::<u64>() as u64)
+        .ok_or_else(|| Error::new(Errno::EFAULT))?;
+    #[cfg(not(target_arch = "x86_64"))]
+    let final_sp = stack_pointer;
+    if let Some(bounds) = alternate_bounds
+        && (final_sp < bounds.start as u64 || final_sp >= bounds.end as u64)
+    {
+        return_errno!(Errno::EFAULT);
+    }
+    user_space.write_val(siginfo_addr as _, &sig_info)?;
+    user_space.write_bytes(fpu_context_addr as _, fpu_context_bytes)?;
+    user_space.write_val(ucontext_addr as _, &ucontext)?;
+
     cfg_select! {
         target_arch = "x86_64" => {
-            stack_pointer = write_u64_to_user_stack(stack_pointer, retaddr as u64)?;
+            user_space.write_val(final_sp as _, &(retaddr as u64))?;
         }
         any(target_arch = "riscv64", target_arch = "loongarch64") => {
             user_ctx.set_ra(retaddr);
@@ -471,6 +516,19 @@ pub(crate) fn handle_user_signal(
             compile_error!("unsupported target");
         }
     }
+
+    stack_pointer = final_sp;
+    ctx.set_sig_mask(old_mask + mask);
+    if ctx
+        .thread_local
+        .sig_stack()
+        .borrow()
+        .flags()
+        .contains(SigStackFlags::SS_AUTODISARM)
+    {
+        ctx.thread_local.sig_stack().borrow_mut().reset();
+    }
+    supp.fpu().set(FpuContext::new());
 
     debug!(
         "Before calling to signal handler: stack_pointer = 0x{:x}",
@@ -523,19 +581,11 @@ fn use_alternate_signal_stack(
     Some(sig_stack.base() + sig_stack.size())
 }
 
-/// Writes a `u64` integer to the user's stack.
-#[cfg(target_arch = "x86_64")]
-fn write_u64_to_user_stack(sp: u64, value: u64) -> Result<u64> {
-    use crate::context::current_userspace;
-
-    let sp = sp.wrapping_sub(size_of::<u64>() as u64);
-    current_userspace!().write_val(sp as _, &value)?;
-    Ok(sp)
-}
-
 /// Allocates `size` bytes on the user's stack.
 ///
 /// The allocation will be aligned to `align`, which must be a power of two.
-fn alloc_aligned_in_user_stack(sp: u64, size: usize, align: usize) -> u64 {
-    sp.wrapping_sub(size as u64).align_down(align as u64)
+fn alloc_aligned_in_user_stack(sp: u64, size: usize, align: usize) -> Result<u64> {
+    sp.checked_sub(size as u64)
+        .map(|address| address.align_down(align as u64))
+        .ok_or_else(|| Error::new(Errno::EFAULT))
 }

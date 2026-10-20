@@ -100,6 +100,11 @@ fn exit_internal(
 
     release_futexes(ctx);
 
+    posix_thread.sig_queues().shutdown();
+    if is_last_thread {
+        posix_process.sig_queues().shutdown();
+    }
+
     drop_after!(thread_local.take_sem_undo());
 
     wake_clear_ctid(thread_local);

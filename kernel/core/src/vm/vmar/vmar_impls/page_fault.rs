@@ -2,8 +2,14 @@
 
 #![short_vis_path::add(vmar)]
 
-use super::{Interval, RssDelta, Vmar};
-use crate::{prelude::*, vm::perms::VmPerms};
+use align_ext::AlignExt;
+
+use super::{Interval, RssDelta, VMAR_LOWEST_ADDR, Vmar, VmarInner};
+use crate::{
+    prelude::*,
+    process::{Process, ResourceType},
+    vm::perms::VmPerms,
+};
 
 impl Vmar {
     pub(crate) fn handle_page_fault(&self, page_fault_info: &PageFaultInfo) -> Result<()> {
@@ -17,10 +23,56 @@ impl Vmar {
             return vm_mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta);
         }
 
-        return_errno_with_message!(
-            Errno::EACCES,
-            "no VM mappings contain the page fault address"
-        );
+        drop(inner);
+        let mut inner = self.inner.write();
+        let base = if let Some(mapping) = inner.vm_mappings.find_one(&address) {
+            mapping.map_to_addr()
+        } else {
+            self.grow_stack(&mut inner, address)?
+        };
+        let mapping = inner.vm_mappings.find_one(&base).unwrap();
+        let mut rss_delta = RssDelta::new(self);
+        mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta)
+    }
+
+    fn grow_stack(&self, inner: &mut VmarInner, address: Vaddr) -> Result<Vaddr> {
+        let start = address.align_down(PAGE_SIZE);
+        if start < VMAR_LOWEST_ADDR {
+            return_errno!(Errno::EFAULT);
+        }
+        let mapping = inner
+            .vm_mappings
+            .find_next(&start)
+            .ok_or_else(|| Error::new(Errno::EFAULT))?;
+        if !mapping.can_grow_down_to(start) {
+            return_errno!(Errno::EFAULT);
+        }
+        let base = mapping.map_to_addr();
+        let extra = base - start;
+        if let Some(process) = Process::current() {
+            let limit = process
+                .resource_limits()
+                .get_rlimit(ResourceType::RLIMIT_STACK)
+                .get_cur();
+            if (mapping.map_end() - start) as u64 > limit {
+                return_errno!(Errno::EFAULT);
+            }
+        }
+        inner
+            .check_extra_size_fits_rlimit(extra)
+            .map_err(|_| Error::new(Errno::EFAULT))?;
+        if let Some(previous) = inner.vm_mappings.find_prev(&base)
+            && (previous.map_end() > start
+                || (!previous.grows_down()
+                    && previous.perms().intersects(VmPerms::ALL_PERMS)
+                    && start - previous.map_end() < 256 * PAGE_SIZE))
+        {
+            return_errno!(Errno::EFAULT);
+        }
+        let (mapping, mut removed) = inner.remove(&base).unwrap();
+        let mut rmap = removed.remove(self, base);
+        inner.insert_without_try_merge(self, mapping.grow_down(start), rmap.as_deref_mut());
+        Ok(start)
     }
 }
 

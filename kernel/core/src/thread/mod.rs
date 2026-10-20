@@ -38,6 +38,7 @@ fn pre_schedule_handler(irq_guard: &DisabledLocalIrqGuard) {
     };
 
     thread_local.supp_user_context().before_schedule(irq_guard);
+    thread_local.rseq().notify();
 }
 
 fn post_schedule_handler() {

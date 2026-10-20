@@ -114,7 +114,11 @@ fn create_init_task(
         let program_to_load =
             ProgramToLoad::from_executable(executable, &path_resolver, argv, envp)?;
         let vmar = process.lock_vmar();
-        let elf_load_info = program_to_load.load_to_vmar(vmar.unwrap(), &path_resolver)?;
+        let elf_load_info = program_to_load.load_to_vmar(
+            vmar.unwrap(),
+            &path_resolver,
+            credentials.prepare_exec_cred(None, None, None)?.identity(),
+        )?;
 
         (elf_load_info, executable_abs_path)
     };

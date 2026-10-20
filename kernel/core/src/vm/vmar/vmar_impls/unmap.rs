@@ -53,6 +53,8 @@ impl Vmar {
             }
         }
         inner.vm_mappings.clear();
+        inner.total_vm = 0;
+        inner.data_vm = 0;
 
         // Keep `inner` locked to avoid race conditions.
         let preempt_guard = disable_preempt();

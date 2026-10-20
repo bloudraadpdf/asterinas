@@ -4,7 +4,7 @@ mod access_alien;
 mod fork;
 pub(super) mod map;
 pub(super) mod page_fault;
-mod protect;
+pub(super) mod protect;
 mod query;
 pub(super) mod remap;
 mod unmap;
@@ -200,6 +200,7 @@ struct VmarInner {
     vm_mappings: IntervalSet<Vaddr, VmMapping>,
     /// The total mapped memory in bytes.
     total_vm: usize,
+    data_vm: usize,
 }
 
 impl VmarInner {
@@ -207,6 +208,7 @@ impl VmarInner {
         Self {
             vm_mappings: IntervalSet::new(),
             total_vm: 0,
+            data_vm: 0,
         }
     }
 
@@ -226,6 +228,21 @@ impl VmarInner {
 
         if rlimit_as.saturating_sub(self.total_vm as u64) < expand_size as u64 {
             return_errno_with_message!(Errno::ENOMEM, "the address space size limit is reached");
+        }
+        Ok(())
+    }
+
+    fn check_extra_data_fits_rlimit(&self, extra: usize) -> Result<()> {
+        let Some(process) = Process::current() else {
+            return Ok(());
+        };
+        let limit = process
+            .resource_limits()
+            .get_rlimit(ResourceType::RLIMIT_DATA)
+            .get_raw_rlimit();
+        let maximum = if limit.cur == 0 { limit.max } else { limit.cur };
+        if self.data_vm as u64 + extra as u64 > maximum {
+            return_errno_with_message!(Errno::ENOMEM, "the data size limit is reached");
         }
         Ok(())
     }
@@ -258,6 +275,9 @@ impl VmarInner {
         rmap: Option<&mut Rmap>,
     ) {
         self.total_vm += vm_mapping.map_size();
+        if vm_mapping.is_data() {
+            self.data_vm += vm_mapping.map_size();
+        }
 
         if let Some(rmap) = rmap {
             rmap.insert(
@@ -286,6 +306,9 @@ impl VmarInner {
         mut rmap: Option<&mut Rmap>,
     ) {
         self.total_vm += vm_mapping.map_size();
+        if vm_mapping.is_data() {
+            self.data_vm += vm_mapping.map_size();
+        }
         let mut vm_mapping = vm_mapping;
         let addr = vm_mapping.map_to_addr();
 
@@ -328,6 +351,9 @@ impl VmarInner {
     fn remove(&mut self, key: &Vaddr) -> Option<(VmMapping, RmapToRemove)> {
         let vm_mapping = self.vm_mappings.remove(key)?;
         self.total_vm -= vm_mapping.map_size();
+        if vm_mapping.is_data() {
+            self.data_vm -= vm_mapping.map_size();
+        }
 
         let rmap_to_remove = RmapToRemove::new(vm_mapping.vmo_for_rmap().cloned());
 
@@ -550,6 +576,9 @@ impl VmarInner {
         }
 
         self.check_extra_size_fits_rlimit(new_size - old_size)?;
+        if last_mapping.is_data() {
+            self.check_extra_data_fits_rlimit(new_size - old_size)?;
+        }
         let (last_mapping, mut rmap_to_remove) = self.remove(&last_mapping_addr).unwrap();
         let mut rmap = rmap_to_remove.remove(vmar, last_mapping_addr);
         let last_mapping = last_mapping.enlarge(new_size - old_size);

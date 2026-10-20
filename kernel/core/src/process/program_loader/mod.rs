@@ -17,6 +17,7 @@ use crate::{
         },
     },
     prelude::*,
+    process::credentials::ExecIdentity,
     vm::vmar::Vmar,
 };
 
@@ -206,16 +207,9 @@ impl ProgramToLoad {
         self,
         vmar: &Vmar,
         path_resolver: &PathResolver,
+        identity: ExecIdentity,
     ) -> Result<ElfLoadInfo> {
-        load_elf_to_vmar(
-            vmar,
-            self.elf_file,
-            path_resolver,
-            self.elf_headers,
-            self.execfn,
-            self.argv,
-            self.envp,
-        )
+        load_elf_to_vmar(vmar, path_resolver, self, identity)
     }
 }
 

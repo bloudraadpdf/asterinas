@@ -15,18 +15,17 @@ pub(super) fn sys_rt_sigprocmask(
     sigset_size: usize,
     ctx: &Context,
 ) -> Result<SyscallReturn> {
-    let mask_op = MaskOp::try_from(how)?;
     debug!(
         "mask op = {:?}, set_ptr = 0x{:x}, oldset_ptr = 0x{:x}, sigset_size = {}",
-        mask_op, set_ptr, oldset_ptr, sigset_size
+        how, set_ptr, oldset_ptr, sigset_size
     );
 
-    do_rt_sigprocmask(mask_op, set_ptr, oldset_ptr, sigset_size, ctx)?;
+    do_rt_sigprocmask(how, set_ptr, oldset_ptr, sigset_size, ctx)?;
     Ok(SyscallReturn::Return(0))
 }
 
 fn do_rt_sigprocmask(
-    mask_op: MaskOp,
+    how: u32,
     set_ptr: Vaddr,
     oldset_ptr: Vaddr,
     sigset_size: usize,
@@ -44,13 +43,9 @@ fn do_rt_sigprocmask(
         )
     };
 
-    if oldset_ptr.addr() != 0 {
-        oldset_ptr.write_val(&old_sig_mask_value)?;
-    }
-
     if set_ptr.addr() != 0 {
         let read_mask = set_ptr.read_val()?;
-        match mask_op {
+        match MaskOp::try_from(how)? {
             MaskOp::Block => {
                 ctx.set_sig_mask(old_sig_mask_value + read_mask);
             }
@@ -61,6 +56,9 @@ fn do_rt_sigprocmask(
                 ctx.set_sig_mask(read_mask);
             }
         }
+    }
+    if oldset_ptr.addr() != 0 {
+        oldset_ptr.write_val(&old_sig_mask_value)?;
     }
     debug!("new set = {:x?}", ctx.posix_thread.sig_mask());
 

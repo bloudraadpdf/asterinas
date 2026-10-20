@@ -8,6 +8,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use x86::msr;
 use x86_64::{
     PrivilegeLevel, VirtAddr,
     instructions::tables::{lgdt, load_tss},
@@ -20,6 +21,7 @@ use x86_64::{
 };
 
 use crate::{
+    arch::cpu::cpuid::cpuid,
     const_assert,
     cpu::{
         CpuId,
@@ -42,7 +44,21 @@ use crate::{
 /// accidentally load a wrong GDT and TSS that actually belongs to another CPU.
 pub(super) unsafe fn init_on_cpu() {
     // No races because the caller guarantees that no preemption can occur.
-    let gdt = GDT.get_on_cpu(CpuId::current_racy());
+    let cpu_id = CpuId::current_racy();
+    let cpu = u32::from(cpu_id);
+    assert!(cpu < 1 << 12);
+    let gdt = GDT.get_on_cpu(cpu_id);
+    // Linux vDSO reads the CPU/node encoding with LSL on selector 0x7b.
+    gdt.cpunode
+        .store(0x0040_f500_0000_0000 | u64::from(cpu), Ordering::Relaxed);
+    let rdtscp = cpuid(0x8000_0001, 0).is_some_and(|features| features.edx & (1 << 27) != 0);
+    let rdpid = cpuid(7, 0).is_some_and(|features| features.ecx & (1 << 22) != 0);
+    if rdtscp || rdpid {
+        const MSR_TSC_AUX: u32 = 0xc000_0103;
+        // SAFETY: These CPU features provide MSR_TSC_AUX. The boot CPU is pinned,
+        // and its CPU number fits the defined low 32 bits; the NUMA node is zero.
+        unsafe { msr::wrmsr(MSR_TSC_AUX, u64::from(cpu)) };
+    }
 
     let tss_ptr = UnsafeCell::raw_get(LOCAL_TSS.as_ptr());
 
@@ -126,7 +142,11 @@ struct Gdt {
     // Mutable part: They are initialized at runtime; the LTR instruction will set the BUSY bit.
     tss0: AtomicU64,
     tss1: AtomicU64,
+    _linux_reserved: [u64; 6],
+    cpunode: AtomicU64,
 }
+
+const_assert!(offset_of!(Gdt, cpunode) == 15 * size_of::<u64>());
 
 cpu_local! {
     static GDT: Gdt = Gdt {
@@ -139,6 +159,8 @@ cpu_local! {
         ucode64: UCODE64,
         tss0: AtomicU64::new(0), // To be set in `init_on_cpu`.
         tss1: AtomicU64::new(0), // To be set in `init_on_cpu`.
+        _linux_reserved: [0; 6],
+        cpunode: AtomicU64::new(0),
     };
 }
 

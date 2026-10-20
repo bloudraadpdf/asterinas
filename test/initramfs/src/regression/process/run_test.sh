@@ -70,13 +70,18 @@ fi
 ./signal/parent_death_signal
 ./signal/pidfd_send_signal
 ./signal/rt_sigpending
+./signal/signal_inputs
+./signal/signal_queue
+./signal/signal_sync
 ./signal/signal_fd
 ./signal/signal_test2
 
 if [ "$(uname -m)" = "x86_64" ]; then
+    ./signal/cpu_contract
     ./signal/fault_signals
     ./signal/sigaltstack
     ./signal/signal_fpu
+    ./signal/signal_xstate
     ./signal/signal_rflags_df
     ./signal/signal_test
     ./signal/sigtrap
@@ -89,3 +94,6 @@ fi
 ./pidfd_getfd
 ./pid_namespace
 ./wait4
+
+./signal/rseq_lifetime
+./signal/aux_exec
