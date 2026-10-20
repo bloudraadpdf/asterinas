@@ -22,6 +22,11 @@ The OSDK lockfile patch adds `--lockfile PATH` for the generated kernel crate.
 OSDK copies that file into the generated crate and invokes Cargo with `--locked`.
 Tokoloshe owns this lockfile separately from the OSDK builder lockfile. A stale
 kernel lockfile fails before compilation. The OSDK unit tests and Clippy pass.
+The CLI resolves lockfile paths before entering the generated crate and
+rejects missing files and directories without a panic. Installation reads
+the input before writing the generated lockfile, so equal paths and hard links
+cannot truncate the input. Regression tests cover invalid paths, stale locks
+and aliased input and output files.
 
 The descriptor patch honours `MSG_CMSG_CLOEXEC` when `recvmsg` installs
 `SCM_RIGHTS` descriptors. Flags are set during file-table insertion and returned
@@ -78,15 +83,6 @@ Route netlink replies identify the recipient in their outer header and keep
 the original request header in errors. Unsupported link mutations still fail.
 The consumer verifies the preconfigured loopback state through `RTM_GETLINK`;
 Linux continues to initialise its loopback interface through `RTM_NEWLINK`.
-
-TCP wildcard binds select the sole configured interface for the address family.
-Multiple eligible interfaces fail with `EOPNOTSUPP` until namespace-wide binding
-is implemented. Listener lookup includes the wildcard address, smoltcp receives
-an unspecified listen endpoint, and accepted sockets retain the packet's local
-address. Wildcard and specific binds conflict on overlapping ports. UDP binding
-keeps its previous interface selection. AMD64 Firecracker checks pass loopback
-and wildcard byte exchange, listener and accepted addresses, and conflicting
-binds in both orders.
 
 The optional AMD64 `pvh_boot_only` feature loads the kernel at 16 MiB and
 removes Linux and Multiboot entry points and headers. Builds without this

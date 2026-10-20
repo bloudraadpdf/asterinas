@@ -376,6 +376,7 @@ pub struct CargoArgs {
     #[arg(
         long,
         help = "Build the generated kernel crate with this lockfile",
+        value_parser = parse_kernel_lockfile,
         global = true
     )]
     pub lockfile: Option<PathBuf>,
@@ -386,6 +387,16 @@ pub struct CargoArgs {
         global = true
     )]
     pub override_configs: Vec<String>,
+}
+
+fn parse_kernel_lockfile(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value)
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve kernel lockfile {value}: {error}"))?;
+    if !path.is_file() {
+        return Err(format!("kernel lockfile {value} is not a regular file"));
+    }
+    Ok(path)
 }
 
 impl CargoArgs {

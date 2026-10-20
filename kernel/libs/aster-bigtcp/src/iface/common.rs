@@ -23,7 +23,7 @@ use super::{
     Iface, InterfaceName,
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
-    port::{BindPortConfig, addresses_overlap},
+    port::BindPortConfig,
     time::get_network_timestamp,
 };
 use crate::{
@@ -452,17 +452,6 @@ impl PortTable {
             port,
             protocol,
         };
-        if !config.is_backlog()
-            && self.used_ports.iter().any(|(bound, state)| {
-                bound.port == port
-                    && bound.protocol == protocol
-                    && bound.addr != addr
-                    && addresses_overlap(IpAddress::Ipv6(bound.addr.0), IpAddress::Ipv6(addr.0))
-                    && !(config_can_reuse && state.can_reuse())
-            })
-        {
-            return Err(BindError::InUse);
-        }
         let entry = self.used_ports.entry(key);
         match entry {
             Entry::Occupied(mut occupied) => {
@@ -522,11 +511,7 @@ impl PortTable {
         let mut port = start_port;
         loop {
             key.port = port;
-            if !self.used_ports.keys().any(|bound| {
-                bound.port == key.port
-                    && bound.protocol == protocol
-                    && addresses_overlap(IpAddress::Ipv6(bound.addr.0), IpAddress::Ipv6(addr.0))
-            }) {
+            if !self.used_ports.contains_key(&key) {
                 self.next_ephemeral_port = next_ephemeral_port_after(port);
                 return Some(port);
             }

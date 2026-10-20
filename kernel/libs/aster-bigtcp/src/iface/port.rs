@@ -66,22 +66,3 @@ impl BindPortConfig {
         self.addr
     }
 }
-
-pub(crate) fn addresses_overlap(left: IpAddress, right: IpAddress) -> bool {
-    let normalize = |address| match address {
-        IpAddress::Ipv6(address) => address
-            .to_ipv4_mapped()
-            .map(IpAddress::Ipv4)
-            .unwrap_or(IpAddress::Ipv6(address)),
-        address => address,
-    };
-    match (normalize(left), normalize(right)) {
-        (IpAddress::Ipv4(left), IpAddress::Ipv4(right)) => {
-            left == right || left.is_unspecified() || right.is_unspecified()
-        }
-        (IpAddress::Ipv6(left), IpAddress::Ipv6(right)) => {
-            left == right || left.is_unspecified() || right.is_unspecified()
-        }
-        _ => false,
-    }
-}

@@ -70,11 +70,7 @@ impl Build {
     pub fn apply_common_args(&mut self, common_args: &CommonArgs) {
         let build_args = &common_args.build_args;
         if let Some(lockfile) = &build_args.lockfile {
-            self.lockfile = Some(
-                lockfile
-                    .canonicalize()
-                    .expect("cannot resolve kernel lockfile"),
-            );
+            self.lockfile = Some(lockfile.clone());
         }
         if let Some(profile) = build_args.profile() {
             self.profile.clone_from(&profile);

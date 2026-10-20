@@ -270,7 +270,14 @@ fn build_kernel_elf(
     command.env("RUSTFLAGS", rustflags.join(" "));
     command.arg("build");
     if let Some(lockfile) = &build.lockfile {
-        std::fs::copy(lockfile, "Cargo.lock").expect("cannot install kernel lockfile");
+        if let Err(error) = install_kernel_lockfile(lockfile, std::path::Path::new("Cargo.lock")) {
+            error_msg!(
+                "cannot install kernel lockfile {}: {}",
+                lockfile.display(),
+                error
+            );
+            process::exit(Errno::BuildCrate as _);
+        }
         command.arg("--locked");
     }
     command.arg("--features").arg(build.features.join(" "));
@@ -324,6 +331,14 @@ fn build_kernel_elf(
     )
 }
 
+fn install_kernel_lockfile(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let contents = std::fs::read(source)?;
+    std::fs::write(destination, contents)
+}
+
 fn get_last_modified_time(path: impl AsRef<Path>) -> SystemTime {
     if path.as_ref().is_file() {
         return path.as_ref().metadata().unwrap().modified().unwrap();
@@ -343,4 +358,23 @@ fn get_last_modified_time(path: impl AsRef<Path>) -> SystemTime {
         }
     }
     last_modified
+}
+
+#[cfg(test)]
+mod lockfile_tests {
+    use super::install_kernel_lockfile;
+
+    #[test]
+    fn installing_a_lockfile_preserves_input_when_paths_alias() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let source = directory.path().join("pinned.lock");
+        let destination = directory.path().join("Cargo.lock");
+        let contents = b"version = 4\n";
+        std::fs::write(&source, contents).unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        install_kernel_lockfile(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), contents);
+        install_kernel_lockfile(&source, &source).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), contents);
+    }
 }

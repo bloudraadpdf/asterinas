@@ -87,6 +87,15 @@ The following command can be used to discover the available options for each com
 cargo osdk help <COMMAND>
 ```
 
+### Pinned kernel dependencies
+
+OSDK builds kernels through a generated crate with its own `Cargo.lock`.
+Use `cargo osdk build --lockfile PATH` to install a saved lockfile in that crate
+and require Cargo's `--locked` dependency resolution.
+Relative paths are resolved from the directory where OSDK is invoked.
+Missing files, directories and lockfiles that require an update fail the build.
+The input lockfile is not changed.
+
 ### The OSDK manifest
 
 `cargo-osdk` utilizes a configuration file named `OSDK.toml` to define its precise behavior. To learn more about the manifest specification, please refer to [the book](https://asterinas.github.io/book/osdk/reference/manifest.html).
