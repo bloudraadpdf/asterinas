@@ -3,7 +3,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
     fmt::Debug,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
 use aster_block::{
@@ -128,7 +128,7 @@ impl aster_block::BlockDevice for BlockDevice {
         BlockDeviceMeta {
             is_read_only: self.device.features.contains(BlockFeatures::RO),
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
-            nr_sectors: self.device.config_manager.capacity_sectors(),
+            nr_sectors: self.device.capacity_sectors.load(Ordering::Relaxed),
         }
     }
 
@@ -148,6 +148,7 @@ impl aster_block::BlockDevice for BlockDevice {
 #[derive(Debug)]
 struct DeviceInner {
     config_manager: ConfigManager<VirtioBlockConfig>,
+    capacity_sectors: AtomicUsize,
     features: BlockFeatures,
     queue: SpinLock<VirtQueue>,
     transport: SpinLock<DeviceTransport>,
@@ -206,6 +207,7 @@ impl DeviceInner {
         }
 
         let device = Arc::new(Self {
+            capacity_sectors: AtomicUsize::new(config.capacity as usize),
             config_manager,
             features,
             queue: SpinLock::new(queue),
@@ -292,6 +294,8 @@ impl DeviceInner {
     }
 
     fn handle_config_change(&self) {
+        self.capacity_sectors
+            .store(self.config_manager.capacity_sectors(), Ordering::Relaxed);
         info!("block device config space change");
     }
 
