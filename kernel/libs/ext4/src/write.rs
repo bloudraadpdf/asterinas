@@ -541,6 +541,11 @@ impl<D: ReadAt> Transaction<'_, D> {
                 * u64::from(geometry.inode_size());
         let block = offset / u64::from(geometry.block_size());
         let within = (offset % u64::from(geometry.block_size())) as usize;
+        let mut previous = vec![0; inode.raw.len()];
+        self.view().device.read_exact_at(offset, &mut previous)?;
+        if previous == inode.raw {
+            return Ok(());
+        }
         let raw = self.metadata_block(block)?;
         raw[within..within + inode.raw.len()].copy_from_slice(&inode.raw);
         Ok(())
