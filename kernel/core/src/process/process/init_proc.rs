@@ -52,10 +52,15 @@ fn create_init_process(
     argv: Vec<CString>,
     envp: Vec<CString>,
 ) -> Result<Arc<Process>> {
+    let executable_abs_path = path_resolver.make_abs_path(&executable_path).into_string();
+    let shebang_script_path =
+        ShebangScriptPath::Accessible(CString::new(executable_abs_path.clone()).unwrap());
+    let executable = UndetectedExecutable::open(executable_path, shebang_script_path)?;
+    let program_to_load = ProgramToLoad::from_executable(executable, &path_resolver, argv, envp)?;
     let fs = ThreadFsInfo::new(path_resolver);
 
     let pid_allocation = PidNamespace::get_init_singleton().allocate()?;
-    let vmar = VmarHandle::new(ProcessVm::new(executable_path.clone()));
+    let vmar = VmarHandle::new(ProcessVm::new(program_to_load.elf_path().clone()));
     let resource_limits = new_resource_limits_for_init();
     let nice = Nice::default();
     let oom_score_adj = 0;
@@ -72,7 +77,7 @@ fn create_init_process(
         user_ns,
     );
 
-    let init_task = create_init_task(&init_proc, fs, vmar, executable_path, argv, envp)?;
+    let init_task = create_init_task(&init_proc, fs, vmar, program_to_load, executable_abs_path)?;
     init_proc.tasks().lock().insert(init_task).unwrap();
     pid_allocation.publish(&init_proc);
 
@@ -93,34 +98,23 @@ fn set_bootstrap_session_and_group(process: &Arc<Process>) {
     pid_table.insert_process(process.pid(), process);
 }
 
-/// Creates the init task from the given executable path.
 fn create_init_task(
     process: &Arc<Process>,
     fs: ThreadFsInfo,
     vmar: VmarHandle,
-    executable_path: Path,
-    argv: Vec<CString>,
-    envp: Vec<CString>,
+    program_to_load: ProgramToLoad,
+    executable_abs_path: String,
 ) -> Result<Arc<Task>> {
     let credentials = Credentials::new_root();
 
-    let (elf_load_info, executable_abs_path) = {
+    let elf_load_info = {
         let path_resolver = fs.resolver().read();
-        let executable_abs_path = path_resolver.make_abs_path(&executable_path).into_string();
-        let shebang_script_path =
-            ShebangScriptPath::Accessible(CString::new(executable_abs_path.clone()).unwrap());
-
-        let executable = UndetectedExecutable::open(executable_path.clone(), shebang_script_path)?;
-        let program_to_load =
-            ProgramToLoad::from_executable(executable, &path_resolver, argv, envp)?;
         let vmar = process.lock_vmar();
-        let elf_load_info = program_to_load.load_to_vmar(
+        program_to_load.load_to_vmar(
             vmar.unwrap(),
             &path_resolver,
             credentials.prepare_exec_cred(None, None, None)?.identity(),
-        )?;
-
-        (elf_load_info, executable_abs_path)
+        )?
     };
 
     let mut user_ctx = UserContext::default();
