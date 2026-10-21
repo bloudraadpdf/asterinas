@@ -402,6 +402,7 @@ impl<D: ReadAt> Transaction<'_, D> {
             bitmap[bit / 8] &= !mask;
             self.metadata.remove(&block);
         }
+        self.freed_blocks = true;
         self.store_block_bitmap(number, group, bitmap, count as i32)
     }
 

@@ -134,6 +134,8 @@ pub struct WritableExt4<D> {
     health: Health,
     reserved: Reserved,
     allocation_cursor: u64,
+    pending_metadata: BTreeMap<u64, Vec<u8>>,
+    pending_frees: bool,
 }
 
 impl<D: WriteAt> WritableExt4<D> {
@@ -177,6 +179,8 @@ impl<D: WriteAt> WritableExt4<D> {
             health: Health::Ready,
             reserved,
             allocation_cursor,
+            pending_metadata: BTreeMap::new(),
+            pending_frees: false,
         })
     }
 
@@ -267,9 +271,12 @@ impl<D: WriteAt> WritableExt4<D> {
     /// Flushes the device and reports failure without reopening a sealed session.
     pub fn sync(&mut self) -> Result<()> {
         self.check_health()?;
-        if let Err(error) = self.fs.device.flush() {
+        if let Err(error) = self
+            .commit_pending()
+            .and_then(|()| self.fs.device.flush().map_err(Into::into))
+        {
             self.health = Health::Failed;
-            return Err(error.into());
+            return Err(error);
         }
         Ok(())
     }
@@ -313,6 +320,7 @@ impl<D: WriteAt> WritableExt4<D> {
             limits: self.limits,
             metadata: BTreeMap::new(),
             data: BTreeMap::new(),
+            freed_blocks: false,
         };
         let result = update_fn(&mut transaction)?;
         if let Some(state) = &self.journal {
@@ -327,11 +335,16 @@ impl<D: WriteAt> WritableExt4<D> {
                     .check_target(&self.fs, &state.journal, *block, raw)?;
             }
         }
+        let freed_blocks = transaction.freed_blocks;
         let geometry = transaction.geometry;
         let allocation_cursor = transaction.allocation_cursor;
         let metadata = transaction.metadata;
         let data = transaction.data;
-        let mut persist_fn = || -> Result<()> {
+        let persist_fn = || -> Result<()> {
+            // Commit frees before data can overwrite blocks still owned on disk.
+            if self.pending_frees && !data.is_empty() {
+                self.commit_pending()?;
+            }
             for (block, raw) in &data {
                 self.fs
                     .device
@@ -340,19 +353,26 @@ impl<D: WriteAt> WritableExt4<D> {
             if !data.is_empty() {
                 self.fs.device.flush()?;
             }
-            if let Some(state) = &mut self.journal {
-                state
-                    .journal
-                    .commit(&self.fs.device, &self.fs.geometry, &state.map, &metadata)?;
-            } else {
-                for (block, raw) in &metadata {
+            let limit = (self.fs.device.metadata_writeback_limit()
+                / self.fs.geometry.block_size() as usize)
+                .min(self.limits.metadata_blocks);
+            if self.journal.is_some() && limit != 0 {
+                let added = metadata
+                    .keys()
+                    .filter(|block| !self.pending_metadata.contains_key(block))
+                    .count();
+                if self.pending_metadata.len() + added > limit {
+                    self.commit_pending()?;
+                }
+                for (block, raw) in metadata {
                     self.fs
                         .device
-                        .write_all_at(self.fs.geometry.block_offset(*block)?, raw)?;
+                        .stage_metadata(self.fs.geometry.block_offset(block)?, &raw)?;
+                    self.pending_metadata.insert(block, raw);
                 }
-                if !metadata.is_empty() {
-                    self.fs.device.flush()?;
-                }
+                self.pending_frees |= freed_blocks;
+            } else {
+                self.commit_metadata(&metadata)?;
             }
             Ok(())
         };
@@ -364,6 +384,36 @@ impl<D: WriteAt> WritableExt4<D> {
         self.allocation_cursor = allocation_cursor;
         Ok(result)
     }
+
+    fn commit_metadata(&mut self, metadata: &BTreeMap<u64, Vec<u8>>) -> Result<()> {
+        if let Some(state) = &mut self.journal {
+            state
+                .journal
+                .commit(&self.fs.device, &self.fs.geometry, &state.map, metadata)?;
+        } else {
+            for (block, raw) in metadata {
+                self.fs
+                    .device
+                    .write_all_at(self.fs.geometry.block_offset(*block)?, raw)?;
+            }
+            if !metadata.is_empty() {
+                self.fs.device.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_pending(&mut self) -> Result<()> {
+        if self.pending_metadata.is_empty() {
+            return Ok(());
+        }
+        self.fs.device.flush()?;
+        let metadata = core::mem::take(&mut self.pending_metadata);
+        self.commit_metadata(&metadata)?;
+        self.fs.device.clear_staged_metadata();
+        self.pending_frees = false;
+        Ok(())
+    }
 }
 
 struct Transaction<'a, D> {
@@ -374,6 +424,7 @@ struct Transaction<'a, D> {
     limits: MountLimits,
     metadata: BTreeMap<u64, Vec<u8>>,
     data: BTreeMap<u64, Vec<u8>>,
+    freed_blocks: bool,
 }
 
 struct Overlay<'a, D> {

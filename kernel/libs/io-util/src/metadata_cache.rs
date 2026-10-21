@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Bounded, write-through caching for explicitly identified filesystem metadata.
+//! Bounded metadata caching with journal-owned staging.
 
 extern crate alloc;
 
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec,
     vec::Vec,
 };
@@ -20,12 +20,14 @@ const CAPACITY: usize = 256;
 struct Blocks {
     data: BTreeMap<u64, Vec<u8>>,
     order: VecDeque<u64>,
+    staged: BTreeSet<u64>,
 }
 
 /// Caches at most 1 MiB of metadata; ordinary reads bypass the cache.
 pub struct MetadataCache<D> {
     device: D,
     blocks: RefCell<Blocks>,
+    writeback: bool,
 }
 
 impl<D> MetadataCache<D> {
@@ -34,6 +36,33 @@ impl<D> MetadataCache<D> {
         Self {
             device,
             blocks: RefCell::new(Blocks::default()),
+            writeback: false,
+        }
+    }
+
+    /// Allows the journal owner to stage up to 256 KiB of metadata.
+    pub fn writeback(device: D) -> Self {
+        Self {
+            writeback: true,
+            ..Self::new(device)
+        }
+    }
+
+    fn update_cached(&self, offset: u64, buffer: &[u8]) {
+        if buffer.is_empty() {
+            return;
+        }
+        let end = offset + buffer.len() as u64;
+        let mut blocks = self.blocks.borrow_mut();
+        for (&block, data) in blocks
+            .data
+            .range_mut(offset / BLOCK_SIZE as u64..=(end - 1) / BLOCK_SIZE as u64)
+        {
+            let start = block * BLOCK_SIZE as u64;
+            let first = offset.max(start);
+            let last = end.min(start + data.len() as u64);
+            data[(first - start) as usize..(last - start) as usize]
+                .copy_from_slice(&buffer[(first - offset) as usize..(last - offset) as usize]);
         }
     }
 }
@@ -66,8 +95,15 @@ impl<D: ReadAt> ReadAt for MetadataCache<D> {
                 let mut data = vec![0; size];
                 self.device.read_exact_at(start, &mut data)?;
                 if blocks.data.len() == CAPACITY {
-                    let oldest = blocks.order.pop_front().unwrap();
-                    blocks.data.remove(&oldest);
+                    loop {
+                        let oldest = blocks.order.pop_front().unwrap();
+                        if blocks.staged.contains(&oldest) {
+                            blocks.order.push_back(oldest);
+                        } else {
+                            blocks.data.remove(&oldest);
+                            break;
+                        }
+                    }
                 }
                 blocks.data.insert(block, data);
                 blocks.order.push_back(block);
@@ -82,12 +118,46 @@ impl<D: ReadAt> ReadAt for MetadataCache<D> {
 }
 
 impl<D: WriteAt> WriteAt for MetadataCache<D> {
+    fn metadata_writeback_limit(&self) -> usize {
+        if self.writeback { 64 * BLOCK_SIZE } else { 0 }
+    }
+
+    fn stage_metadata(&self, offset: u64, buffer: &[u8]) -> Result<(), IoError> {
+        let end = offset
+            .checked_add(buffer.len() as u64)
+            .filter(|end| *end <= self.len())
+            .ok_or(IoError::Failed)?;
+        if !self.writeback || buffer.is_empty() {
+            return Err(IoError::Unsupported);
+        }
+        let range = offset / BLOCK_SIZE as u64..=(end - 1) / BLOCK_SIZE as u64;
+        {
+            let blocks = self.blocks.borrow();
+            let added = range
+                .clone()
+                .filter(|block| !blocks.staged.contains(block))
+                .count();
+            if blocks.staged.len() + added > 64 {
+                return Err(IoError::OutOfSpace);
+            }
+        }
+        let mut previous = vec![0; buffer.len()];
+        self.read_metadata_exact_at(offset, &mut previous)?;
+        self.update_cached(offset, buffer);
+        self.blocks.borrow_mut().staged.extend(range);
+        Ok(())
+    }
+
+    fn clear_staged_metadata(&self) {
+        self.blocks.borrow_mut().staged.clear();
+    }
+
     fn is_read_only(&self) -> bool {
         self.device.is_read_only()
     }
 
     fn write_all_at(&self, offset: u64, buffer: &[u8]) -> Result<(), IoError> {
-        let end = offset
+        offset
             .checked_add(buffer.len() as u64)
             .filter(|end| *end <= self.len())
             .ok_or(IoError::Failed)?;
@@ -95,20 +165,7 @@ impl<D: WriteAt> WriteAt for MetadataCache<D> {
             *self.blocks.borrow_mut() = Blocks::default();
             return Err(error);
         }
-        if buffer.is_empty() {
-            return Ok(());
-        }
-        let mut blocks = self.blocks.borrow_mut();
-        for (&block, data) in blocks
-            .data
-            .range_mut(offset / BLOCK_SIZE as u64..=(end - 1) / BLOCK_SIZE as u64)
-        {
-            let start = block * BLOCK_SIZE as u64;
-            let first = offset.max(start);
-            let last = end.min(start + data.len() as u64);
-            data[(first - start) as usize..(last - start) as usize]
-                .copy_from_slice(&buffer[(first - offset) as usize..(last - offset) as usize]);
-        }
+        self.update_cached(offset, buffer);
         Ok(())
     }
 

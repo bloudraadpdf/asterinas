@@ -53,7 +53,12 @@ impl Ext4Inode {
         result.map(|()| 0)
     }
 
-    pub(super) fn write_direct_at(&self, offset: usize, reader: &mut VmReader) -> Result<usize> {
+    pub(super) fn write_direct_at(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        flags: StatusFlags,
+    ) -> Result<usize> {
         if reader.remain() == 0 {
             return Ok(0);
         }
@@ -116,6 +121,9 @@ impl Ext4Inode {
         if written != 0 {
             // Page faults can repopulate the cache while block I/O is in progress.
             cache.invalidate_range(start..offset + written)?;
+            if flags.intersects(StatusFlags::O_SYNC | StatusFlags::O_DSYNC) {
+                self.volume().lock().sync()?;
+            }
             return Ok(written);
         }
         result.map(|()| 0)

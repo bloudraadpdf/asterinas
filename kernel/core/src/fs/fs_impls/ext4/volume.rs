@@ -40,7 +40,7 @@ pub(super) struct Volume {
 impl Volume {
     pub(super) fn open(device: BlockIo, flags: FsFlags) -> Result<Self> {
         let device_id = device.0.id();
-        let device = MetadataCache::new(device);
+        let device = MetadataCache::writeback(device);
         let disk = if flags.contains(FsFlags::RDONLY) {
             DiskVolume::ReadOnly(Box::new(Reader::open(device).map_err(map_error)?))
         } else {

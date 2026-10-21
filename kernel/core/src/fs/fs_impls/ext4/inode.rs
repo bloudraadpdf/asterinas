@@ -242,7 +242,7 @@ impl FileOps for Ext4Inode {
     fn write_at(&self, offset: usize, reader: &mut VmReader, flags: StatusFlags) -> Result<usize> {
         self.check_regular_io()?;
         if flags.contains(StatusFlags::O_DIRECT) {
-            return self.write_direct_at(offset, reader);
+            return self.write_direct_at(offset, reader, flags);
         }
         let mut cache = self.cache.lock();
         {
@@ -293,6 +293,10 @@ impl FileOps for Ext4Inode {
                 metadata.last_modify_at = now;
                 metadata.last_meta_change_at = now;
             });
+            if flags.intersects(StatusFlags::O_SYNC | StatusFlags::O_DSYNC) {
+                cache.flush_range(offset..offset + written)?;
+                self.volume().lock().sync()?;
+            }
             return Ok(written);
         }
         result.map(|()| 0)

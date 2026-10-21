@@ -29,6 +29,19 @@ pub trait ReadAt {
 
 /// A byte-addressed device with explicit write and flush results.
 pub trait WriteAt: ReadAt {
+    /// Maximum bytes of metadata that can be staged without publishing disk writes.
+    fn metadata_writeback_limit(&self) -> usize {
+        0
+    }
+
+    /// Makes metadata visible to readers until the journal commits it.
+    fn stage_metadata(&self, _offset: u64, _buffer: &[u8]) -> Result<(), IoError> {
+        Err(IoError::Unsupported)
+    }
+
+    /// Releases staged metadata after a durable journal checkpoint.
+    fn clear_staged_metadata(&self) {}
+
     /// Returns whether the device rejects writes.
     fn is_read_only(&self) -> bool;
 
