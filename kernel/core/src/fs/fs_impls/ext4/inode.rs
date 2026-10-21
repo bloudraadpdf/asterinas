@@ -30,6 +30,7 @@ use crate::{
     vm::page_cache::{LockedCachePage, PageCache, PageCacheBackend, Vmo},
 };
 
+mod direct;
 mod xattr;
 
 enum Removal {
@@ -75,15 +76,12 @@ impl Ext4Inode {
         }))
     }
 
-    fn check_regular_io(&self, flags: StatusFlags) -> Result<()> {
+    fn check_regular_io(&self) -> Result<()> {
         if self.type_ == InodeType::Dir {
             return_errno!(Errno::EISDIR);
         }
         if self.type_ != InodeType::File {
             return_errno!(Errno::EINVAL);
-        }
-        if flags.contains(StatusFlags::O_DIRECT) {
-            return_errno!(Errno::EOPNOTSUPP);
         }
         Ok(())
     }
@@ -218,7 +216,10 @@ impl Drop for Ext4Inode {
 
 impl FileOps for Ext4Inode {
     fn read_at(&self, offset: usize, writer: &mut VmWriter, flags: StatusFlags) -> Result<usize> {
-        self.check_regular_io(flags)?;
+        self.check_regular_io()?;
+        if flags.contains(StatusFlags::O_DIRECT) {
+            return self.read_direct_at(offset, writer);
+        }
         let cache = self.cache.lock();
         self.volume().lock().reader()?;
         let count = writer.avail().min(self.size().saturating_sub(offset));
@@ -237,7 +238,10 @@ impl FileOps for Ext4Inode {
     }
 
     fn write_at(&self, offset: usize, reader: &mut VmReader, flags: StatusFlags) -> Result<usize> {
-        self.check_regular_io(flags)?;
+        self.check_regular_io()?;
+        if flags.contains(StatusFlags::O_DIRECT) {
+            return self.write_direct_at(offset, reader);
+        }
         let mut cache = self.cache.lock();
         {
             let mut volume = self.volume().lock();

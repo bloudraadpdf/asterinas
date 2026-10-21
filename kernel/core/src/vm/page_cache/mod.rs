@@ -300,6 +300,16 @@ impl PageCache {
         Ok(())
     }
 
+    /// Grows capacity after the backend has initialised the newly exposed bytes.
+    #[cfg(feature = "fs_ext4")]
+    pub(crate) fn grow_initialized(&mut self, new_file_size: usize) {
+        assert!(self.0.backend.is_some() && self.0.flags.contains(VmoFlags::RESIZABLE));
+        let _pages = self.0.pages.lock();
+        self.0
+            .size
+            .fetch_max(new_file_size.align_up(PAGE_SIZE), Ordering::Release);
+    }
+
     /// Allocates anonymous pages without changing the accessible file size.
     pub(crate) fn preallocate(&mut self, range: Range<usize>) -> Result<()> {
         self.check_anonymous_range(&range)?;
@@ -363,7 +373,7 @@ impl PageCache {
     /// This is the standard preparation step before issuing direct I/O that must
     /// bypass the page cache. It uses the same locking requirements as
     /// [`PageCache::flush_range`] and [`PageCache::evict_range`].
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     pub(crate) fn invalidate_range(&self, range: Range<usize>) -> Result<()> {
         let Some(vmo) = self.0.as_backed_vmo() else {
             return Ok(());

@@ -315,7 +315,7 @@ impl VmoMapMode {
 #[derive(Clone, Copy)]
 pub(super) enum EvictMode {
     Reclaim,
-    #[cfg(any(feature = "filesystems_extra", ktest))]
+    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
     Invalidate,
 }
 
@@ -1224,7 +1224,7 @@ impl<'a> BackedVmo<'a> {
                 let locked_page = page.lock();
                 match mode {
                     EvictMode::Reclaim if !locked_page.try_evict_unpinned() => return None,
-                    #[cfg(any(feature = "filesystems_extra", ktest))]
+                    #[cfg(any(feature = "filesystems_extra", feature = "fs_ext4", ktest))]
                     EvictMode::Invalidate => {
                         if !locked_page.state().is_up_to_date() {
                             return None;

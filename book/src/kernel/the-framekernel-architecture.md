@@ -100,8 +100,11 @@ allocated while open references exist; final release reclaims them without
 writing discarded cached data. Write/flush failures retain the recovery marker
 and remain observable through sync. Metadata times that cannot be represented
 by the kernel are rejected. Remounting with different flags requires unmounting
-first. Direct I/O, preallocation, hole punching and rename exchange are not
-implemented. Append-only file writes and mappings of immutable or append-only
+first. Direct I/O bypasses cached file pages through the block reader and
+journalled writer. File offsets, buffer addresses and transfer lengths must
+align to 512 bytes. Direct reads flush dirty pages; direct writes flush and
+invalidate overlapping pages. Preallocation, hole punching and rename exchange
+are not implemented. Append-only file writes and mappings of immutable or append-only
 files are rejected. The library retains its on-disk format and resource limits.
 
 Block BIOs retain the existing 16 MiB cache capacity per direction while mapping
