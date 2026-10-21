@@ -47,38 +47,46 @@ impl SparseIdAlloc {
     ///
     /// Returns `None` when every ID in `[min, max]` is in use.
     pub fn alloc(&mut self) -> Option<u32> {
-        let first = self
-            .allocated_runs
-            .first_key_value()
-            .map(|(&start, &end)| (start, end));
+        self.alloc_from(self.min)
+    }
 
-        match first {
-            // The range's lowest IDs are allocated; the smallest free ID
-            // is just past the first run (unless the range is exhausted).
-            Some((start, end)) if start == self.min => {
+    /// Allocates at or above `start`, wrapping once to the range minimum.
+    /// A start outside the configured range selects the range minimum.
+    pub fn alloc_from(&mut self, start: u32) -> Option<u32> {
+        let start = if (self.min..=self.max).contains(&start) {
+            start
+        } else {
+            self.min
+        };
+        let previous = self.allocated_runs.range(..=start).next_back();
+        let id = match previous {
+            Some((_, &end)) if end >= start => {
                 if end == self.max {
-                    return None;
+                    return if start == self.min {
+                        None
+                    } else {
+                        self.alloc()
+                    };
                 }
-
-                let id = end + 1;
-                let new_end = id
-                    .checked_add(1)
-                    .and_then(|next_start| self.allocated_runs.remove(&next_start))
-                    .unwrap_or(id);
-                *self.allocated_runs.get_mut(&start).unwrap() = new_end;
-                Some(id)
+                end + 1
             }
-            // `min` itself is free.
-            _ => {
-                let id = self.min;
-                let end = id
-                    .checked_add(1)
-                    .and_then(|next_start| self.allocated_runs.remove(&next_start))
-                    .unwrap_or(id);
-                self.allocated_runs.insert(id, end);
-                Some(id)
-            }
+            _ => start,
+        };
+        let end = id
+            .checked_add(1)
+            .and_then(|next| self.allocated_runs.remove(&next))
+            .unwrap_or(id);
+        let previous = self
+            .allocated_runs
+            .range(..id)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        if let Some((start, _)) = previous.filter(|&(_, end)| end.checked_add(1) == Some(id)) {
+            *self.allocated_runs.get_mut(&start).unwrap() = end;
+        } else {
+            self.allocated_runs.insert(id, end);
         }
+        Some(id)
     }
 
     /// Releases the given ID.

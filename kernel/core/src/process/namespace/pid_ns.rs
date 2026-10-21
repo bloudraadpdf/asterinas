@@ -144,7 +144,8 @@ impl PidNamespace {
                     id
                 })
             } else {
-                inner.ids.alloc()
+                let next = inner.last_pid + 1;
+                inner.ids.alloc_from(next)
             };
             let Some(id) = id else {
                 return Some(Err(Error::with_message(
