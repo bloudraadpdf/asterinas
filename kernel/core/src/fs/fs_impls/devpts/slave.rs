@@ -10,6 +10,7 @@ use crate::{
     device::{Device, PtySlave},
     fs::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, mkmod},
+        utils::current_fs_ids,
         vfs::{
             file_system::FileSystem,
             inode::{Extension, FileOps, Inode, Metadata},
@@ -34,13 +35,14 @@ pub(crate) struct PtySlaveInode {
 impl PtySlaveInode {
     pub(crate) fn new(device: Arc<PtySlave>, fs: Weak<DevPts>) -> Arc<Self> {
         let devpts = fs.upgrade().unwrap();
-        let metadata = Metadata::new_device(
+        let mut metadata = Metadata::new_device(
             device.index() as u64 + FIRST_SLAVE_INO,
             mkmod!(u+rw, g+w),
             BLOCK_SIZE,
             device.as_ref(),
             devpts.sb().container_dev_id,
         );
+        (metadata.uid, metadata.gid) = current_fs_ids();
         Arc::new(Self {
             device,
             metadata: RwLock::new(metadata),
