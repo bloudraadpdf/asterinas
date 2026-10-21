@@ -290,7 +290,7 @@ impl<D: ReadAt> Transaction<'_, D> {
     ) -> Result<Inode> {
         let mut inode = Inode {
             number,
-            raw: vec![0; self.geometry.inode_size() as usize],
+            raw: smallvec::smallvec![0; self.geometry.inode_size() as usize],
         };
         let mode = metadata.permissions
             | match kind {

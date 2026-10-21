@@ -246,6 +246,7 @@ name = "aster-ext4"
 version = "0.1.0"
 dependencies = [
  "io-util",
+ "smallvec",
 ]
 
 [[package]]

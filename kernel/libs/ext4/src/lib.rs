@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::{vec, vec::Vec};
 
 use io_util::{IoError, ReadAt, checksum};
+use smallvec::{SmallVec, smallvec};
 
 mod attribute;
 mod device;
@@ -149,7 +150,7 @@ impl<D: ReadAt> Ext4<D> {
         if index >= self.geometry.groups() {
             return Err(Error::Corrupt);
         }
-        let mut raw = vec![0; self.geometry.descriptor_size() as usize];
+        let mut raw = smallvec![0; self.geometry.descriptor_size() as usize];
         let offset = self.geometry.descriptor_offset(index)?;
         self.device.read_metadata_exact_at(offset, &mut raw)?;
         if self.geometry.has_metadata_checksums() {
@@ -255,7 +256,7 @@ impl<D: ReadAt> Ext4<D> {
             return Err(Error::Corrupt);
         }
         let index = (number - 1) % self.geometry.inodes_per_group();
-        let mut raw = vec![0; self.geometry.inode_size() as usize];
+        let mut raw = smallvec![0; self.geometry.inode_size() as usize];
         let offset = self
             .geometry
             .block_offset(group.inode_table)?
@@ -312,7 +313,7 @@ pub struct Group {
     flags: u16,
     block_bitmap_checksum: u32,
     inode_bitmap_checksum: u32,
-    raw: Vec<u8>,
+    raw: SmallVec<[u8; 64]>,
 }
 
 impl Group {
@@ -340,7 +341,7 @@ impl Group {
 #[derive(Clone, Debug)]
 pub struct Inode {
     number: u32,
-    raw: Vec<u8>,
+    raw: SmallVec<[u8; 256]>,
 }
 
 impl Inode {

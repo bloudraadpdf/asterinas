@@ -6,6 +6,7 @@ license = "MPL-2.0 AND BSD-2-Clause AND RSA-MD"
 
 [dependencies]
 io-util.workspace = true
+smallvec.workspace = true
 
 [lints]
 workspace = true

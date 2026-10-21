@@ -613,7 +613,7 @@ impl<D: ReadAt> Transaction<'_, D> {
         let within = (offset % u64::from(geometry.block_size())) as usize;
         let mut previous = vec![0; inode.raw.len()];
         self.view().device.read_exact_at(offset, &mut previous)?;
-        if previous == inode.raw {
+        if previous.as_slice() == inode.raw.as_slice() {
             return Ok(());
         }
         let raw = self.metadata_block(block)?;
