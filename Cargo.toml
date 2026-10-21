@@ -331,7 +331,7 @@ codegen-units = 1
 
 [profile.release-microvm]
 inherits = "release-lto"
-opt-level = "s"
+opt-level = 3
 
 [profile.release-microvm.package.ostd]
 opt-level = 3
