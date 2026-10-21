@@ -525,7 +525,7 @@ impl<'a> PageRun<'a> {
     }
 
     /// Returns the ordered pages paired with their logical indices.
-    fn into_indexed(self) -> impl ExactSizeIterator<Item = (usize, LockedCachePage)> {
+    pub(crate) fn into_indexed(self) -> impl ExactSizeIterator<Item = (usize, LockedCachePage)> {
         let start_idx = self.start_idx;
         self.pages
             .enumerate()

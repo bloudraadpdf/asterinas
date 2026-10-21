@@ -27,7 +27,7 @@ use crate::{
     prelude::*,
     process::{Gid, Uid},
     time::clocks::RealTimeCoarseClock,
-    vm::page_cache::{LockedCachePage, PageCache, PageCacheBackend, Vmo},
+    vm::page_cache::{LockedCachePage, PageCache, PageCacheBackend, PageRun, Vmo},
 };
 
 mod direct;
@@ -261,11 +261,11 @@ impl FileOps for Ext4Inode {
             .filter(|&end| end <= isize::MAX as usize)
             .ok_or_else(|| Error::new(Errno::EFBIG))?;
         let mut written = 0;
-        let mut bytes = vec![0; PAGE_SIZE];
+        let mut bytes = vec![0; reader.remain().min(16 * PAGE_SIZE)];
         let result: Result<()> = (|| {
             while reader.remain() != 0 {
                 let position = offset + written;
-                let count = reader.remain().min(PAGE_SIZE - position % PAGE_SIZE);
+                let count = reader.remain().min(bytes.len());
                 let (copied, fault) =
                     match VmWriter::from(&mut bytes[..count]).write_fallible(reader) {
                         Ok(count) => (count, None),
@@ -650,39 +650,63 @@ impl PageCacheBackend for DataBackend {
         page: LockedCachePage,
         _batch: &mut IoBatch,
     ) -> Result<()> {
-        let result = (|| {
-            let offset = idx
-                .checked_mul(PAGE_SIZE)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let mut bytes = vec![0; PAGE_SIZE];
-            page.read_bytes(0, &mut bytes)?;
-            let mut volume = self.volume.lock();
-            let metadata = volume.metadata(self.number);
-            if offset >= metadata.size {
-                return_errno!(Errno::EINVAL);
-            }
-            let count = PAGE_SIZE.min(metadata.size - offset);
-            let changed = timestamp(metadata.last_modify_at)?;
-            volume.mutate(&[self.number], |writer| {
-                let mut copied = 0;
-                while copied < count {
-                    let written = writer.write_at(
-                        self.number,
-                        (offset + copied) as u64,
-                        &bytes[copied..count],
-                        changed,
-                    )?;
-                    if written == 0 {
-                        return Err(aster_ext4::Error::Io(io_util::IoError::Failed));
-                    }
-                    copied += written;
+        self.write_pages(core::iter::once((idx, page)))
+    }
+
+    fn write_pages_async(&self, pages: PageRun<'_>, _batch: &mut IoBatch) -> Result<()> {
+        self.write_pages(pages.into_indexed())
+    }
+}
+
+impl DataBackend {
+    fn write_pages(&self, mut pages: impl Iterator<Item = (usize, LockedCachePage)>) -> Result<()> {
+        loop {
+            let pending: Vec<_> = pages.by_ref().take(4).collect();
+            let Some((idx, _)) = pending.first() else {
+                return Ok(());
+            };
+            let result = (|| {
+                let offset = idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                let mut bytes = vec![0; pending.len() * PAGE_SIZE];
+                for ((_, page), destination) in
+                    pending.iter().zip(bytes.chunks_exact_mut(PAGE_SIZE))
+                {
+                    page.read_bytes(0, destination)?;
                 }
-                Ok(())
-            })
-        })();
-        if result.is_err() {
-            page.set_dirty();
+                let mut volume = self.volume.lock();
+                let metadata = volume.metadata(self.number);
+                if offset >= metadata.size
+                    || (pending.len() - 1) * PAGE_SIZE >= metadata.size - offset
+                {
+                    return_errno!(Errno::EINVAL);
+                }
+                let count = bytes.len().min(metadata.size - offset);
+                let changed = timestamp(metadata.last_modify_at)?;
+                volume.mutate(&[self.number], |writer| {
+                    let mut copied = 0;
+                    while copied < count {
+                        let written = writer.write_at(
+                            self.number,
+                            (offset + copied) as u64,
+                            &bytes[copied..count],
+                            changed,
+                        )?;
+                        if written == 0 {
+                            return Err(aster_ext4::Error::Io(io_util::IoError::Failed));
+                        }
+                        copied += written;
+                    }
+                    Ok(())
+                })
+            })();
+            if result.is_err() {
+                for (_, page) in pending {
+                    page.set_dirty();
+                }
+            }
+            result?;
         }
-        result
     }
 }
