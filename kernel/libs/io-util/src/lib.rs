@@ -6,6 +6,7 @@
 
 pub mod batch;
 pub mod checksum;
+pub mod metadata_cache;
 
 /// A bounded byte-addressed input device.
 pub trait ReadAt {
@@ -19,6 +20,11 @@ pub trait ReadAt {
 
     /// Reads the complete buffer or returns an I/O error.
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError>;
+
+    /// Reads filesystem metadata, allowing a backend to cache the bytes.
+    fn read_metadata_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError> {
+        self.read_exact_at(offset, buffer)
+    }
 }
 
 /// A byte-addressed device with explicit write and flush results.

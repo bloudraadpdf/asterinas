@@ -34,7 +34,10 @@ volume can be written and closed; an unclean one requires external recovery.
 Non-extent allocation/reclamation, extended HTree depth (`large_dir`),
 and preallocation/hole punching remain unsupported.
 The VFS adapter supplies inode identity, page caching,
-mount admission and writeback error retention. Unsupported
+mount admission and writeback error retention. Each VFS volume caches at most
+1 MiB of metadata through `io-util::metadata_cache::MetadataCache`. Writes
+update cached bytes; failed writes discard them. Regular-file data bypasses
+this cache, including `O_DIRECT` reads. Unsupported
 recovery retains the volume's recovery flags.
 
 The directory hash port derives from lwext4's BSD-licensed `ext4_hash.c`.

@@ -6,6 +6,7 @@ use core::time::Duration;
 
 use aster_ext4::{Ext4 as Reader, Geometry, MetadataUpdate, MountLimits, Timestamp, WritableExt4};
 use device_id::DeviceId;
+use io_util::metadata_cache::MetadataCache;
 
 use super::map_error;
 use crate::{
@@ -19,8 +20,8 @@ use crate::{
 };
 
 enum DiskVolume {
-    ReadOnly(Box<Reader<BlockIo>>),
-    Writable(Box<WritableExt4<BlockIo>>),
+    ReadOnly(Box<Reader<MetadataCache<BlockIo>>>),
+    Writable(Box<WritableExt4<MetadataCache<BlockIo>>>),
 }
 
 struct CachedInode {
@@ -39,6 +40,7 @@ pub(super) struct Volume {
 impl Volume {
     pub(super) fn open(device: BlockIo, flags: FsFlags) -> Result<Self> {
         let device_id = device.0.id();
+        let device = MetadataCache::new(device);
         let disk = if flags.contains(FsFlags::RDONLY) {
             DiskVolume::ReadOnly(Box::new(Reader::open(device).map_err(map_error)?))
         } else {
@@ -75,7 +77,7 @@ impl Volume {
         }
     }
 
-    pub(super) fn reader(&self) -> Result<&Reader<BlockIo>> {
+    pub(super) fn reader(&self) -> Result<&Reader<MetadataCache<BlockIo>>> {
         self.check()?;
         match self.disk.as_ref().unwrap() {
             DiskVolume::ReadOnly(reader) => Ok(reader),
@@ -83,7 +85,7 @@ impl Volume {
         }
     }
 
-    pub(super) fn writer(&mut self) -> Result<&mut WritableExt4<BlockIo>> {
+    pub(super) fn writer(&mut self) -> Result<&mut WritableExt4<MetadataCache<BlockIo>>> {
         self.check()?;
         match self.disk.as_mut().unwrap() {
             DiskVolume::ReadOnly(_) => Err(Error::new(Errno::EROFS)),
@@ -197,7 +199,9 @@ impl Volume {
     pub(super) fn mutate<T>(
         &mut self,
         numbers: &[u32],
-        action: impl FnOnce(&mut WritableExt4<BlockIo>) -> core::result::Result<T, aster_ext4::Error>,
+        action: impl FnOnce(
+            &mut WritableExt4<MetadataCache<BlockIo>>,
+        ) -> core::result::Result<T, aster_ext4::Error>,
     ) -> Result<T> {
         for &number in numbers {
             self.flush_times(number)?;

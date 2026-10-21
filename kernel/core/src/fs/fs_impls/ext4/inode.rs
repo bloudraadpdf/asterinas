@@ -186,7 +186,9 @@ impl Ext4Inode {
     fn create_with(
         &self,
         action: impl FnOnce(
-            &mut aster_ext4::WritableExt4<crate::fs::utils::block_io::BlockIo>,
+            &mut aster_ext4::WritableExt4<
+                io_util::metadata_cache::MetadataCache<crate::fs::utils::block_io::BlockIo>,
+            >,
         ) -> core::result::Result<aster_ext4::Inode, aster_ext4::Error>,
     ) -> Result<Arc<dyn Inode>> {
         let raw = self.volume().lock().mutate(&[self.number], action)?;

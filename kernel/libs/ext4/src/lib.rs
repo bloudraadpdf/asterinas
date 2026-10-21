@@ -110,6 +110,13 @@ impl<D: ReadAt> Ext4<D> {
     fn read_block(&self, block: u64) -> Result<Vec<u8>> {
         let mut data = vec![0; self.geometry.block_size() as usize];
         self.device
+            .read_metadata_exact_at(self.geometry.block_offset(block)?, &mut data)?;
+        Ok(data)
+    }
+
+    fn read_data_block(&self, block: u64) -> Result<Vec<u8>> {
+        let mut data = vec![0; self.geometry.block_size() as usize];
+        self.device
             .read_exact_at(self.geometry.block_offset(block)?, &mut data)?;
         Ok(data)
     }
@@ -121,7 +128,7 @@ impl<D: ReadAt> Ext4<D> {
         }
         let mut raw = vec![0; self.geometry.descriptor_size() as usize];
         let offset = self.geometry.descriptor_offset(index)?;
-        self.device.read_exact_at(offset, &mut raw)?;
+        self.device.read_metadata_exact_at(offset, &mut raw)?;
         if self.geometry.has_metadata_checksums() {
             let expected = u16_at(&raw, 30)?;
             raw[30..32].fill(0);
@@ -232,7 +239,7 @@ impl<D: ReadAt> Ext4<D> {
             .block_offset(group.inode_table)?
             .checked_add(u64::from(index) * u64::from(self.geometry.inode_size()))
             .ok_or(Error::Corrupt)?;
-        self.device.read_exact_at(offset, &mut raw)?;
+        self.device.read_metadata_exact_at(offset, &mut raw)?;
         let extra = if raw.len() > 128 {
             usize::from(u16_at(&raw, 128)?)
         } else {

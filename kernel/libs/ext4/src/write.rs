@@ -249,7 +249,7 @@ impl<D: WriteAt> WritableExt4<D> {
                 } else if new {
                     vec![0; block_size as usize]
                 } else {
-                    transaction.fs.read_block(physical)?
+                    transaction.fs.read_data_block(physical)?
                 };
                 raw[within..within + length].copy_from_slice(&data[copied..copied + length]);
                 transaction.data.insert(physical, raw);
@@ -403,7 +403,7 @@ impl<D: ReadAt> ReadAt for Overlay<'_, D> {
                 output[copied..copied + length].copy_from_slice(&raw[within..within + length]);
             } else {
                 self.device
-                    .read_exact_at(position, &mut output[copied..copied + length])?;
+                    .read_metadata_exact_at(position, &mut output[copied..copied + length])?;
             }
             copied += length;
         }
@@ -437,7 +437,7 @@ impl<D: ReadAt> Transaction<'_, D> {
             return Ok(None);
         };
         self.check_file_block(physical)?;
-        let mut raw = self.fs.read_block(physical)?;
+        let mut raw = self.fs.read_data_block(physical)?;
         raw[(position % block_size) as usize..].fill(0);
         self.data.insert(physical, raw);
         Ok(Some(physical))
