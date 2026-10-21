@@ -6,7 +6,7 @@ use core::time::Duration;
 
 use aster_block::BlockDevice;
 use device_id::DeviceId;
-use io_util::batch::IoBatch;
+use io_util::{batch::IoBatch, metadata_cache::MetadataCache};
 use ostd::mm::VmIo;
 use spin::Once;
 
@@ -44,7 +44,7 @@ fn create(ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
     let disk = ctx.resolve_block_device()?.clone();
     let device = BlockIo(disk.clone());
     device.check_magic(1024, 0xe0f5_e1e2u32.to_le_bytes())?;
-    let volume = aster_erofs::Erofs::open(device).map_err(map_error)?;
+    let volume = aster_erofs::Erofs::open(MetadataCache::new(device)).map_err(map_error)?;
     let root = volume.inode(volume.root_nid()).map_err(map_error)?;
     let volume = Arc::new(Mutex::new(volume));
     let fs = Arc::new(Erofs {
@@ -62,7 +62,7 @@ fn create(ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
 
 struct Erofs {
     flags: FsFlags,
-    volume: Arc<Mutex<aster_erofs::Erofs<BlockIo>>>,
+    volume: Arc<Mutex<aster_erofs::Erofs<MetadataCache<BlockIo>>>>,
     disk: Arc<dyn BlockDevice>,
     root: Once<Arc<ErofsInode>>,
     inodes: Mutex<BTreeMap<u64, Weak<ErofsInode>>>,
@@ -386,7 +386,7 @@ impl Inode for ErofsInode {
 }
 
 struct DataBackend {
-    volume: Arc<Mutex<aster_erofs::Erofs<BlockIo>>>,
+    volume: Arc<Mutex<aster_erofs::Erofs<MetadataCache<BlockIo>>>>,
     raw: aster_erofs::Inode,
 }
 

@@ -2,7 +2,9 @@
 
 `aster-erofs` parses an immutable image through `io_util::ReadAt`. The kernel
 adapter supplies block I/O, the VFS inode registry and demand paging. The reader
-has no OSTD dependency and forbids unsafe Rust.
+has no OSTD dependency and forbids unsafe Rust. The adapter caches up to
+1 MiB of inode, directory, compression-index and attribute metadata per volume.
+Regular-file data uses the existing page cache.
 
 The current layouts are flat, inline, full compression indexes and compact
 compression indexes. LZ4 uses one physical block per cluster. Unsupported

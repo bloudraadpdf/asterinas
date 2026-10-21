@@ -33,7 +33,7 @@ impl<D: ReadAt> Erofs<D> {
             .ok_or(Error::Corrupt)?
             & !7;
         let mut header = [0; 8];
-        self.read(header_offset, &mut header)?;
+        self.read_metadata(header_offset, &mut header)?;
         let advice = le16(&header, 4)?;
         if header[6] != 0
             || header[7] != 0
@@ -132,7 +132,7 @@ impl<D: ReadAt> Erofs<D> {
                 .and_then(|value| value.checked_add(header + 16))
                 .ok_or(Error::Corrupt)?;
             let mut entry = [0; 8];
-            self.read(offset, &mut entry)?;
+            self.read_metadata(offset, &mut entry)?;
             let kind = (le16(&entry, 0)? & 3) as u8;
             let result = Index {
                 kind,
@@ -166,7 +166,7 @@ impl<D: ReadAt> Erofs<D> {
         };
         let pack_size = count << shift;
         let mut pack = [0; 32];
-        self.read(
+        self.read_metadata(
             position / pack_size * pack_size,
             &mut pack[..pack_size as usize],
         )?;

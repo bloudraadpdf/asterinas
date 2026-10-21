@@ -167,11 +167,22 @@ impl<D: ReadAt> Erofs<D> {
         self.inodes
     }
 
-    fn read(&self, offset: u64, output: &mut [u8]) -> Result<()> {
-        if offset > self.image_size || output.len() as u64 > self.image_size - offset {
+    fn check_range(&self, offset: u64, length: usize) -> Result<()> {
+        if offset > self.image_size || length as u64 > self.image_size - offset {
             return Err(Error::Corrupt);
         }
+        Ok(())
+    }
+
+    fn read(&self, offset: u64, output: &mut [u8]) -> Result<()> {
+        self.check_range(offset, output.len())?;
         self.device.read_exact_at(offset, output)?;
+        Ok(())
+    }
+
+    fn read_metadata(&self, offset: u64, output: &mut [u8]) -> Result<()> {
+        self.check_range(offset, output.len())?;
+        self.device.read_metadata_exact_at(offset, output)?;
         Ok(())
     }
 
@@ -182,7 +193,7 @@ impl<D: ReadAt> Erofs<D> {
             .and_then(|value| value.checked_add(self.meta_offset))
             .ok_or(Error::Corrupt)?;
         let mut raw = [0; 64];
-        self.read(offset, &mut raw[..32])?;
+        self.read_metadata(offset, &mut raw[..32])?;
         let format = le16(&raw, 0)?;
         if format & !0x1f != 0 {
             return Err(Error::Unsupported);
@@ -194,7 +205,7 @@ impl<D: ReadAt> Erofs<D> {
         let extended = format & 1 != 0;
         let inode_size = if extended { 64 } else { 32 };
         if extended {
-            self.read(offset + 32, &mut raw[32..])?;
+            self.read_metadata(offset + 32, &mut raw[32..])?;
         }
         let xattrs = u64::from(le16(&raw, 2)?);
         let metadata_size = inode_size
@@ -305,7 +316,11 @@ impl<D: ReadAt> Erofs<D> {
                 if length == 0 {
                     return Err(Error::Corrupt);
                 }
-                self.read(physical, &mut output[copied..copied + length])?;
+                if inode.mode & 0xf000 == 0x4000 {
+                    self.read_metadata(physical, &mut output[copied..copied + length])?;
+                } else {
+                    self.read(physical, &mut output[copied..copied + length])?;
+                }
                 copied += length;
             }
         }

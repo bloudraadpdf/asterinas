@@ -18,7 +18,7 @@ impl<D: ReadAt> Erofs<D> {
                 if output.len() < value_size {
                     return Err(Error::BufferTooSmall);
                 }
-                self.read(value_offset, &mut output[..value_size])?;
+                self.read_metadata(value_offset, &mut output[..value_size])?;
             }
             result = Ok(value_size);
             Ok(false)
@@ -49,7 +49,7 @@ impl<D: ReadAt> Erofs<D> {
         let start = inode.offset + inode.inode_size;
         let end = inode.offset + inode.metadata_size;
         let mut header = [0; 12];
-        self.read(start, &mut header)?;
+        self.read_metadata(start, &mut header)?;
         let shared_count = u64::from(header[4]);
         let entries_start = start + 12 + shared_count * 4;
         if entries_start > end {
@@ -57,7 +57,7 @@ impl<D: ReadAt> Erofs<D> {
         }
         for index in 0..shared_count {
             let mut address = [0; 4];
-            self.read(start + 12 + index * 4, &mut address)?;
+            self.read_metadata(start + 12 + index * 4, &mut address)?;
             let offset = self.xattr_offset + u64::from(le32(&address, 0)?) * 4;
             if !self.visit_xattr(offset, self.image_size, &mut visit)?.1 {
                 return Ok(());
@@ -84,7 +84,7 @@ impl<D: ReadAt> Erofs<D> {
         if offset.checked_add(4).is_none_or(|limit| limit > end) {
             return Err(Error::Corrupt);
         }
-        self.read(offset, &mut header)?;
+        self.read_metadata(offset, &mut header)?;
         let name_size = usize::from(header[0]);
         let value_size = usize::from(le16(&header, 2)?);
         let entry_size = (4 + name_size + value_size).next_multiple_of(4) as u64;
@@ -105,7 +105,7 @@ impl<D: ReadAt> Erofs<D> {
         }
         let mut name = vec![0; prefix.len() + name_size];
         name[..prefix.len()].copy_from_slice(prefix);
-        self.read(offset + 4, &mut name[prefix.len()..])?;
+        self.read_metadata(offset + 4, &mut name[prefix.len()..])?;
         if name.contains(&0) {
             return Err(Error::Corrupt);
         }
