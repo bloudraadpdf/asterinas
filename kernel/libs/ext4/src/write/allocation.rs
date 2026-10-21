@@ -257,13 +257,11 @@ impl<D: ReadAt> Transaction<'_, D> {
             }
             bitmap
         } else {
-            let bitmap = self.view().read_block(group.inode_bitmap)?;
-            geometry.check_bitmap(
-                &bitmap,
+            self.view().read_bitmap(
+                group.inode_bitmap,
                 geometry.inodes_per_group(),
                 group.inode_bitmap_checksum,
-            )?;
-            bitmap
+            )?
         };
         if number == 0 {
             let reserved = u32_at(&geometry.raw, 0x54)?
@@ -421,13 +419,11 @@ impl<D: ReadAt> Transaction<'_, D> {
             }
             bitmap
         } else {
-            let bitmap = self.view().read_block(group.block_bitmap)?;
-            geometry.check_bitmap(
-                &bitmap,
+            self.view().read_bitmap(
+                group.block_bitmap,
                 geometry.blocks_per_group(),
                 group.block_bitmap_checksum,
-            )?;
-            bitmap
+            )?
         };
         for range in self.reserved.within(start..end) {
             for block in range {
@@ -524,9 +520,8 @@ impl<D: ReadAt> Ext4<D> {
         if group.flags & BLOCK_UNINITIALISED != 0 {
             return Err(Error::Corrupt);
         }
-        let bitmap = self.read_block(group.block_bitmap())?;
-        self.geometry.check_bitmap(
-            &bitmap,
+        let bitmap = self.read_bitmap(
+            group.block_bitmap(),
             self.geometry.blocks_per_group(),
             group.block_bitmap_checksum(),
         )?;

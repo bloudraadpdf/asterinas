@@ -437,6 +437,9 @@ impl<D: ReadAt> ReadAt for Overlay<'_, D> {
     fn len(&self) -> u64 {
         self.device.len()
     }
+    fn metadata_crc32c(&self, offset: u64, bytes: &[u8], seed: u32) -> u32 {
+        self.device.metadata_crc32c(offset, bytes, seed)
+    }
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> core::result::Result<(), IoError> {
         if offset
             .checked_add(output.len() as u64)

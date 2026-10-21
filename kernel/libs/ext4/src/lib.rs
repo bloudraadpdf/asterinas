@@ -114,6 +114,29 @@ impl<D: ReadAt> Ext4<D> {
         Ok(data)
     }
 
+    fn read_bitmap(&self, block: u64, bits: u32, expected: u32) -> Result<Vec<u8>> {
+        let raw = self.read_block(block)?;
+        if self.geometry.has_metadata_checksums() {
+            let bytes = raw
+                .get(..(bits as usize).div_ceil(8))
+                .ok_or(Error::Corrupt)?;
+            let crc = self.device.metadata_crc32c(
+                self.geometry.block_offset(block)?,
+                bytes,
+                self.geometry.checksum_seed(),
+            );
+            let mask = if self.geometry.descriptor_size() >= 64 {
+                u32::MAX
+            } else {
+                u32::from(u16::MAX)
+            };
+            if crc & mask != expected & mask {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(raw)
+    }
+
     fn read_data_block(&self, block: u64) -> Result<Vec<u8>> {
         let mut data = vec![0; self.geometry.block_size() as usize];
         self.device
@@ -216,9 +239,8 @@ impl<D: ReadAt> Ext4<D> {
         if group.flags & 1 != 0 {
             return Err(Error::Corrupt);
         }
-        let bitmap = self.read_block(group.inode_bitmap)?;
-        self.geometry.check_bitmap(
-            &bitmap,
+        let bitmap = self.read_bitmap(
+            group.inode_bitmap,
             self.geometry.inodes_per_group(),
             group.inode_bitmap_checksum,
         )?;

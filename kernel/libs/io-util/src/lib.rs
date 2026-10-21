@@ -21,6 +21,11 @@ pub trait ReadAt {
     /// Reads the complete buffer or returns an I/O error.
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError>;
 
+    /// Computes a metadata checksum, allowing reuse while cached bytes match.
+    fn metadata_crc32c(&self, _offset: u64, bytes: &[u8], seed: u32) -> u32 {
+        checksum::crc32c(seed, bytes)
+    }
+
     /// Reads filesystem metadata, allowing a backend to cache the bytes.
     fn read_metadata_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError> {
         self.read_exact_at(offset, buffer)

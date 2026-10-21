@@ -247,24 +247,6 @@ impl Geometry {
         self.read_only_compatible & RO_COMPAT_METADATA_CSUM != 0
     }
 
-    pub(super) fn check_bitmap(&self, raw: &[u8], bits: u32, expected: u32) -> Result<()> {
-        if !self.has_metadata_checksums() {
-            return Ok(());
-        }
-        let bytes = raw
-            .get(..(bits as usize).div_ceil(8))
-            .ok_or(Error::Corrupt)?;
-        let crc = checksum::crc32c(self.checksum_seed(), bytes);
-        let mask = if self.descriptor_size() >= 64 {
-            u32::MAX
-        } else {
-            u32::from(u16::MAX)
-        };
-        if crc & mask != expected & mask {
-            return Err(Error::Corrupt);
-        }
-        Ok(())
-    }
     pub fn has_directory_types(&self) -> bool {
         self.incompatible & 2 != 0
     }

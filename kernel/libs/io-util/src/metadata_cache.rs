@@ -11,14 +11,26 @@ use alloc::{
 };
 use core::cell::RefCell;
 
-use crate::{IoError, ReadAt, WriteAt};
+use crate::{IoError, ReadAt, WriteAt, checksum};
 
 const BLOCK_SIZE: usize = 4096;
 const CAPACITY: usize = 256;
 
+struct CachedBlock {
+    bytes: Vec<u8>,
+    checksum: Option<CachedChecksum>,
+}
+
+struct CachedChecksum {
+    offset: usize,
+    length: usize,
+    seed: u32,
+    value: u32,
+}
+
 #[derive(Default)]
 struct Blocks {
-    data: BTreeMap<u64, Vec<u8>>,
+    data: BTreeMap<u64, CachedBlock>,
     order: VecDeque<u64>,
     staged: BTreeSet<u64>,
 }
@@ -58,10 +70,11 @@ impl<D> MetadataCache<D> {
             .data
             .range_mut(offset / BLOCK_SIZE as u64..=(end - 1) / BLOCK_SIZE as u64)
         {
+            data.checksum = None;
             let start = block * BLOCK_SIZE as u64;
             let first = offset.max(start);
-            let last = end.min(start + data.len() as u64);
-            data[(first - start) as usize..(last - start) as usize]
+            let last = end.min(start + data.bytes.len() as u64);
+            data.bytes[(first - start) as usize..(last - start) as usize]
                 .copy_from_slice(&buffer[(first - offset) as usize..(last - offset) as usize]);
         }
     }
@@ -74,6 +87,35 @@ impl<D: ReadAt> ReadAt for MetadataCache<D> {
 
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError> {
         self.device.read_exact_at(offset, buffer)
+    }
+
+    fn metadata_crc32c(&self, offset: u64, bytes: &[u8], seed: u32) -> u32 {
+        let within = (offset % BLOCK_SIZE as u64) as usize;
+        let mut blocks = self.blocks.borrow_mut();
+        if let Some(block) = blocks.data.get_mut(&(offset / BLOCK_SIZE as u64))
+            && block
+                .bytes
+                .get(within..)
+                .and_then(|tail| tail.get(..bytes.len()))
+                == Some(bytes)
+        {
+            if let Some(cached) = &block.checksum
+                && cached.offset == within
+                && cached.length == bytes.len()
+                && cached.seed == seed
+            {
+                return cached.value;
+            }
+            let value = checksum::crc32c(seed, bytes);
+            block.checksum = Some(CachedChecksum {
+                offset: within,
+                length: bytes.len(),
+                seed,
+                value,
+            });
+            return value;
+        }
+        checksum::crc32c(seed, bytes)
     }
 
     fn read_metadata_exact_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), IoError> {
@@ -105,10 +147,16 @@ impl<D: ReadAt> ReadAt for MetadataCache<D> {
                         }
                     }
                 }
-                blocks.data.insert(block, data);
+                blocks.data.insert(
+                    block,
+                    CachedBlock {
+                        bytes: data,
+                        checksum: None,
+                    },
+                );
                 blocks.order.push_back(block);
             }
-            let data = &blocks.data[&block];
+            let data = &blocks.data[&block].bytes;
             let length = (data.len() - within).min(buffer.len() - copied);
             buffer[copied..copied + length].copy_from_slice(&data[within..within + length]);
             copied += length;
@@ -141,8 +189,10 @@ impl<D: WriteAt> WriteAt for MetadataCache<D> {
                 return Err(IoError::OutOfSpace);
             }
         }
-        let mut previous = vec![0; buffer.len()];
-        self.read_metadata_exact_at(offset, &mut previous)?;
+        let mut byte = [0; 1];
+        for block in range.clone() {
+            self.read_metadata_exact_at(block * BLOCK_SIZE as u64, &mut byte)?;
+        }
         self.update_cached(offset, buffer);
         self.blocks.borrow_mut().staged.extend(range);
         Ok(())
