@@ -2,26 +2,49 @@
 
 //! Checksums for device data and on-disk metadata.
 
-const CRC32C_TABLE: [u32; 256] = {
-    let mut table = [0; 256];
+const CRC32C_TABLE: [[u32; 256]; 8] = {
+    let mut table = [[0; 256]; 8];
     let mut index = 0;
-    while index < table.len() {
+    while index < table[0].len() {
         let mut value = index as u32;
         let mut bit = 0;
         while bit < 8 {
             value = (value >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(value & 1));
             bit += 1;
         }
-        table[index] = value;
+        table[0][index] = value;
         index += 1;
+    }
+    let mut slice = 1;
+    while slice < table.len() {
+        let mut index = 0;
+        while index < table[slice].len() {
+            let previous = table[slice - 1][index];
+            table[slice][index] = (previous >> 8) ^ table[0][(previous & 255) as usize];
+            index += 1;
+        }
+        slice += 1;
     }
     table
 };
 
 /// Updates an uncomplemented CRC-32C value with the supplied bytes.
 pub fn crc32c(mut crc: u32, bytes: &[u8]) -> u32 {
-    for byte in bytes {
-        crc = (crc >> 8) ^ CRC32C_TABLE[((crc ^ u32::from(*byte)) & 255) as usize];
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let low = u32::from_le_bytes(chunk[..4].try_into().unwrap()) ^ crc;
+        let high = u32::from_le_bytes(chunk[4..].try_into().unwrap());
+        crc = CRC32C_TABLE[7][(low & 255) as usize]
+            ^ CRC32C_TABLE[6][((low >> 8) & 255) as usize]
+            ^ CRC32C_TABLE[5][((low >> 16) & 255) as usize]
+            ^ CRC32C_TABLE[4][(low >> 24) as usize]
+            ^ CRC32C_TABLE[3][(high & 255) as usize]
+            ^ CRC32C_TABLE[2][((high >> 8) & 255) as usize]
+            ^ CRC32C_TABLE[1][((high >> 16) & 255) as usize]
+            ^ CRC32C_TABLE[0][(high >> 24) as usize];
+    }
+    for byte in remainder {
+        crc = (crc >> 8) ^ CRC32C_TABLE[0][((crc ^ u32::from(*byte)) & 255) as usize];
     }
     crc
 }
