@@ -246,7 +246,7 @@ impl<D: WriteAt> WritableExt4<D> {
                 let length = (block_size as usize - within).min(count - copied);
                 let mut raw = if let Some(raw) = transaction.data.get(&physical) {
                     raw.clone()
-                } else if new {
+                } else if new || (within == 0 && length == block_size as usize) {
                     vec![0; block_size as usize]
                 } else {
                     transaction.fs.read_data_block(physical)?
