@@ -356,7 +356,7 @@ impl<D: WriteAt> WritableExt4<D> {
             let limit = (self.fs.device.metadata_writeback_limit()
                 / self.fs.geometry.block_size() as usize)
                 .min(self.limits.metadata_blocks);
-            if self.journal.is_some() && limit != 0 {
+            if limit != 0 {
                 let added = metadata
                     .keys()
                     .filter(|block| !self.pending_metadata.contains_key(block))
