@@ -345,11 +345,7 @@ impl<D: WriteAt> WritableExt4<D> {
             if self.pending_frees && !data.is_empty() {
                 self.commit_pending()?;
             }
-            for (block, raw) in &data {
-                self.fs
-                    .device
-                    .write_all_at(self.fs.geometry.block_offset(*block)?, raw)?;
-            }
+            self.write_blocks(&data)?;
             if !data.is_empty() {
                 self.fs.device.flush()?;
             }
@@ -391,14 +387,34 @@ impl<D: WriteAt> WritableExt4<D> {
                 .journal
                 .commit(&self.fs.device, &self.fs.geometry, &state.map, metadata)?;
         } else {
-            for (block, raw) in metadata {
-                self.fs
-                    .device
-                    .write_all_at(self.fs.geometry.block_offset(*block)?, raw)?;
-            }
+            self.write_blocks(metadata)?;
             if !metadata.is_empty() {
                 self.fs.device.flush()?;
             }
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&self, blocks: &BTreeMap<u64, Vec<u8>>) -> Result<()> {
+        let mut entries = blocks.iter().peekable();
+        while let Some((&block, raw)) = entries.next() {
+            let mut last = block;
+            let mut bytes: Option<Vec<u8>> = None;
+            while let Some((&next, next_raw)) = entries.peek().copied() {
+                let length = bytes.as_ref().map_or(raw.len(), Vec::len);
+                if last.checked_add(1) != Some(next) || length + next_raw.len() > 65536 {
+                    break;
+                }
+                bytes
+                    .get_or_insert_with(|| raw.clone())
+                    .extend_from_slice(next_raw);
+                last = next;
+                entries.next();
+            }
+            self.fs.device.write_all_at(
+                self.fs.geometry.block_offset(block)?,
+                bytes.as_deref().unwrap_or(raw),
+            )?;
         }
         Ok(())
     }
