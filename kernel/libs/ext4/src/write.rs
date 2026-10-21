@@ -341,17 +341,17 @@ impl<D: WriteAt> WritableExt4<D> {
         let metadata = transaction.metadata;
         let data = transaction.data;
         let persist_fn = || -> Result<()> {
+            let limit = (self.fs.device.metadata_writeback_limit()
+                / self.fs.geometry.block_size() as usize)
+                .min(self.limits.metadata_blocks);
             // Commit frees before data can overwrite blocks still owned on disk.
             if self.pending_frees && !data.is_empty() {
                 self.commit_pending()?;
             }
             self.write_blocks(&data)?;
-            if !data.is_empty() {
+            if !data.is_empty() && limit == 0 {
                 self.fs.device.flush()?;
             }
-            let limit = (self.fs.device.metadata_writeback_limit()
-                / self.fs.geometry.block_size() as usize)
-                .min(self.limits.metadata_blocks);
             if limit != 0 {
                 let added = metadata
                     .keys()
